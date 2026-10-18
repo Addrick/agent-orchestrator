@@ -68,6 +68,9 @@ class TextEngine:
         # LocalProvider (providers.local) the local server's (DP-417).
         self.openai_client: Optional[Any] = None
         self.local_client: Optional[Any] = None
+        # Local clients replaced by a backend switch (DP-438), kept open for
+        # any turn still streaming through them; closed in aclose().
+        self.retired_local_clients: List[Any] = []
         self.anthropic_client: Optional[anthropic.AsyncAnthropic] = None
 
         # --- Google Client (matching original implementation) ---
@@ -120,6 +123,9 @@ class TextEngine:
         if self.local_client is not None:
             await self.local_client.close()
             self.local_client = None
+        for client in self.retired_local_clients:
+            await client.close()
+        self.retired_local_clients.clear()
 
     def _initialize_env(self) -> None:
         """Load API keys from .env file."""

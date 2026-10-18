@@ -12,7 +12,7 @@
    agent, or another browser shows up here too. That is the point — this line
    answers "what is the box doing", not "what is my tab doing".
    ============================================================ */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getKoboldPerf, getKoboldPrefill } from '../api/client'
 import type { KoboldPerf, KoboldPrefill } from '../types/contracts'
 
@@ -45,8 +45,12 @@ export interface PerfSnapshot {
 
 const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0 }
 
-export function useKoboldPerf(): PerfSnapshot {
+export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
   const [snap, setSnap] = useState<PerfSnapshot>(EMPTY)
+  // DP-438: bumped when the local backend is switched. Restarts the poll at
+  // once and drops the old box's sample — it would otherwise render under the
+  // new box until the next idle poll, up to IDLE_MS later.
+  const [epoch, setEpoch] = useState(0)
   // The cadence must react to the busy flag we just read, but rescheduling off
   // a state dep would tear down and rebuild the timer on every sample. Keep the
   // loop self-scheduling and read the flag from a ref.
@@ -103,9 +107,15 @@ export function useKoboldPerf(): PerfSnapshot {
       if (timer) clearTimeout(timer)
       ctl.abort()
     }
+  }, [epoch])
+
+  const refresh = useCallback(() => {
+    noSidecarUntilRef.current = 0 // the new box may have a sidecar the old one lacked
+    setSnap(EMPTY)
+    setEpoch((e) => e + 1)
   }, [])
 
-  return snap
+  return { ...snap, refresh }
 }
 
 /* ---- formatting (pure, exported for reuse/testing) ------------------- */

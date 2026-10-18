@@ -61,6 +61,20 @@ def _isolate_agy_agent_definition(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_local_backend():
+    """DP-438: the portal's local-backend switch is module state, so a switch
+    made by one test must not redirect another test's local URL. The saved
+    file needs no patch here: under APP_ENV=testing it defaults into
+    tests/test_data, and tests that Save point it at tmp_path themselves
+    (patching it globally would blind test_store_path_policy to the default)."""
+    from src.engine.providers import local_backend
+
+    local_backend._reset_for_tests()
+    yield
+    local_backend._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _disable_notes_clone_in_tests(monkeypatch):
     """Keep the shared notes clone out of the test tier.
 

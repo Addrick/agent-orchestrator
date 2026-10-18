@@ -2689,6 +2689,84 @@ def test_reasoning_event_is_a_reasoning_content_delta():
     assert payload["choices"][0]["delta"] == {"reasoning_content": "hmm"}
 
 
+# -------- DP-438: /api/v1/local_backend (runtime local-server switch) --------
+
+_PRESETS = ('[{"label": "ct101", "url": "http://10.0.0.72:5001", "progress_url": "http://10.0.0.72:5011"},'
+            ' {"label": "dt21", "url": "http://10.0.0.69:5001"}]')
+
+
+def _backend_adapter(monkeypatch, tmp_path):
+    monkeypatch.setattr(global_config, "LOCAL_BACKEND_FILE", str(tmp_path / "local_backend.json"))
+    monkeypatch.setenv("LOCAL_LLM_URL", "http://env-box:5001/v1")
+    monkeypatch.setattr(global_config, "LOCAL_LLM_PRESETS", _PRESETS)
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    return adapter, mm
+
+
+def test_local_backend_get_reports_env_and_presets(monkeypatch, tmp_path):
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/v1/local_backend").json()
+    assert body["url"] == "http://env-box:5001" and body["source"] == "env"
+    assert [p["label"] for p in body["presets"]] == ["ct101", "dt21"]
+    mm.close()
+
+
+def test_local_backend_put_save_delete_roundtrip(monkeypatch, tmp_path):
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    with TestClient(adapter.app) as client:
+        r = client.put("/api/v1/local_backend", json={"url": "10.0.0.69:5001"})
+        assert r.status_code == 200
+        assert (r.json()["url"], r.json()["label"], r.json()["source"]) == (
+            "http://10.0.0.69:5001", "dt21", "temporary")
+        assert client.post("/api/v1/local_backend/save").json()["source"] == "saved"
+        assert client.delete("/api/v1/local_backend").json()["source"] == "env"
+    mm.close()
+
+
+@pytest.mark.parametrize("body", [{}, {"url": ""}, {"url": 5}, {"url": "http://bad host"}, ["x"]])
+def test_local_backend_put_rejects_bad_body(monkeypatch, tmp_path, body):
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    with TestClient(adapter.app) as client:
+        r = client.put("/api/v1/local_backend", json=body)
+        assert r.status_code == 400
+        assert client.get("/api/v1/local_backend").json()["source"] == "env"
+    mm.close()
+
+
+def test_local_backend_switch_moves_perf_and_prefill(monkeypatch, tmp_path):
+    """After a switch the statusline must read the NEW box: perf from its
+    URL, and prefill from its own sidecar, never the env one."""
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    monkeypatch.setenv("KOBOLD_PROGRESS_URL", "http://env-box:5011")
+    seen = []
+
+    async def _fake_get(url, **kw):
+        seen.append(url)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        resp.json = lambda: {"idle": 1, "phase": "idle"}
+        return resp
+
+    monkeypatch.setattr(adapter._http, "get", _fake_get)
+    with TestClient(adapter.app) as client:
+        client.put("/api/v1/local_backend", json={"url": "http://10.0.0.72:5001"})
+        client.get("/api/extra/perf")
+        client.get("/api/extra/prefill")
+    assert seen == ["http://10.0.0.72:5001/api/extra/perf", "http://10.0.0.72:5011/progress"]
+    mm.close()
+
+
+def test_local_backend_put_malformed_json_is_400(monkeypatch, tmp_path):
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    with TestClient(adapter.app) as client:
+        r = client.put("/api/v1/local_backend", content=b"{not json",
+                       headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+    mm.close()
+
+
 def _portal_tree(tmp_path, src_mtime, dist_mtime):
     import os
     (tmp_path / "src").mkdir()

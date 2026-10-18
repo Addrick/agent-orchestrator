@@ -337,6 +337,16 @@ export interface KoboldPerf {
   idletime: number
 }
 
+/** DP-438 — GET/PUT/DELETE /api/v1/local_backend: which server `model local`
+ *  talks to. `temporary` is lost on restart; `saved` survives it; `env` and
+ *  `default` are LOCAL_LLM_URL / the config default. */
+export interface LocalBackendState {
+  url: string
+  label: string | null
+  source: 'temporary' | 'saved' | 'env' | 'default'
+  presets: { label: string | null; url: string }[]
+}
+
 // ---- INFRA panel (DP-439) ---------------------------------------------
 // GET /api/v1/infra/status — the proxmox tools' own result dicts, one per
 // section; each is `status: 'ok'` with its fields or `status: 'error'` with a
