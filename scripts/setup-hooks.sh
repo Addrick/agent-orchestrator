@@ -12,6 +12,8 @@
 #   - pre-commit:    writes .claude/.memory_update_pending (memory-update nudge)
 #   - post-checkout: seeds gitignored .env/.env.test + builds the per-worktree
 #                    .venv (uv) on new `git worktree add`
+#   - post-merge:    rebuilds the web UI dist/ when a merge touches derpr_ui/
+#                    (post-rewrite forwards `pull --rebase`) (DP-436)
 #   - pre-push:      runs the local CI gate (scripts/ci_check.py, ~90s); skip
 #                    with `git push --no-verify` (DP-250)
 #

@@ -30,7 +30,12 @@ def _is_renderable(role: Optional[str], content: str, reasoning: str) -> bool:
 def _parse_tool_context(raw: Any) -> Optional[Any]:
     """tool_context is stored as a JSON string (or None). Return the parsed
     structure for the transcript, or None when absent/unparseable.
-    Transforms raw OpenAI message dicts into the frontend ToolContext shape."""
+    Transforms raw OpenAI message dicts into the frontend ToolContext shape.
+
+    A blob sealed with per-step reasoning (DP-437) gives every card a
+    `reasoning` key: that step's thinking on its first card, None on the
+    rest. Older blobs had it stripped, so their cards get no key, because a
+    missing value there means "unknown", not "did not think"."""
     if not raw:
         return None
     try:
@@ -47,6 +52,8 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
             if not isinstance(msg, dict):
                 continue
             if msg.get("role") == "assistant" and "tool_calls" in msg:
+                stepwise = "reasoning_content" in msg
+                step_reasoning = (msg.get("reasoning_content") or "").strip() or None
                 for call in msg.get("tool_calls", []):
                     if not isinstance(call, dict):
                         continue
@@ -71,6 +78,9 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
                             "result": None,
                             "error": None,
                         }
+                        if stepwise:
+                            contexts[call_id]["reasoning"] = step_reasoning
+                            step_reasoning = None
             elif msg.get("role") == "tool":
                 call_id = msg.get("tool_call_id")
                 if call_id and call_id in contexts:
@@ -97,6 +107,40 @@ def _parse_tool_context(raw: Any) -> Optional[Any]:
         return None
 
 
+def _place_reasoning(reasoning: Optional[str], tools: Optional[Any]) -> Optional[str]:
+    """Split a turn's stored reasoning across its tool cards (DP-437).
+
+    `reasoning_content` on the row is every step's thinking joined in order,
+    while each step's own copy rides on its first card. Peel those copies
+    off the front; what is left came after the last tool result and is
+    returned for the chunk, which the portal renders below the cards.
+
+    When the row cannot be split (a blob sealed before DP-437, or a row whose
+    text no longer starts with the steps' text), the whole value goes on
+    the first card. That shows it above the tools, as before.
+    """
+    cards = [t for t in tools or [] if isinstance(t, dict)]
+    if not cards:
+        return reasoning
+    if not reasoning:
+        return None  # nothing to peel; each card keeps its own step, if any
+    if any("reasoning" in card for card in cards):
+        rest = reasoning
+        for card in cards:
+            step = card.get("reasoning")
+            if not step:
+                continue
+            if not rest.startswith(step):
+                break
+            rest = rest[len(step):].lstrip()
+        else:
+            return rest or None
+        for card in cards:
+            card["reasoning"] = None
+    cards[0]["reasoning"] = reasoning
+    return None
+
+
 def build_transcript(
     raw_history: List[Dict[str, Any]],
     *,
@@ -112,8 +156,8 @@ def build_transcript(
           "role": "user|assistant",
           "content": "...",               # the reply alone; reasoning is separate
           "ephemeral": <bool>,            # true => not yet persisted
-          "reasoning": "<str|null>",
-          "tool_context": [...]|null,
+          "reasoning": "<str|null>",     # after the tools, when there are any
+          "tool_context": [...]|null,    # each card: its step's `reasoning`
           "has_versions": <bool>,         # regen/edit archives exist
         }
 
@@ -144,13 +188,14 @@ def build_transcript(
 
         iid = msg.get("interaction_id")
         iid = iid if isinstance(iid, int) else None
+        tools = _parse_tool_context(msg.get("tool_context"))
         chunks.append({
             "interaction_id": iid,
             "role": role,
             "content": content,
             "ephemeral": False,
-            "reasoning": reasoning or None,
-            "tool_context": _parse_tool_context(msg.get("tool_context")),
+            "reasoning": _place_reasoning(reasoning or None, tools),
+            "tool_context": tools,
             "has_versions": iid in versions if iid is not None else False,
         })
 

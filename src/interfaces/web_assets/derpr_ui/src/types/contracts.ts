@@ -13,6 +13,9 @@ export interface ToolContext {
   arguments: Record<string, unknown>
   result: string | null
   error: string | null
+  // The thinking that led to this call, on the first card of each step
+  // (DP-437). Rendered just above the card, in the order the model saw it.
+  reasoning?: string | null
 }
 
 export interface Chunk {
@@ -342,4 +345,63 @@ export interface LocalBackendState {
   label: string | null
   source: 'temporary' | 'saved' | 'env' | 'default'
   presets: { label: string | null; url: string }[]
+}
+
+// ---- INFRA panel (DP-439) ---------------------------------------------
+// GET /api/v1/infra/status — the proxmox tools' own result dicts, one per
+// section; each is `status: 'ok'` with its fields or `status: 'error'` with a
+// message, independently.
+
+export interface InfraError {
+  status: 'error'
+  message?: string
+}
+
+export interface InfraGuest {
+  vmid: string
+  name: string
+  kind: 'ct' | 'vm'
+  status: string
+  lock: string
+}
+
+export interface InfraGpu {
+  card: string
+  vram_total_mib: number
+  vram_used_mib: number
+  vram_free_mib: number
+}
+
+export interface InfraModel {
+  name: string
+  unit: string
+  state: string
+  tier: 'hot' | 'cold' | string
+  pinned?: boolean
+  contextsize?: number
+  quantkv?: number
+}
+
+export type InfraPve = { status: 'ok'; uptime?: string; guests: InfraGuest[]; inventory_errors?: string[] } | InfraError
+export type InfraGpuStatus = { status: 'ok'; host_vmid?: string; gpus: InfraGpu[]; errors?: string[] } | InfraError
+export type InfraModels = { status: 'ok'; host_vmid?: string; models: InfraModel[]; note?: string } | InfraError
+
+export interface InfraStatus {
+  enabled: boolean
+  pve: InfraPve
+  gpu: InfraGpuStatus
+  models: InfraModels
+}
+
+export type InfraAction =
+  | { action: 'start_guest' | 'stop_guest' | 'reboot_guest'; vmid: string; kind: 'ct' | 'vm' }
+  | { action: 'set_active_model'; name: string }
+  | { action: 'reboot_node' }
+
+/** The handler's own result dict — `status` plus whatever the tool returned. */
+export interface InfraActionResult {
+  status: string
+  message?: string
+  state?: string
+  [k: string]: unknown
 }

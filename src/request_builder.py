@@ -9,7 +9,6 @@ projection. ChatSystem's kernel calls through thin delegates so live submits
 and the S5 parity inspector share this single code path by construction.
 """
 
-import json
 import logging
 import re
 from collections import OrderedDict
@@ -28,7 +27,7 @@ from src.memory.memory_manager import MemoryManager
 from src.memory.scope_tags import recall_scope_tags
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
-from src.tools.tool_loop import build_wire_messages
+from src.tools.tool_loop import build_wire_messages, replayable_tool_context
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.utils.message_utils import strip_vertex_links
@@ -206,7 +205,7 @@ class RequestBuilder:
                         # tool context of every row that follows a park — the
                         # exact memory this feature exists to keep.
                         if final_history and final_history[-1].get('role') in ('user', 'tool'):
-                            final_history.extend(json.loads(tool_context_json))
+                            final_history.extend(replayable_tool_context(tool_context_json))
                         else:
                             logger.debug(
                                 "Dropping orphaned tool_context for %s: no "

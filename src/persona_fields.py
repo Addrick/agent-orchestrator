@@ -371,7 +371,8 @@ def _describe_origin_allowlist(persona: Persona) -> str:
 def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
     """`set origin_allowlist <entry ...|json list|none>` — DP-330.
 
-    Entries use the OPERATOR_ALLOWLIST form `server_id[/channel_id[/author_id]]`.
+    Entries use the OPERATOR_ALLOWLIST form `server_id[/channel_id[/author_id]]`,
+    plus the `portal` keyword (DP-439: the operator-token portal).
     Deliberately NOT patchable: this field decides who may reach the persona at
     all, so the operator-gated dev command is its only mutation surface (same
     reasoning as `set explicit_overrides`).
@@ -389,7 +390,7 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
     """
     if len(args) < 2:
         return (
-            "Usage: set origin_allowlist <server_id[/channel_id[/author_id]] ...|"
+            "Usage: set origin_allowlist <server_id[/channel_id[/author_id]]|portal ...|"
             "json list|none>. Empty means unrestricted.",
             False,
         )
@@ -418,7 +419,7 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
         # only a Discord origin can deliver it, and not this one.
         return (
             f"⚠️ origin_allowlist for {name} set to {raw!r}, but NONE of it "
-            "parsed as 'server_id[/channel_id[/author_id]]'. The persona is "
+            "parsed as 'server_id[/channel_id[/author_id]]' or 'portal'. The persona is "
             f"now UNREACHABLE from every origin. Fix it by editing {name}'s "
             "`origin_allowlist` in data/personas.json and restarting — this "
             "command can no longer reach the persona to undo itself.",
@@ -428,7 +429,7 @@ def _set_origin_allowlist(args: List[str], persona: Persona) -> Tuple[Optional[s
         shown = ', '.join(stored)
         return (
             f"⚠️ origin_allowlist for {name} set to {raw!r}, but some entries "
-            "are not 'server_id[/channel_id[/author_id]]' and were dropped. "
+            "are not 'server_id[/channel_id[/author_id]]' or 'portal' and were dropped. "
             f"In force: {shown}.",
             mutated,
         )

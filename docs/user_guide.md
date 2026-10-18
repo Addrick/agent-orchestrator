@@ -125,6 +125,17 @@ Without the sidecar (and on a non-Strata backend) the line degrades silently to 
 
 If the backend stops answering, the line turns amber and reads `backend unreachable` while keeping the last known numbers — a dropped poll is not evidence that the counters changed. This covers KoboldCPP being down, not just the engine: a backend that cannot be reached is reported as unreachable rather than as an idle backend with empty counters. The live bar and decode chip disappear for the duration — last-known is not live, and a frozen bar next to an "unreachable" label would contradict itself.
 
+**INFRA panel (DP-439):** the nav rail's **INFRA** dock opens an operator view of the Proxmox node. It is the same machinery `hypr` drives, called directly — the panel runs the existing `proxmox` tools (`pve_status`, `gpu_status`, `list_models` to read; `start_guest`, `stop_guest`, `reboot_guest`, `set_active_model`, `reboot_node` to act), so a button and a `hypr` request can never disagree about what a guest is called or which models are switchable. It shows:
+
+- **Host strip** — node uptime and load, and VRAM used / total on each GPU card, with a refresh button and the time of the last read. Reads refresh every 15 s while the view is open and stop when you leave it.
+- **Guests** — every container and VM with its vmid, name, kind and status (and a lock, if Proxmox reports one). A running guest offers **stop** and **reboot**; a stopped one offers **start**.
+- **Models** — every model `list_models` reports as switchable on `:5001`, with its tier (`hot` / `cold`), its state, and which one is active. Any other row offers **activate**. A cold model promotes first, so activation returns `promoting` and takes minutes; the confirm prompt says so, and hovering the tier pill explains it.
+- **reboot node** — at the foot of the guest list, separate from the per-guest buttons.
+
+Every action needs the operator token (it is a `POST`, so the [control plane](#portal-control-plane-dp-277) gates it), and every action asks for an inline confirm naming exactly what it will do before it runs — `stop_guest` is a hard power-off, `set_active_model` takes `:5001` down while the new model loads, and stopping the guest that hosts derpr stops this portal. The click **is** the approval: unlike a `hypr` request, a panel action is not parked, because the human who would approve the park is the one who clicked. Each action is recorded in the audit log (`infra_action`, with the tool, its arguments and the result status). Without a token the panel is read-only and the buttons are disabled with a hint to paste one.
+
+If Proxmox access is disabled (`PVE_TOOLS_ENABLED` unset, or no host key mounted) the panel says so instead of showing empty tables. Like every portal read, the panel's status route is open to anyone who can reach `:5003` — see the table under [Portal Control Plane](#portal-control-plane-dp-277).
+
 **Slash dev-commands:** a portal message starting with `/` is routed to the dev-command endpoint instead of the LLM — e.g. `/set temperature 0.8` or `/what models` runs the same command surface Discord uses, and the response renders as a dismissible inline row (mutating commands also refresh the Inspector). The composer hints this live (`leading / = dev-command`); there is currently no escape for sending a literal chat message that starts with `/` (the draft is trimmed before the check).
 
 **LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would prepend to your message — re-fetched as you type (debounced) so the preview mirrors the per-message recall recomputed at submit.
@@ -135,7 +146,7 @@ If the backend stops answering, the line turns amber and reads `backend unreacha
 
 `model local` talks to the server at `LOCAL_LLM_URL` (or whichever server the statusline's switch selected, DP-438) over the OpenAI chat-completions API (DP-417), and that server applies the model's own chat template and parses its tool calls. Strata does this out of the box. **A KoboldCPP server must be started with both `--jinja` and `--jinja_tools`** (`"jinja": true, "jinja_tools": true` in a `.kcpps` file): with `--jinja` alone KoboldCPP falls back to its own built-in format for every request that carries tools — nearly all of derpr's — and without either flag it uses that format for everything. Units written by `install_model` include both flags. Stopping a reply (the portal's stop button) closes the connection, and both servers abort the generation on disconnect. The portal statusline tracks local processing metrics live for both KoboldCPP and Strata (DP-417, DP-433, DP-435).
 
-**Thinking models (DP-434).** A model's thinking is kept apart from its reply. The portal shows it in the collapsible reasoning fold, live and after reload; Discord and other chat surfaces get the reply alone (or the thinking, if the model ran out of room before answering). Older messages that stored their thinking inside the reply are converted once at startup and look the same. During one reply the model still sees its own thinking from earlier tool-call steps, but once the reply is done its thinking is never sent back to it on later turns, and is never retained to long-term memory.
+**Thinking models (DP-434).** A model's thinking is kept apart from its reply. The portal shows it in collapsible reasoning folds, live and after reload, in the order the model produced it (DP-437): when a reply uses tools, each step's thinking gets its own fold just above the tool calls it led to, and any thinking after the last tool result sits below the tool cards, above the reply. The portal follows the order the model saw rather than merging steps for neatness. Replies saved before DP-437 still show all their thinking in one fold above the tools; Discord and other chat surfaces get the reply alone (or the thinking, if the model ran out of room before answering). Older messages that stored their thinking inside the reply are converted once at startup and look the same. During one reply the model still sees its own thinking from earlier tool-call steps, but once the reply is done its thinking is never sent back to it on later turns, and is never retained to long-term memory. The portal still shows that earlier thinking. This is the one intentional difference between what you see and what the model sees on later turns.
 
 ### Memory imports panel (DP-292)
 
@@ -185,10 +196,16 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 
 - **Empty (the default) means unrestricted** — every persona that never sets the
   field behaves exactly as before.
-- A persona **with** an allowlist is Discord-only: entries are guild ids, and no
-  other transport has a gateway-asserted one. DMs, the web portal, email, ticket
-  bodies and agent-initiated turns are all refused with `Persona '<name>' is not
+- A persona **with** an allowlist admits only what it lists. Guild-id entries
+  admit Discord; the one non-Discord entry is the literal keyword **`portal`**
+  (DP-439), which admits the web portal **only when the request carries a valid
+  operator token** — the token is the portal's equivalent of a gateway-asserted
+  guild. An anonymous portal caller is refused even when `portal` is listed.
+  Everything else — DMs, email, ticket bodies, agent-initiated turns, and the
+  portal without `portal` in the list — is refused with `Persona '<name>' is not
   available from this channel.` The refusal never says what the allowlist holds.
+  `portal` is matched only as a whole entry: `portal/123` is a malformed entry and
+  is dropped.
 - The gate sits above dev-command handling, so a disallowed origin cannot address
   a restricted persona with `what prompt` either — not on Discord, not from the
   portal's dev-command surface. It does **not** cover the portal's unauthenticated
@@ -209,7 +226,7 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 > The command always targets the persona you are addressing — there is no
 > cross-persona form, so running it against a *different* persona clears that
 > persona's restriction and leaves the locked-out one exactly as it was. And
-> because an allowlisted persona is Discord-only, setting one from the portal
+> unless the list you set includes `portal`, setting one from the portal
 > immediately locks the portal's own dev-command route out of it.
 >
 > Recovery is a **Discord origin the allowlist admits**, or editing that
@@ -632,9 +649,16 @@ hypr set origin_allowlist <your_guild_id>
 It ships with `origin_allowlist: []` (unrestricted) because the shipped file is
 public and the guild id is yours — fill it in on your own instance. The empty
 list is kept on save, so the key stays visible in your `data/personas.json` as a
-reminder that the knob exists. Note the trade-off: an allowlisted `hypr` is
-Discord-only, so its parked actions can only be approved in Discord, not from the
-portal.
+reminder that the knob exists. To use `hypr` from the web portal as well, add the
+`portal` keyword (DP-439) — it admits only operator-token requests:
+
+```
+hypr set origin_allowlist <your_guild_id> portal
+```
+
+Without `portal`, an allowlisted `hypr` is Discord-only and its parked actions
+can only be approved in Discord. The portal's [INFRA panel](#bespoke-derpr-portal-derpr)
+runs the same tools without going through `hypr` at all.
 
 Once present, `hypr` is the persona to talk to about the box itself, from **any**
 interface that routes to a persona (Discord, the web portal, `/derpr`) — unless
@@ -878,6 +902,7 @@ The web portal (`:5003`) is the capability control surface — its persona/tools
 > | `GET /api/v1/session/{p}/ltm_block` | long-term-memory retrieval for a **caller-supplied query** — i.e. arbitrary search over stored memories |
 > | `GET /api/v1/interaction/{id}/versions` | per-message edit history |
 > | `GET /api/v1/memory/banks…` | Hindsight bank and document listings |
+> | `GET /api/v1/infra/status` | the Proxmox node's guest inventory, VRAM and switchable models (DP-439) — and each call runs SSH reads against the node |
 >
 > There is no per-persona check on these, so a persona restricted with an
 > [origin allowlist](#commands) is as readable as any other. **The allowlist

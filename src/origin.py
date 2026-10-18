@@ -82,6 +82,31 @@ def parse_operator_allowlist_entry(entry: str) -> Optional[Tuple[str, str, str]]
     return (server, channel, author)
 
 
+#: DP-439: the one non-Discord persona-allowlist entry. Authored as the bare
+#: keyword ``portal``; parsed to a tuple ``parse_operator_allowlist_entry`` can
+#: never produce (it fills a missing channel with ``*``, never ``""``), so no
+#: guild id can collide with it and it never matches a Discord origin.
+PORTAL_ORIGIN_KEYWORD = "portal"
+PORTAL_ORIGIN_ENTRY: Tuple[str, str, str] = (PORTAL_ORIGIN_KEYWORD, "", "")
+
+
+def parse_origin_allowlist_entry(entry: str) -> Optional[Tuple[str, str, str]]:
+    """Parse ONE persona ``origin_allowlist`` entry (DP-330/DP-439).
+
+    The operator-allowlist grammar plus the ``portal`` keyword. ``portal`` is
+    a whole-entry match only: ``portal/123`` is refused rather than read as a
+    guild named "portal", so a typo cannot become a grant that looks like one.
+    ``OPERATOR_ALLOWLIST`` deliberately does not accept the keyword — portal
+    operator status comes from the control token, not from that list.
+    """
+    text = entry.strip()
+    if text.lower() == PORTAL_ORIGIN_KEYWORD:
+        return PORTAL_ORIGIN_ENTRY
+    if text.split("/", 1)[0].strip().lower() == PORTAL_ORIGIN_KEYWORD:
+        return None
+    return parse_operator_allowlist_entry(text)
+
+
 def parse_operator_allowlist(raw: str) -> List[Tuple[str, str, str]]:
     """Parse ``OPERATOR_ALLOWLIST`` into (server_id, channel_id, author_id)
     tuples. Entry format: ``server_id[/channel_id[/author_id]]`` separated by
@@ -134,8 +159,15 @@ def is_origin_allowed(
     An **empty allowlist is unrestricted** — every persona that never set the
     field is unchanged by construction.
 
-    A non-empty allowlist is Discord-only: entries are guild ids, and no other
-    transport has a gateway-asserted one, so portal / gmail / zammad /
+    DP-439: a ``portal`` entry admits the web portal, but only an origin the
+    adapter marked ``operator`` — i.e. one that presented a valid
+    ``DERPR_CONTROL_TOKEN``. That flag is the portal's transport-authenticated
+    fact, the counterpart of Discord's gateway-asserted guild id; the caller-
+    supplied ``channel_id``/``author_id`` on a portal origin carry no authority
+    and are not consulted.
+
+    Otherwise a non-empty allowlist is Discord-only: entries are guild ids, and
+    no other transport has a gateway-asserted one, so portal / gmail / zammad /
     internal-agent turns and Discord DMs all fail closed. The transport check
     is belt-and-braces on top of that: ``is_discord_operator`` already returns
     False without a ``server_id``, and today no non-Discord adapter populates
@@ -145,6 +177,8 @@ def is_origin_allowed(
     """
     if not allowlist:
         return True
+    if origin.transport == "portal":
+        return origin.operator and PORTAL_ORIGIN_ENTRY in allowlist
     if origin.transport != "discord":
         return False
     return is_discord_operator(

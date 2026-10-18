@@ -45,6 +45,7 @@ from src.chat_system import (
     PendingConfirmationEvent, ReasoningEvent, ResponseType, TokenEvent, ToolCallResultEvent,
     ToolCallStartEvent,
 )
+from src.interfaces import infra_panel
 from src.interfaces.transcript import build_transcript
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.memory.lite_save import (
@@ -100,6 +101,46 @@ _PERF_TIMEOUT_S = 5.0
 #: Strata `finish` → KCPP `stop_reason` (0 out of tokens, 1 EOS, 2 stop
 #: sequence, 3 aborted). A stop sequence and EOS both report "stop" on Strata.
 _STRATA_FINISH_TO_STOP_REASON = {"length": 0, "stop": 1, "tool_calls": 1}
+
+
+#: Build inputs whose change means dist/ must be rebuilt (DP-436).
+_PORTAL_BUILD_INPUTS = ("src", "index.html", "package.json", "vite.config.ts")
+
+
+def _warn_if_portal_stale(ui_root: str, index_html: str) -> bool:
+    """Log a warning when a portal build input is newer than the built
+    ``dist/index.html``. dist/ is gitignored, so a pull can update the source
+    without the bundle; the .githooks/post-merge hook rebuilds it, and this is
+    the backstop for checkouts the hook did not cover. Never builds — the
+    engine must boot without Node. Returns True if stale."""
+    try:
+        built = os.path.getmtime(index_html)
+    except OSError:
+        return False  # not built at all: /derpr serves its own hint
+    newest, newest_path = 0.0, ""
+    for name in _PORTAL_BUILD_INPUTS:
+        path = os.path.join(ui_root, name)
+        if os.path.isfile(path):
+            candidates = [path]
+        else:
+            candidates = [
+                os.path.join(d, f) for d, _, fs in os.walk(path) for f in fs
+            ]
+        for c in candidates:
+            try:
+                m = os.path.getmtime(c)
+            except OSError:
+                continue
+            if m > newest:
+                newest, newest_path = m, c
+    if newest <= built:
+        return False
+    logger.warning(
+        "DERPR Portal bundle is older than its source (%s); run "
+        "'npm run build' in %s",
+        os.path.relpath(newest_path, ui_root), ui_root,
+    )
+    return True
 
 
 def _perf_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
@@ -629,6 +670,7 @@ class KoboldEngineAdapter:
             os.path.dirname(__file__), "web_assets", "derpr_ui", "dist"
         )
         derpr_index = os.path.join(derpr_dist, "index.html")
+        _warn_if_portal_stale(os.path.dirname(derpr_dist), derpr_index)
 
         @self.app.get("/derpr")
         async def get_derpr_portal() -> HTMLResponse:
@@ -1309,6 +1351,34 @@ class KoboldEngineAdapter:
                 {"rejected": rejected, "unknown": unknown},
             )
             return {"result": "success", "rejected_fields": rejected, "unknown_fields": unknown}
+
+        @self.app.get("/api/v1/infra/status")
+        async def infra_status() -> Any:
+            """DP-439 INFRA panel reads: pve_status + gpu_status + list_models,
+            each section ok or error on its own. Open like every GET (DP-333)."""
+            sections = await infra_panel.read_status(self._tool_manager)
+            return {"enabled": bool(global_config.PVE_TOOLS_ENABLED), **sections}
+
+        @self.app.post("/api/v1/infra/action")
+        async def infra_action(request: Request) -> Any:
+            """DP-439 INFRA panel action. Operator-token gated by the control-plane
+            middleware; the operator's click is the approval, so it runs directly
+            instead of parking (see src/interfaces/infra_panel.py)."""
+            try:
+                body = await request.json()
+            except (json.JSONDecodeError, ValueError):
+                return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+            action, args, error = infra_panel.validate_action(body)
+            if error is not None or action is None:
+                return JSONResponse(status_code=400, content={"error": error})
+            logger.info("INFRA panel action %s %s", action, args)
+            result = await infra_panel.run_action(self._tool_manager, action, args)
+            await self._audit_control_change(
+                "infra_action", args.get("name") or args.get("vmid") or "node",
+                {"action": action, "args": args},
+                {"status": result.get("status"), "target": result.get("target")},
+            )
+            return result
 
         @self.app.get("/api/extra/perf")
         async def get_perf() -> Any:

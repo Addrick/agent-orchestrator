@@ -875,6 +875,53 @@ def test_origin_allowlist_refuses_dms_and_non_discord_transports(base_persona_ar
         _origin(transport="portal", server="12345")) is False
 
 
+def test_origin_allowlist_portal_keyword_needs_operator(base_persona_args):
+    """DP-439: `portal` admits the web portal, but only an operator-token
+    origin. The caller-supplied channel/author/server on a portal origin carry
+    no authority, so an anonymous portal call is refused with it listed."""
+    p = Persona(**base_persona_args, origin_allowlist=["12345", "portal"])
+    assert p.get_origin_allowlist() == ["12345", "portal"]
+    assert p.origin_allowlist_is_malformed() is False
+    assert p.is_addressable_from(
+        _origin(transport="portal", channel="web_ui", operator=True)) is True
+    assert p.is_addressable_from(
+        _origin(transport="portal", channel="web_ui", operator=False)) is False
+    assert p.is_addressable_from(
+        _origin(transport="portal", server="12345", operator=False)) is False
+    # Discord still gated by guild; the keyword grants nothing there.
+    assert p.is_addressable_from(_origin(server="12345")) is True
+    assert p.is_addressable_from(_origin(server="portal")) is False
+    # Other non-Discord transports stay refused even when operator-flagged.
+    for transport in ("gmail", "zammad", "internal", "test"):
+        assert p.is_addressable_from(
+            _origin(transport=transport, operator=True)) is False
+
+
+def test_origin_allowlist_portal_only_is_not_unrestricted(base_persona_args):
+    """A list of just `portal` closes Discord — it is a restriction, not a
+    blank, and it parsed, so it is neither malformed nor unreachable."""
+    p = Persona(**base_persona_args, origin_allowlist=["PORTAL"])
+    assert p.origin_allowlist_is_unreachable() is False
+    assert p.is_addressable_from(_origin(server="12345")) is False
+    assert p.is_addressable_from(_origin(transport="portal", operator=True)) is True
+
+
+def test_origin_allowlist_portal_with_path_is_malformed(base_persona_args):
+    """`portal/123` is not a guild called "portal" and not the keyword."""
+    p = Persona(**base_persona_args, origin_allowlist=["portal/123"])
+    assert p.origin_allowlist_is_unreachable() is True
+    assert p.is_addressable_from(_origin(transport="portal", operator=True)) is False
+    assert p.is_addressable_from(_origin(server="portal", channel="123")) is False
+
+
+def test_operator_allowlist_does_not_honour_portal_keyword():
+    """The keyword is persona-allowlist grammar only; OPERATOR_ALLOWLIST still
+    parses it as an (unmatchable) server id, never as the portal sentinel."""
+    from src.origin import PORTAL_ORIGIN_ENTRY, parse_operator_allowlist
+
+    assert PORTAL_ORIGIN_ENTRY not in parse_operator_allowlist("portal")
+
+
 def test_origin_allowlist_narrows_to_channel_and_author(base_persona_args):
     p = Persona(**base_persona_args, origin_allowlist=["12345/678", "999/*/42"])
     assert p.is_addressable_from(_origin(server="12345", channel="678")) is True

@@ -1,0 +1,6 @@
+#!/bin/sh
+# `git pull --rebase` fires post-rewrite, not post-merge. ORIG_HEAD is the
+# pre-rebase tip, so the post-merge web UI rebuild (DP-436) works unchanged.
+# Amends ($1 = amend) bring in nothing from upstream and are skipped.
+[ "$1" = "rebase" ] || exit 0
+exec "$(dirname "$0")/post-merge"
