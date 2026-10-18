@@ -40,6 +40,9 @@ import type {
   UploadResult,
   KoboldPerf,
   KoboldPrefill,
+  InfraStatus,
+  InfraAction,
+  InfraActionResult,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -505,6 +508,33 @@ export async function ingestMemoryPath(
   )
   if (!r.ok) return memErr(r, 'ingest path')
   return (await r.json()) as Record<string, unknown>
+}
+
+// ---- INFRA panel (DP-439) -------------------------------------------
+// Not routed through `liveOr`: a mocked node inventory would be a lie about
+// real machines. Errors propagate; the panel keeps its last good read.
+
+export async function getInfraStatus(): Promise<InfraStatus> {
+  return getJSON<InfraStatus>('/api/v1/infra/status')
+}
+
+export async function runInfraAction(action: InfraAction): Promise<InfraActionResult> {
+  const r = await fetch(`${BASE}/api/v1/infra/action`, {
+    method: 'POST',
+    headers: withAuth({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(action),
+  })
+  let body: unknown = null
+  try {
+    body = await r.json()
+  } catch {
+    /* non-JSON error body */
+  }
+  if (!r.ok) {
+    const msg = (body as { error?: string } | null)?.error ?? `HTTP ${r.status}`
+    throw new Error(`infra action failed: ${msg}`)
+  }
+  return body as InfraActionResult
 }
 
 // ---- backend perf (statusline) ---------------------------------------
