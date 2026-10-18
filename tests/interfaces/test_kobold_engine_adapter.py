@@ -2756,3 +2756,12 @@ def test_local_backend_switch_moves_perf_and_prefill(monkeypatch, tmp_path):
         client.get("/api/extra/prefill")
     assert seen == ["http://10.0.0.72:5001/api/extra/perf", "http://10.0.0.72:5011/progress"]
     mm.close()
+
+
+def test_local_backend_put_malformed_json_is_400(monkeypatch, tmp_path):
+    adapter, mm = _backend_adapter(monkeypatch, tmp_path)
+    with TestClient(adapter.app) as client:
+        r = client.put("/api/v1/local_backend", content=b"{not json",
+                       headers={"Content-Type": "application/json"})
+        assert r.status_code == 400
+    mm.close()

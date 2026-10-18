@@ -1,10 +1,12 @@
 /* DP-438 — switch which server `model local` talks to, from the statusline.
  *
  * Apply is temporary (lost on engine restart); Save persists the applied URL;
- * Reset drops both and returns to LOCAL_LLM_URL. Turns already streaming finish
- * on the old server. The three writes need the operator token.
+ * Reset drops both and returns to LOCAL_LLM_URL. A request already streaming
+ * finishes on the old server; a tool-calling reply's next step goes to the new
+ * one. The three writes need the operator token.
  */
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   applyLocalBackend,
   getLocalBackend,
@@ -30,13 +32,25 @@ const SOURCE_HINT: Record<LocalBackendState['source'], string> = {
   default: 'config default (LOCAL_LLM_URL unset)',
 }
 
+/** Re-read cadence. The chip must not outlive the state it names: an engine
+ *  restart drops an unsaved switch, and another tab can switch too — a portal
+ *  tab outlives both. Also the retry when the engine was down at page load. */
+const STATE_REFRESH_MS = 30_000
+
 export function LocalBackendSwitch({ onSwitched }: { onSwitched: () => void }) {
   const [state, setState] = useState<LocalBackendState | null>(null)
   const [open, setOpen] = useState(false)
 
-  useEffect(() => {
-    getLocalBackend().then(setState).catch(() => setState(null))
+  // A failed read keeps the last known state; the next tick retries.
+  const load = useCallback(() => {
+    getLocalBackend().then(setState).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, STATE_REFRESH_MS)
+    return () => clearInterval(t)
+  }, [load])
 
   if (!state) return null
   return (
@@ -44,21 +58,28 @@ export function LocalBackendSwitch({ onSwitched }: { onSwitched: () => void }) {
       <button
         className="sl-chip sl-switch"
         title={`local model server: ${state.url} (${SOURCE_HINT[state.source]}) — click to switch`}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          load()
+          setOpen(true)
+        }}
       >
         ⇄ <b>{shortName(state)}</b>
         {state.source === 'temporary' && <span className="sl-sub">· unsaved</span>}
       </button>
-      {open && (
-        <LocalBackendModal
-          state={state}
-          onChange={(s, switched) => {
-            setState(s)
-            if (switched) onSwitched()
-          }}
-          onClose={() => setOpen(false)}
-        />
-      )}
+      {/* Portaled: inside .statusline the dialog would inherit its nowrap /
+          10.5px text and sit in its role="status" live region. */}
+      {open &&
+        createPortal(
+          <LocalBackendModal
+            state={state}
+            onChange={(s, switched) => {
+              setState(s)
+              if (switched) onSwitched()
+            }}
+            onClose={() => setOpen(false)}
+          />,
+          document.body,
+        )}
     </>
   )
 }
@@ -76,12 +97,15 @@ function LocalBackendModal({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const run = async (op: () => Promise<LocalBackendState>) => {
+  // `switched` is per operation, not "did the URL change": apply/reset can keep
+  // the URL and still change its sidecar (typed URL → preset, temporary → env),
+  // and the perf poll's no-sidecar snooze must be cleared for that too.
+  const run = async (op: () => Promise<LocalBackendState>, switched: boolean) => {
     setBusy(true)
     setError(null)
     try {
       const next = await op()
-      onChange(next, next.url !== state.url)
+      onChange(next, switched)
       setUrl(next.url)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -89,7 +113,7 @@ function LocalBackendModal({
       setBusy(false)
     }
   }
-  const apply = () => run(() => applyLocalBackend(url))
+  const apply = () => run(() => applyLocalBackend(url), true)
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -146,8 +170,8 @@ function LocalBackendModal({
               </div>
             )}
             <span className="modal-hint">
-              Apply switches now, until the engine restarts. Save keeps it across restarts. Replies already
-              streaming finish on the old server.
+              Apply switches now, until the engine restarts. Save keeps it across restarts. A request already
+              streaming finishes on the old server; a reply mid-way through tool calls sends its next step to the new one.
             </span>
           </div>
         </div>
@@ -158,7 +182,7 @@ function LocalBackendModal({
           <button
             className="mini"
             title="drop the applied and saved server; use LOCAL_LLM_URL"
-            onClick={() => run(resetLocalBackend)}
+            onClick={() => run(resetLocalBackend, true)}
             disabled={busy || state.source === 'env' || state.source === 'default'}
           >
             reset
@@ -166,7 +190,7 @@ function LocalBackendModal({
           <button
             className="mini"
             title="keep the applied server across restarts"
-            onClick={() => run(saveLocalBackend)}
+            onClick={() => run(saveLocalBackend, false)}
             disabled={busy || state.source !== 'temporary'}
           >
             save

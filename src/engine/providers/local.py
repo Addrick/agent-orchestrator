@@ -56,21 +56,35 @@ async def get_local_client(engine: "TextEngine") -> AsyncOpenAI:
 
     When the URL changes the old client is retired, not closed: another turn
     may still be streaming through its connection pool, and closing it would
-    kill that generation mid-reply. Retired clients close with the engine."""
+    kill that generation mid-reply. Switching back to a retired server reuses
+    its client, so the retired set is bounded by distinct servers, not by
+    switches. Retired clients close with the engine."""
     expected_base_url = f"{local_base_url()}/v1"
+    # Compare in httpx's normal form: the SDK keeps base_url as an httpx.URL,
+    # which drops a default port (":80") and leading zeros, so a raw string
+    # compare would see a "change" on every call and retire a client per turn.
+    expected = str(httpx.URL(expected_base_url)).rstrip("/")
+
+    def _url_of(client: AsyncOpenAI) -> str:
+        return str(client.base_url).rstrip("/")
+
     if engine.local_client is not None and isinstance(engine.local_client, AsyncOpenAI):
-        current_base_url = str(engine.local_client.base_url).rstrip("/")
-        if current_base_url != expected_base_url:
+        if _url_of(engine.local_client) != expected:
             engine.retired_local_clients.append(engine.local_client)
             engine.local_client = None
 
     if engine.local_client is None:
-        engine.local_client = AsyncOpenAI(
-            base_url=expected_base_url,
-            api_key="local",  # the SDK requires one; neither server checks it
-            max_retries=0,
-            timeout=httpx.Timeout(600.0, connect=15.0),
-        )
+        reuse = next((c for c in engine.retired_local_clients if _url_of(c) == expected), None)
+        if reuse is not None:
+            engine.retired_local_clients.remove(reuse)
+            engine.local_client = reuse
+        else:
+            engine.local_client = AsyncOpenAI(
+                base_url=expected_base_url,
+                api_key="local",  # the SDK requires one; neither server checks it
+                max_retries=0,
+                timeout=httpx.Timeout(600.0, connect=15.0),
+            )
     return engine.local_client
 
 

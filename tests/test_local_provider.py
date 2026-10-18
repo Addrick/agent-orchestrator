@@ -367,7 +367,8 @@ def test_apply_preset_url_inherits_label_and_sidecar(env_backend):
     assert (backend.label, backend.progress_url) == ("ct101", "http://10.0.0.72:5011")
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "http://", "http://box:notaport", "http://bad host:5001"])
+@pytest.mark.parametrize("bad", ["", "   ", "http://", "HTTP://", "http://box:notaport", "http://bad host:5001",
+                                 "ftp://box:21", "http://box:5001/v1/chat/completions", 5001])
 def test_apply_rejects_non_urls(env_backend, bad):
     with pytest.raises(ValueError):
         local_backend.apply(bad)
@@ -415,7 +416,8 @@ def test_corrupt_saved_file_falls_back_to_env(env_backend):
     assert local_backend.active()[1] == "env"
 
 
-@pytest.mark.parametrize("raw", ["", "not json", "{}", '[{"label": "x"}, {"url": "http://ok:1"}]'])
+@pytest.mark.parametrize("raw", ["", "not json", "{}", '[{"label": "x"}, {"url": "http://ok:1"}]',
+                                 '[{"url": 5001}, {"url": "http://ok:1", "progress_url": 5011}]'])
 def test_bad_presets_never_raise(monkeypatch, raw):
     monkeypatch.setattr(global_config, "LOCAL_LLM_PRESETS", raw)
     out = local_backend.presets()
@@ -445,3 +447,59 @@ async def test_switch_retires_old_client_instead_of_closing_it(env_backend):
     await engine.aclose()
     c1.close.assert_awaited_once()
     assert engine.retired_local_clients == []
+
+
+def test_shipped_default_presets_all_parse(monkeypatch):
+    """docs/testing.md: config that drives runtime behaviour is tested as
+    shipped. A typo in the default would be skipped silently, not raised."""
+    shipped = global_config.DEFAULT_LOCAL_LLM_PRESETS
+    monkeypatch.setattr(global_config, "LOCAL_LLM_PRESETS", shipped)
+    assert len(local_backend.presets()) == len(json.loads(shipped))
+
+
+def test_applying_the_env_url_keeps_its_sidecar(env_backend):
+    """The env box need not be a preset; typing it back in must not drop
+    KOBOLD_PROGRESS_URL (the ingest bar would vanish for the same box)."""
+    local_backend.apply("http://ENV-BOX:5001/v1")
+    backend, source = local_backend.active()
+    assert (backend.url, backend.progress_url, source) == (
+        "http://env-box:5001", "http://env-box:5011", "temporary")
+
+
+def test_reset_keeps_state_when_the_file_cannot_be_removed(env_backend, monkeypatch):
+    local_backend.apply("http://10.0.0.69:5001")
+    local_backend.save()
+
+    def _denied(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(local_backend.os, "remove", _denied)
+    with pytest.raises(OSError):
+        local_backend.reset()
+    assert local_backend.active()[1] == "saved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["http://Box:5001", "http://box:80", "http://box:05001"])
+async def test_url_spellings_httpx_normalizes_reuse_one_client(env_backend, url):
+    """A raw compare against the SDK's normalized base_url saw a "change" on
+    every call and retired (leaked) a client per turn."""
+    local_backend.apply(url)
+    engine = TextEngine()
+    c1 = await get_local_client(engine)
+    assert await get_local_client(engine) is c1
+    assert engine.retired_local_clients == []
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_switching_back_reuses_the_retired_client(env_backend):
+    engine = TextEngine()
+    local_backend.apply("http://10.0.0.69:5001")
+    a = await get_local_client(engine)
+    local_backend.apply("http://10.0.0.72:5001")
+    b = await get_local_client(engine)
+    local_backend.apply("http://10.0.0.69:5001")
+    assert await get_local_client(engine) is a
+    assert engine.retired_local_clients == [b]
+    await engine.aclose()

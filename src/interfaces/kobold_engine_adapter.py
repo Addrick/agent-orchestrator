@@ -696,16 +696,23 @@ class KoboldEngineAdapter:
         @self.app.put("/api/v1/local_backend")
         async def put_local_backend(request: Request) -> Any:
             """Switch the local backend until restart. Body: {"url": str}.
-            In-flight turns finish on the old server (get_local_client retires
-            rather than closes its client)."""
-            data = await request.json()
+            In-flight requests finish on the old server (get_local_client
+            retires rather than closes its client); a tool-calling turn's next
+            iteration goes to the new one."""
+            try:
+                data = await request.json()
+            except ValueError:
+                return JSONResponse(status_code=400, content={"error": "url required"})
             url = data.get("url") if isinstance(data, dict) else None
             if not isinstance(url, str) or not url.strip():
                 return JSONResponse(status_code=400, content={"error": "url required"})
             try:
-                local_backend.apply(url)
+                backend = local_backend.apply(url)
             except ValueError as e:
                 return JSONResponse(status_code=400, content={"error": str(e)})
+            # Every `model local` prompt now goes to this host — audit it like
+            # the other control-plane mutations (DP-277 Phase 7).
+            await self._audit_control_change("local_backend_apply", "local_backend", {"url": backend.url})
             return local_backend.state()
 
         @self.app.post("/api/v1/local_backend/save")
@@ -716,7 +723,9 @@ class KoboldEngineAdapter:
             except OSError as e:
                 logger.warning(f"local backend save failed: {e}")
                 return JSONResponse(status_code=500, content={"error": "save failed"})
-            return local_backend.state()
+            state = local_backend.state()
+            await self._audit_control_change("local_backend_save", "local_backend", {"url": state["url"]})
+            return state
 
         @self.app.delete("/api/v1/local_backend")
         async def reset_local_backend() -> Any:
@@ -726,7 +735,9 @@ class KoboldEngineAdapter:
             except OSError as e:
                 logger.warning(f"local backend reset failed: {e}")
                 return JSONResponse(status_code=500, content={"error": "reset failed"})
-            return local_backend.state()
+            state = local_backend.state()
+            await self._audit_control_change("local_backend_reset", "local_backend", {"url": state["url"]})
+            return state
 
         @self.app.get("/api/v1/tools/catalog")
         async def get_tools_catalog() -> Any:
