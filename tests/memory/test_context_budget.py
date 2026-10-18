@@ -123,6 +123,17 @@ def test_tool_call_message_is_not_free():
     assert _message_tokens(_tool_span("c1", 4)[0]) > 0
 
 
+def test_tool_call_message_prose_is_charged():
+    """DP-338 put the model's prose beside its calls, and that prose is replayed
+    every later turn. Counting only `tool_calls` let it ride free (DP-441)."""
+    from memory.context_budget import _message_tokens
+    bare = _tool_span("c1", 4)[0]
+    with_prose = {**bare, "content": "P" * 400}
+    assert _message_tokens(with_prose) == _message_tokens(bare) + estimate_tokens("P" * 400)
+    with_parts = {**bare, "content": [{"type": "text", "text": "P" * 400}]}
+    assert _message_tokens(with_parts) == _message_tokens(with_prose)
+
+
 def test_truncate_never_splits_a_tool_span():
     """Cutting between an assistant tool_calls message and its results leaves an
     unpaired block at the head of the wire array; Anthropic and Gemini reject the
