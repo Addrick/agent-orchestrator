@@ -13,8 +13,9 @@ import httpx
 from config import global_config
 from .base import (
     MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
-    MentalModel, SESSION_GAP_SECONDS,
+    MentalModel, SESSION_GAP_SECONDS, RETAIN_RECONCILE_INTERVAL_SECONDS,
 )
+from .hindsight_reconcile import Reconciler, ReconcileStore
 
 if TYPE_CHECKING:
     from src.memory.memory_manager import MemoryManager
@@ -303,6 +304,14 @@ class HindsightRESTClient:
         return await self._request(
             "GET", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/operations/{operation_id}",
             params=params,
+        )
+
+    async def aretry_operation(self, bank_id: str, operation_id: str) -> Dict[str, Any]:
+        # POST .../operations/{id}/retry -> {success, message, operation_id}.
+        # Re-queues a failed op with its stored payload (0.10.0).
+        return await self._request(
+            "POST",
+            f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/operations/{operation_id}/retry",
         )
 
 
@@ -616,6 +625,11 @@ class HindsightBackend(MemoryBackend):
             doc_scope_db_path = global_config.HINDSIGHT_DOC_SCOPE_DB
         self._overrides = _TrustOverrideStore(override_db_path)
         self._doc_scope = _DocScopeStore(doc_scope_db_path)
+        # DP-443: same file as the doc-scope store — both are retain-side
+        # state that must survive an image rebuild.
+        self._reconciler = Reconciler(ReconcileStore(doc_scope_db_path))
+        self._reconcile_lock = asyncio.Lock()
+        self._reconciled_at: Optional[datetime] = None
 
     def _get_client(self) -> HindsightRESTClient:
         if self._client is None:
@@ -756,6 +770,7 @@ class HindsightBackend(MemoryBackend):
             self._client = None
         self._overrides.close()
         self._doc_scope.close()
+        self._reconciler.store.close()
 
     # ---------- Legacy SQLite-shape: fail loud when flag is flipped early ----------
     # Plan §5 (Cleanup): legacy callers must migrate to new-shape methods before
@@ -1217,6 +1232,25 @@ class HindsightBackend(MemoryBackend):
         return await client.aget_operation(
             bank_id, operation_id, include_payload=include_payload,
         )
+
+    async def reconcile_failed_retains(self, *, force: bool = False) -> int:
+        # DP-443: see hindsight_reconcile. Every bank on the server, because
+        # every writer (chat, experiences, uploads, ingest scripts) loses work
+        # the same way. Throttled: the lazy trigger fires on every turn.
+        async with self._reconcile_lock:
+            now = datetime.now(timezone.utc)
+            if (not force and self._reconciled_at is not None
+                    and (now - self._reconciled_at).total_seconds()
+                    < RETAIN_RECONCILE_INTERVAL_SECONDS):
+                return 0
+            self._reconciled_at = now
+            try:
+                return await self._reconciler.run(self._get_client(), now)
+            except (httpx.RequestError, HindsightAPIError) as e:
+                logger.warning("Retain reconcile skipped, Hindsight unreachable: %s", e)
+            except Exception:  # noqa: BLE001 — a background pass must never raise
+                logger.exception("Retain reconcile: unexpected error")
+            return 0
 
     def _flip(self, bank_id: str, hit_id: str, untrusted: bool,
               operator_id: str, reason: str) -> None:
