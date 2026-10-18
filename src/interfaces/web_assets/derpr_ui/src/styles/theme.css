@@ -136,6 +136,12 @@ button { font-family: inherit; cursor: pointer; }
   animation: sl-pulse 1.1s ease-in-out infinite;
 }
 .sl-stale, .sl-stale b { color: var(--write); }
+/* DP-438 local-backend switch: a chip that is a button. */
+.sl-switch {
+  background: none; border: 1px solid var(--line); border-radius: 4px; padding: 0 6px;
+  font: inherit; color: inherit; letter-spacing: inherit; cursor: pointer; height: 18px;
+}
+.sl-switch:hover { border-color: var(--line-2); color: var(--ink-dim); }
 .sl-stale .dot { background: var(--write); box-shadow: 0 0 7px var(--write); animation: none; }
 @keyframes sl-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 @media (prefers-reduced-motion: reduce) { .sl-busy .dot { animation: none } }

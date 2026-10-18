@@ -134,7 +134,8 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `OPENAI_API_KEY` | OpenAI provider |
 | `ANTHROPIC_API_KEY` | Anthropic provider |
 | `GOOGLE_GENERATIVEAI_API_KEY` | Gemini/Gemma + embeddings |
-| `LOCAL_LLM_URL` | Override for the local KoboldCPP / Strata endpoint (default in `config/global_config.py`) |
+| `LOCAL_LLM_URL` | Override for the local KoboldCPP / Strata endpoint (default in `config/global_config.py`); the portal statusline can switch it at runtime (DP-438) |
+| `LOCAL_LLM_PRESETS` | JSON list of `{"label", "url", "progress_url"?}` offered as quick picks by that switch (default in `config/global_config.py`) |
 | `ZAMMAD_URL`, `ZAMMAD_API_KEY` | Enables ZammadClient + Zammad agents |
 | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`, `GMAIL_PROJECT_ID`, `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_SUBSCRIPTION_ID` | Gmail PoC interface |
 | `DATA_DIR` | Where all mutable state lives (default `./data`; the container sets `/data`, outside the app tree) |

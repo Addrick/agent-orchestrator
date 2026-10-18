@@ -333,3 +333,13 @@ export interface KoboldPerf {
   uptime: number
   idletime: number
 }
+
+/** DP-438 — GET/PUT/DELETE /api/v1/local_backend: which server `model local`
+ *  talks to. `temporary` is lost on restart; `saved` survives it; `env` and
+ *  `default` are LOCAL_LLM_URL / the config default. */
+export interface LocalBackendState {
+  url: string
+  label: string | null
+  source: 'temporary' | 'saved' | 'env' | 'default'
+  presets: { label: string | null; url: string }[]
+}

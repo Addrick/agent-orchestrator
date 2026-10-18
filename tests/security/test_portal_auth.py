@@ -95,6 +95,9 @@ CONTROL_ROUTES = [
     ("PATCH", "/api/v1/interaction/1", {"content": "x"}),
     ("DELETE", "/api/v1/interaction/1", None),
     ("POST", "/api/v1/interaction/1/select_version/0", None),
+    ("PUT", "/api/v1/local_backend", {"url": "http://evil:5001"}),
+    ("POST", "/api/v1/local_backend/save", None),
+    ("DELETE", "/api/v1/local_backend", None),
 ]
 
 
