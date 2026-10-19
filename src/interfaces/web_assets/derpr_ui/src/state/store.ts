@@ -225,6 +225,12 @@ export function usePortalStore() {
   useEffect(() => {
     channelsRef.current = channels
   }, [channels])
+  // Mirror of the transcript for abortTurn (DP-444): which rows were on screen
+  // before a stop, so the re-sync can recognise the stopped turn's saved row.
+  const chunksRef = useRef(chunks)
+  useEffect(() => {
+    chunksRef.current = chunks
+  }, [chunks])
 
   // ---- fired-timer alarms (SSE back-channel) ------------------------
   // A timer set from the portal fires back here: the engine pushes the alarm
@@ -754,8 +760,39 @@ export function usePortalStore() {
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
     setResolvingConfirm(false)
-    if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
-  }, [persona, refreshTranscript, flushTokens])
+    if (!persona) return
+    // DP-444: the server saves the stopped turn once it notices the
+    // disconnect, so this re-sync can land before or after that commit. When
+    // a re-sync shows an assistant row newer than anything on screen before
+    // the stop, that row IS the stopped turn: drop the live row, or the turn
+    // renders twice. Checked twice, briefly apart; a slower commit leaves the
+    // live row up until dismissed or the next send, which both re-sync. A
+    // retry overwrites its row in place (no newer id), so it keeps the live row.
+    const name = persona.name
+    const channel = activeChannelRef.current
+    const newest = Math.max(-1, ...chunksRef.current.map((c) => c.interaction_id ?? -1))
+    for (const delayMs of [0, 800]) {
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs))
+      // A new turn or a view switch since the stop owns the state now.
+      if (streamingRef.current) return
+      if (name !== activePersonaRef.current || channel !== activeChannelRef.current) return
+      let cs: Chunk[]
+      try {
+        cs = await api.getTranscript(name, undefined, channel)
+      } catch {
+        setBanner(UNREACHABLE)
+        return
+      }
+      if (streamingRef.current) return
+      setChunks(cs)
+      setOffline(api.usingMock())
+      if (cs.some((c) => c.role === 'assistant' && (c.interaction_id ?? -1) > newest)) {
+        resetTokenBuf()
+        setStream(EMPTY_STREAM)
+        return
+      }
+    }
+  }, [persona, flushTokens, resetTokenBuf])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
   // turn (persisted before generation) is only in the DB — surface it.

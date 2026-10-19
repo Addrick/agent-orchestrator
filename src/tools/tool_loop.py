@@ -82,11 +82,17 @@ class _ApiPayloadEvent:
 @dataclass
 class _ToolContextEvent:
     """Loop-internal: carries this turn's sealed tool context out of an exit
-    that has no `_LoopFinishedEvent` to hang it on (the error paths).
+    that has no `_LoopFinishedEvent` to hang it on (the error paths), and —
+    with `step_boundary` — a snapshot after every finished tool step (DP-444).
 
     The orchestrator siphons it exactly like `_ApiPayloadEvent`, so an errored
-    turn can still persist the tool calls it made before dying."""
+    or cancelled turn can still persist the tool calls it made first. A
+    step-boundary snapshot is emitted before the next iteration streams
+    anything, so the text the orchestrator collects after it is exactly what
+    the model wrote after its last finished step: the reply, for a turn that
+    stops there. Calls still in flight are never in it."""
     tool_context_json: Optional[str]
+    step_boundary: bool = False
 
 
 @dataclass
@@ -300,6 +306,10 @@ SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
 # it exists so a call that somehow slipped through does not tell the model its
 # successful turn errored.
 SEAL_UNKNOWN = "unknown"
+# A step-boundary snapshot (DP-444): taken when every call so far has its
+# result, so like SEAL_UNKNOWN it is expected to appear in no sealed result. It
+# is what a stopped turn persists, and names that if a call ever slips through.
+SEAL_INTERRUPTED = "interrupted"
 
 
 def seal_tool_context(
@@ -815,6 +825,17 @@ class ToolLoop:
             accumulated_parts: List[str] = []
             accumulated_reasoning: List[str] = []
 
+            # DP-444: every step before this one has all its results, so this
+            # is what a turn stopped from here on keeps. Emitted before the
+            # iteration streams, so its text is what comes after the snapshot.
+            step_context = seal_tool_context(
+                conversation_history, history_start, SEAL_INTERRUPTED,
+            )
+            if step_context is not None:
+                yield _ToolContextEvent(
+                    tool_context_json=step_context, step_boundary=True,
+                )
+
             messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
                 persona, conversation_history,
             )
@@ -1195,6 +1216,14 @@ class ToolLoop:
         self._log_turn_exit(
             call_tally, iterations_used, calls_used,
             budget_exhausted=calls_used >= self.max_tool_calls,
+        )
+        # The wrap-up below is one more model call that can be stopped; the
+        # last step's results are already in, so snapshot them first (DP-444).
+        yield _ToolContextEvent(
+            tool_context_json=seal_tool_context(
+                conversation_history, history_start, SEAL_INTERRUPTED,
+            ),
+            step_boundary=True,
         )
         async for exit_ev in self._finish_exhausted_turn(
             persona=persona,

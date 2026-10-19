@@ -492,6 +492,13 @@ class ChatSystem:
             # `duplicate_of_pending` entries get corrected when the original
             # proposal resolves.
             dups_this_turn: List[_WriteDuplicateEvent] = []
+            # DP-444: where the last finished tool step ends, in the text and
+            # in the gated writes. A turn that stops or errors keeps the steps
+            # up to there; its reply is only the text written after it, since
+            # every step's own prose is already on that step in the context.
+            reply_from = 0
+            parks_kept = 0
+            dups_kept = 0
 
             def _already_pending(write_call: Dict[str, Any]) -> Optional[str]:
                 """Token of an identical proposal still awaiting the operator.
@@ -581,6 +588,10 @@ class ChatSystem:
                         yield ev
                     elif isinstance(ev, _ToolContextEvent):
                         tool_context_json = ev.tool_context_json
+                        if ev.step_boundary:
+                            reply_from = len(accumulated_parts)
+                            parks_kept = len(parks_this_turn)
+                            dups_kept = len(dups_this_turn)
                     elif isinstance(ev, ToolDeferredEvent):
                         # DP-297: a deferred call, mid-turn. Hold it — the store
                         # registration needs the assistant row id that does not
@@ -628,31 +639,16 @@ class ChatSystem:
                         # its own prose with no trace of the call that failed,
                         # and it re-proposes or hallucinates the action.
                         if tool_context_json:
-                            errored_id = self.turn_persistence.commit_or_update_assistant(
-                                persona_name=persona_name,
-                                user_identifier=user_identifier,
-                                channel=channel, server_id=server_id,
-                                final_text="".join(accumulated_parts),
-                                response_type=ResponseType.LLM_GENERATION,
-                                user_interaction_id=user_interaction_id,
-                                retry_assistant_id=retry_assistant_id,
+                            # An error only ends an iteration's model call,
+                            # after every earlier step has its results, so all
+                            # of this turn's gated writes are in that context.
+                            self._commit_interrupted_turn(
+                                persona_name, user_identifier, channel, server_id,
+                                user_interaction_id, retry_assistant_id,
+                                reply="".join(accumulated_parts[reply_from:]),
+                                reasoning=join_reasoning(accumulated_reasoning),
                                 tool_context_json=tool_context_json,
-                                reasoning_content=join_reasoning(accumulated_reasoning),
-                            )
-                            # Writes gated before the loop died are still real
-                            # proposals — register them against the row that
-                            # just captured their `awaiting_human_approval`
-                            # entries, or the operator sees affordances that
-                            # resolve to nothing.
-                            self._register_parks(parks_this_turn, errored_id)
-                            # After the parks: a duplicate can point at a park
-                            # created earlier in THIS turn, which only became
-                            # findable by token on the line above.
-                            self._register_duplicates(dups_this_turn, errored_id)
-                            # DP-423: a retry whose partial text overwrote a
-                            # queued reply is not retained, like any errored turn.
-                            self.turn_persistence.discard_overwritten_retry(
-                                errored_id, retry_assistant_id, "".join(accumulated_parts),
+                                parks=parks_this_turn, dups=dups_this_turn,
                             )
                         yield ev
                         return
@@ -666,26 +662,22 @@ class ChatSystem:
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
                         self.request_builder.set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
-                # Client disconnect / abort. Flush whatever assistant text has
-                # accumulated so the row reflects what the user actually saw,
-                # then re-raise so the surrounding StreamingResponse aborts.
-                partial = "".join(accumulated_parts)
-                partial_reasoning = join_reasoning(accumulated_reasoning)
-                if partial.strip() or partial_reasoning:
-                    cancelled_id = self.turn_persistence.commit_or_update_assistant(
-                        persona_name=persona_name, user_identifier=user_identifier,
-                        channel=channel, server_id=server_id,
-                        final_text=partial,
-                        response_type=ResponseType.LLM_GENERATION,
-                        user_interaction_id=user_interaction_id,
-                        retry_assistant_id=retry_assistant_id,
-                        tool_context_json=None,
-                        reasoning_content=partial_reasoning,
-                    )
-                    # DP-423: as on the error path above.
-                    self.turn_persistence.discard_overwritten_retry(
-                        cancelled_id, retry_assistant_id, partial,
-                    )
+                # Client disconnect / abort. Stopping is a normal way to end a
+                # turn ("what it has is fine"), so keep what finished: every
+                # completed tool step and the text written after the last one.
+                # A step still in flight is dropped with its gated writes —
+                # their history entries are not in this context, so they must
+                # not become approvable (see `_register_parks`). Then re-raise
+                # so the surrounding StreamingResponse aborts.
+                self._commit_interrupted_turn(
+                    persona_name, user_identifier, channel, server_id,
+                    user_interaction_id, retry_assistant_id,
+                    reply="".join(accumulated_parts[reply_from:]),
+                    reasoning=join_reasoning(accumulated_reasoning),
+                    tool_context_json=tool_context_json,
+                    parks=parks_this_turn[:parks_kept],
+                    dups=dups_this_turn[:dups_kept],
+                )
                 raise
 
             # 4. Log/update assistant turn. Original text (including links)
@@ -762,6 +754,51 @@ class ChatSystem:
                 # its PendingConfirmationEvent instead.
                 ephemeral_chunk_id=None,
             )
+
+    def _commit_interrupted_turn(
+            self, persona_name: str, user_identifier: str, channel: str,
+            server_id: Optional[str],
+            user_interaction_id: Optional[int],
+            retry_assistant_id: Optional[int],
+            *,
+            reply: str,
+            reasoning: Optional[str],
+            tool_context_json: Optional[str],
+            parks: List[ParkedWrite],
+            dups: List[_WriteDuplicateEvent],
+    ) -> Optional[int]:
+        """Persist a turn that ended early — errored or stopped (DP-444).
+
+        One path for both, because both keep the same thing: the finished tool
+        steps (`tool_context_json`, whose assistant entries already carry each
+        step's prose) and the text after the last of them as the reply. Saving
+        every streamed delta instead put each step's prose in the reply too,
+        so the model was sent it twice and the portal showed it glued on.
+
+        Gated writes are registered against the row like a finished turn's:
+        each is still a real proposal whose `awaiting_human_approval` entry is
+        in this row. The caller passes only the parks inside `tool_context_json`.
+        The turn is never retained (DP-423 drops a retry it overwrote).
+        """
+        row_id = self.turn_persistence.commit_or_update_assistant(
+            persona_name=persona_name, user_identifier=user_identifier,
+            channel=channel, server_id=server_id,
+            final_text=reply,
+            response_type=ResponseType.LLM_GENERATION,
+            user_interaction_id=user_interaction_id,
+            retry_assistant_id=retry_assistant_id,
+            tool_context_json=tool_context_json,
+            reasoning_content=reasoning,
+        )
+        if parks or dups:
+            self._register_parks(parks, row_id)
+            # After the parks: a duplicate can point at a park created earlier
+            # in THIS turn, which only became findable by token on the line above.
+            self._register_duplicates(dups, row_id)
+        self.turn_persistence.discard_overwritten_retry(
+            row_id, retry_assistant_id, reply,
+        )
+        return row_id
 
     def _register_parks(self, parks: List[ParkedWrite],
                         assistant_id: Optional[int]) -> None:

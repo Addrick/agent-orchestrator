@@ -104,6 +104,7 @@ async def test_single_tool_call_then_text():
         "_ApiPayloadEvent",
         "ToolCallStartEvent",
         "ToolCallResultEvent",
+        "_ToolContextEvent",  # DP-444: step-boundary snapshot
         "TokenEvent", "TokenEvent",
         "_ApiPayloadEvent",
         "_LoopFinishedEvent",
@@ -623,6 +624,42 @@ async def test_error_exit_emits_sealed_tool_context():
     msgs = json.loads(ctx.tool_context_json)
     _assert_calls_all_answered(msgs)
     assert any(m.get("tool_call_id") == "r1" for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_step_boundary_snapshot_precedes_the_next_steps_text():
+    """DP-444: after each finished step the loop snapshots the context before
+    the next model call streams, so an orchestrator that stops the turn keeps
+    exactly the finished steps, with every call answered, and treats only the
+    text after the snapshot as the reply. Nothing is emitted before step one."""
+    engine = _make_engine([
+        [
+            {"type": "text_delta", "text": "Checking first."},
+            {"type": "tool_calls", "calls": [
+                {"id": "r1", "name": "search_tickets", "arguments": {}}
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [
+            {"type": "text_delta", "text": "Found it."},
+            {"type": "done", "full_text": "Found it."},
+        ],
+    ])
+    loop = ToolLoop(engine, _make_tool_manager({"search_tickets": {"hits": 1}}))
+
+    events = await _drain(loop.run(
+        persona=_make_persona(), conversation_history=[],
+        params=MagicMock(), tools=_OFFERED,
+    ))
+
+    snaps = [i for i, e in enumerate(events)
+             if isinstance(e, _ToolContextEvent) and e.step_boundary]
+    assert len(snaps) == 1
+    tokens = [i for i, e in enumerate(events) if isinstance(e, TokenEvent)]
+    assert tokens[0] < snaps[0] < tokens[1]
+    msgs = json.loads(events[snaps[0]].tool_context_json)
+    _assert_calls_all_answered(msgs)
+    assert msgs[0]["content"] == "Checking first."
 
 
 @pytest.mark.asyncio
