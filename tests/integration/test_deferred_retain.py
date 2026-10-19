@@ -165,28 +165,6 @@ async def test_refused_retain_stays_queued_and_is_retried(setup):
 
 
 @pytest.mark.asyncio
-async def test_turn_and_boot_run_the_failed_retain_reconcile(setup):
-    """DP-443: accepted is not extracted. Every turn's background flush, and
-    the startup call `main` makes, gives the backend its throttled pass over
-    retains it accepted and later failed — and a pass that blows up never
-    reaches the turn."""
-    chat_system, _, _, _ = setup
-    reconcile = AsyncMock(return_value=0)
-    chat_system.memory_backend.reconcile_failed_retains = reconcile  # type: ignore[assignment]
-
-    await _turn(chat_system, "one")
-    assert reconcile.await_count == 1
-
-    chat_system.turn_persistence.schedule_flush()  # main's boot pass
-    await chat_system.turn_persistence.drain_flushes()
-    assert reconcile.await_count == 2
-
-    reconcile.side_effect = RuntimeError("backend bug")
-    await _turn(chat_system, "two")
-    assert reconcile.await_count == 3
-
-
-@pytest.mark.asyncio
 async def test_global_mode_flushes_turns_another_channel_evicted(setup):
     """A global window spans channels, so a turn in one channel pushes out
     another channel's turns — and must retain them, or they'd be stranded."""

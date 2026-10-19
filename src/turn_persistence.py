@@ -407,10 +407,7 @@ class TurnPersistence:
         current_id: Optional[int] = None,
     ) -> None:
         """Run the DP-423 flushes in the background: the idle sweep, then
-        (given a persona) the eviction flush for this request's window, then
-        the backend's throttled DP-443 pass over retains it accepted and
-        later failed — the same lazy-sweep-plus-boot-pass pairing, since
-        `main` calls this once at startup.
+        (given a persona) the eviction flush for this request's window.
 
         Background because delivery is confirmed: a down Hindsight would
         otherwise stall the user's turn for the HTTP timeout. Flushes are
@@ -430,14 +427,6 @@ class TurnPersistence:
                     server_id=server_id, oldest_window_id=oldest_window_id,
                     current_id=current_id,
                 )
-            # Under the flush lock: no flush of ours can land an append on a
-            # document between the pass listing its operations and retrying
-            # an older replace on it.
-            try:
-                async with self._flush_lock:
-                    await self.memory_backend.reconcile_failed_retains()
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Retain reconcile failed: {e}")
 
         task = asyncio.get_running_loop().create_task(run(), name="dp423-retain-flush")
         self._flush_tasks.add(task)

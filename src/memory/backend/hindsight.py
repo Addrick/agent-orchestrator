@@ -4,17 +4,17 @@ import asyncio
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, List, NoReturn, Optional, Set, Tuple, TYPE_CHECKING, cast
+from pathlib import Path
+from typing import Any, Dict, List, NoReturn, Optional, Tuple, TYPE_CHECKING, cast
 from urllib.parse import quote
 import httpx
 from config import global_config
 from .base import (
     MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
-    MentalModel, SESSION_GAP_SECONDS, RETAIN_RECONCILE_INTERVAL_SECONDS,
+    MentalModel, SESSION_GAP_SECONDS,
 )
-from .hindsight_reconcile import Reconciler, ReconcileStore
-from .sqlite_store import LazySqliteStore
 
 if TYPE_CHECKING:
     from src.memory.memory_manager import MemoryManager
@@ -305,14 +305,6 @@ class HindsightRESTClient:
             params=params,
         )
 
-    async def aretry_operation(self, bank_id: str, operation_id: str) -> Dict[str, Any]:
-        # POST .../operations/{id}/retry -> {success, message, operation_id}.
-        # Re-queues a failed op with its stored payload (0.10.0).
-        return await self._request(
-            "POST",
-            f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/operations/{operation_id}/retry",
-        )
-
 
 def _untrusted_tag(untrusted: bool) -> str:
     return UNTRUSTED_TAG if untrusted else TRUSTED_TAG
@@ -348,7 +340,7 @@ class _Tracked:
         self.future = future
 
 
-class _TrustOverrideStore(LazySqliteStore):
+class _TrustOverrideStore:
     """Parallel SQLite store for per-unit trust flips (DP-110 option c).
 
     Rationale: upstream Hindsight v0.5.0 has no unit-tag PATCH endpoint. Rather
@@ -385,6 +377,21 @@ class _TrustOverrideStore(LazySqliteStore):
     CREATE INDEX IF NOT EXISTS idx_trust_audit_bank_hit
         ON Unit_Trust_Audit(bank_id, hit_id);
     """
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def _get(self) -> sqlite3.Connection:
+        if self._conn is None:
+            if self.db_path != ":memory:":
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.executescript(self.SCHEMA)
+            self._conn.commit()
+        return self._conn
 
     def set(self, bank_id: str, hit_id: str, untrusted: bool,
             operator_id: str, reason: str) -> Optional[bool]:
@@ -429,8 +436,14 @@ class _TrustOverrideStore(LazySqliteStore):
             ).fetchall()
             return {r["hit_id"]: bool(r["untrusted"]) for r in rows}
 
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
-class _DocScopeStore(LazySqliteStore):
+
+class _DocScopeStore:
     """Per-scope rolling document_id state for retain bundling (DP-112).
 
     Upstream Hindsight grows conversation memory by retaining items with a
@@ -440,8 +453,13 @@ class _DocScopeStore(LazySqliteStore):
       2. Is this turn append-ing to it, or starting a new one?
 
     Heuristic: if more than SESSION_GAP_SECONDS have passed since the last
-    retain in this scope (or no row exists), open a new document with
-    update_mode="replace"; otherwise append to the existing document.
+    retain in this scope (or no row exists), open a new document; otherwise
+    append to the existing document. Both are `append` (DP-443): the new id
+    is unique, and Hindsight appends to a missing document by creating it.
+    A `replace` here would be the one write in a session that can erase
+    others — Hindsight retries a failed op on a fixed backoff and does not
+    hold a document's later ops behind it, so a session opener retried after
+    an outage could land after, and wipe, the turns that followed it.
 
     Sync sqlite3 in async land is fine at this volume — one indexed upsert
     per retain, called from the same worker that owns the queue.
@@ -456,12 +474,25 @@ class _DocScopeStore(LazySqliteStore):
     );
     """
 
-    def _migrate(self, conn: sqlite3.Connection) -> None:
-        cols = {r["name"] for r in conn.execute("PRAGMA table_info(Doc_Scope)")}
-        if "untrusted" not in cols:  # pre-DP-409 store
-            conn.execute(
-                "ALTER TABLE Doc_Scope ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0"
-            )
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        self._conn: Optional[sqlite3.Connection] = None
+
+    def _get(self) -> sqlite3.Connection:
+        if self._conn is None:
+            if self.db_path != ":memory:":
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.executescript(self.SCHEMA)
+            cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(Doc_Scope)")}
+            if "untrusted" not in cols:  # pre-DP-409 store
+                self._conn.execute(
+                    "ALTER TABLE Doc_Scope ADD COLUMN untrusted INTEGER NOT NULL DEFAULT 0"
+                )
+            self._conn.commit()
+        return self._conn
 
     def resolve(self, scope_key: str, now: datetime,
                 untrusted: bool = False) -> Tuple[str, str]:
@@ -512,7 +543,7 @@ class _DocScopeStore(LazySqliteStore):
                 (scope_key, document_id, now_iso, int(untrusted)),
             )
             conn.commit()
-            return document_id, "replace"
+            return document_id, "append"
 
     def current(self, scope_key: str) -> Optional[Tuple[str, datetime, bool]]:
         """(document_id, session start, untrusted) of the scope's open document.
@@ -553,6 +584,12 @@ class _DocScopeStore(LazySqliteStore):
             )
             conn.commit()
 
+    def close(self) -> None:
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
+
 
 class HindsightBackend(MemoryBackend):
     """MemoryBackend implementation using the native HindsightRESTClient.
@@ -584,12 +621,6 @@ class HindsightBackend(MemoryBackend):
             doc_scope_db_path = global_config.HINDSIGHT_DOC_SCOPE_DB
         self._overrides = _TrustOverrideStore(override_db_path)
         self._doc_scope = _DocScopeStore(doc_scope_db_path)
-        # DP-443: same file as the doc-scope store — both are retain-side
-        # state that must survive an image rebuild.
-        self._reconciler = Reconciler(ReconcileStore(doc_scope_db_path))
-        self._reconcile_lock = asyncio.Lock()
-        self._reconciled_at: Optional[datetime] = None
-        self._own_banks: Set[str] = set()
 
     def _get_client(self) -> HindsightRESTClient:
         if self._client is None:
@@ -730,7 +761,6 @@ class HindsightBackend(MemoryBackend):
             self._client = None
         self._overrides.close()
         self._doc_scope.close()
-        self._reconciler.store.close()
 
     # ---------- Legacy SQLite-shape: fail loud when flag is flipped early ----------
     # Plan §5 (Cleanup): legacy callers must migrate to new-shape methods before
@@ -1098,7 +1128,6 @@ class HindsightBackend(MemoryBackend):
             enable_observations=enable_observations,
             observations_mission=observations_mission,
         )
-        self._own_banks.add(bank_id)
 
     async def delete_bank(self, bank_id: str) -> None:
         client = self._get_client()
@@ -1193,34 +1222,6 @@ class HindsightBackend(MemoryBackend):
         return await client.aget_operation(
             bank_id, operation_id, include_payload=include_payload,
         )
-
-    def _throttled(self, now: datetime) -> bool:
-        return (self._reconciled_at is not None
-                and (now - self._reconciled_at).total_seconds() < RETAIN_RECONCILE_INTERVAL_SECONDS)
-
-    async def reconcile_failed_retains(self) -> int:
-        # DP-443: see hindsight_reconcile. Only banks this engine provisions or
-        # writes — the same server holds eval/benchmark banks whose failures
-        # are part of what they measure. The lazy trigger fires on every turn,
-        # so the throttle is checked before the lock too: a running pass must
-        # not make every turn's flush task queue behind it.
-        if self._throttled(datetime.now(timezone.utc)):
-            return 0
-        async with self._reconcile_lock:
-            now = datetime.now(timezone.utc)
-            banks = sorted(self._own_banks | set(self._queues))
-            if self._throttled(now) or not banks:
-                # No bank known yet (boot, before personas are provisioned):
-                # leave the throttle unset so the next turn runs the pass.
-                return 0
-            self._reconciled_at = now
-            try:
-                return await self._reconciler.run(self._get_client(), banks, now)
-            except (httpx.RequestError, HindsightAPIError) as e:
-                logger.warning("Retain reconcile skipped, Hindsight unreachable: %s", e)
-            except Exception:  # noqa: BLE001 — a background pass must never raise
-                logger.exception("Retain reconcile: unexpected error")
-            return 0
 
     def _flip(self, bank_id: str, hit_id: str, untrusted: bool,
               operator_id: str, reason: str) -> None:

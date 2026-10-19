@@ -30,14 +30,6 @@ from typing import Any, Dict, List, Optional, Tuple
 # (DP-423), so a conversation that stops is cut at the same point.
 SESSION_GAP_SECONDS = 24 * 3600
 
-# DP-443: re-running retains the backend accepted and then failed to extract.
-# A pass runs at most once per interval; a failed operation is retried with
-# exponential backoff from the interval up to the cap, and never given up
-# (Adam, 2026-10-18): a still-failing op costs one Hindsight retry a day —
-# up to three extraction attempts per chunk — and a lost memory costs more.
-RETAIN_RECONCILE_INTERVAL_SECONDS = 15 * 60
-RETAIN_RECONCILE_BACKOFF_CAP_SECONDS = 24 * 3600
-
 
 # ----------------------------- Errors ----------------------------- #
 
@@ -324,9 +316,7 @@ class MemoryBackend(ABC):
 
         The deferred-retain queue deletes a turn on True and keeps it for a
         later retry on False. Default: a backend whose `retain_turn` returns
-        has accepted it (sqlite_legacy's noop, synchronous stores). Accepted
-        is not extracted: an asynchronous backend can still fail the work
-        afterwards, which `reconcile_failed_retains` repairs (DP-443).
+        has accepted it (sqlite_legacy's noop, synchronous stores).
         """
         await self.retain_turn(
             bank_id=bank_id, role=role, content=content, timestamp=timestamp,
@@ -622,13 +612,3 @@ class MemoryBackend(ABC):
     ) -> Dict[str, Any]:
         """Fetch one operation's status (upstream OperationStatusResponse)."""
         raise NotImplementedError("get_operation not implemented on this backend")
-
-    async def reconcile_failed_retains(self) -> int:
-        """Re-run retains this backend accepted and later failed (DP-443).
-
-        Throttled to one pass per RETAIN_RECONCILE_INTERVAL_SECONDS; the
-        first call runs. Returns how many operations it acted on; never raises.
-        Default: nothing to do — a synchronous backend reports failure at
-        accept time.
-        """
-        return 0
