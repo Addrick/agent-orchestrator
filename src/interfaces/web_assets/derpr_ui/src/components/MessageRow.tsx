@@ -1,5 +1,6 @@
 import { Fragment, memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
+import { joinRawTurn, rawThinkState } from '../state/util'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
@@ -8,7 +9,10 @@ import { VersionChevrons } from './VersionChevrons'
 interface Props {
   chunk: Chunk
   tools: ToolDef[]
-  onEdit: (id: number, content: string) => void
+  onEdit: (id: number, content: string, rawThink?: boolean) => Promise<boolean> | void
+  // DP-447: set on the conversation's last row when it can be continued; the
+  // editor then offers "save & continue".
+  onContinue?: (thinkOpen?: boolean) => void
   onDelete: (id: number) => void
   onRegen: () => void
   onResync: () => void
@@ -32,6 +36,7 @@ export const MessageRow = memo(function MessageRow({
   resolvingConfirm,
   isLastUser,
   isLastAssistant,
+  onContinue,
 }: Props) {
   // Reasoning is its own field (DP-434); content is the reply alone.
   const reasoning = c.role === 'assistant' ? c.reasoning : null
@@ -50,13 +55,22 @@ export const MessageRow = memo(function MessageRow({
     <span className="idtag">unaddressable</span>
   )
 
+  // DP-447: an assistant turn is edited whole — thinking and reply in one
+  // raw text. Not a turn with tool steps: its stored reasoning is every step's
+  // thinking joined, which one block would flatten (the engine refuses it).
+  const rawEdit = c.role === 'assistant' && !(c.tool_context || []).length
   const beginEdit = () => {
-    setDraft(body)
+    setDraft(rawEdit ? joinRawTurn(reasoning, body) : body)
     setEditing(true)
   }
-  const saveEdit = () => {
-    if (c.interaction_id != null) onEdit(c.interaction_id, draft)
+  const saveEdit = async (thenContinue = false) => {
     setEditing(false)
+    if (c.interaction_id == null) return
+    const saved = await onEdit(c.interaction_id, draft, rawEdit)
+    if (thenContinue && saved !== false && onContinue) {
+      const state = rawThinkState(draft)
+      onContinue(state === 'open' ? true : state ? false : undefined)
+    }
   }
 
   return (
@@ -98,7 +112,8 @@ export const MessageRow = memo(function MessageRow({
           </Fragment>
         ))}
 
-        {reasoning && <ReasoningFold reasoning={reasoning} />}
+        {/* The raw editor below already holds the thinking. */}
+        {reasoning && !(editing && rawEdit) && <ReasoningFold reasoning={reasoning} />}
 
         {editing ? (
           <div style={{ marginTop: 10 }}>
@@ -109,9 +124,18 @@ export const MessageRow = memo(function MessageRow({
               autoFocus
             />
             <div className="editbar">
-              <button className="btn approve" onClick={saveEdit}>
+              <button className="btn approve" onClick={() => void saveEdit()}>
                 save
               </button>
+              {onContinue && (
+                <button
+                  className="btn approve"
+                  title="save, then let the model carry on from exactly where this text stops"
+                  onClick={() => void saveEdit(true)}
+                >
+                  save &amp; continue
+                </button>
+              )}
               <button className="btn" onClick={() => setEditing(false)}>
                 cancel
               </button>

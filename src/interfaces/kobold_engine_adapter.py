@@ -15,7 +15,7 @@ import re
 import secrets
 import time
 
-from src.request_builder import AssembledRequest
+from src.request_builder import AssembledRequest, ContinueTurn
 
 # On Windows, mimetypes seeds from the registry, where `.js` is frequently
 # mapped to `text/plain`. Starlette's StaticFiles uses mimetypes.guess_type, so
@@ -611,6 +611,23 @@ class KoboldEngineAdapter:
         """History exactly as the engine would see it (DP-136 transcript seam)."""
         return self.chat_system.get_view_history
 
+    def _last_transcript_id(self, persona_name: str, user_identifier: str,
+                            channel: str, server_id: Optional[str]) -> Optional[int]:
+        """`interaction_id` of the last persisted chunk `/transcript` would
+        render for this view (DP-447 stale-view guard) — same history window,
+        same projection, so it is the id the portal's screen ends on."""
+        persona = self._personas.get(persona_name)
+        if persona is None:
+            return None
+        raw_history, _ = self._get_view_history(
+            persona_name, user_identifier, channel, server_id,
+            persona.get_base_history_messages(),
+        )
+        for chunk in reversed(build_transcript(raw_history)["chunks"]):
+            if isinstance(chunk.get("interaction_id"), int):
+                return int(chunk["interaction_id"])
+        return None
+
     @property
     def _get_session_memory_block(self) -> Callable[..., Awaitable[Optional[str]]]:
         """Public LTM seam for the client-side ltm_block route."""
@@ -626,6 +643,9 @@ class KoboldEngineAdapter:
             # raw, not resolved: show the "default" sentinel so a portal
             # round-trip preserves it (DP-227).
             "model_name": p.get_raw_model_name(),
+            # resolved: what the turn actually routes to — the portal offers
+            # continue (DP-447) only on `local`, which the sentinel can hide.
+            "effective_model_name": p.get_model_name(),
             "temperature": p.get_temperature(),
             "top_p": p.get_top_p(),
             "top_k": p.get_top_k(),
@@ -1203,18 +1223,32 @@ class KoboldEngineAdapter:
 
         @self.app.patch("/api/v1/interaction/{interaction_id}")
         async def patch_interaction(interaction_id: int, request: Request) -> Any:
-            """Update the content of an existing interaction (e.g. on manual edit)."""
+            """Update the content of an existing interaction (e.g. on manual edit).
+
+            `raw_think: true` (DP-447) edits a whole assistant turn as one text —
+            `<think>` + reasoning + `</think>` + reply — split back into the
+            reply and its reasoning. Without it only the reply changes and the
+            stored reasoning is left alone (DP-141)."""
             data = await request.json()
             content = data.get("content")
             if content is None:
                 return JSONResponse(status_code=400, content={"error": "missing 'content' field"})
             try:
-                await asyncio.to_thread(
-                    self._memory_manager.update_interaction_content,
-                    interaction_id,
-                    content,
-                )
+                if data.get("raw_think"):
+                    await asyncio.to_thread(
+                        self._memory_manager.update_assistant_raw_turn,
+                        interaction_id,
+                        content,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self._memory_manager.update_interaction_content,
+                        interaction_id,
+                        content,
+                    )
                 return {"result": "success", "interaction_id": interaction_id}
+            except ValueError as e:
+                return JSONResponse(status_code=400, content={"error": str(e)})
             except Exception as e:
                 logger.error(f"patch_interaction({interaction_id}) failed: {e}")
                 return JSONResponse(status_code=500, content={"error": str(e)})
@@ -1551,10 +1585,45 @@ class KoboldEngineAdapter:
                 if data.get(k) is not None:
                     local_inference_config[k] = data[k]
 
+            # DP-447 continue: extend the trailing assistant reply in place.
+            # `derpr_think_open` says whether its thinking is still open when
+            # the row alone cannot tell (closed thinking, no reply yet).
+            continue_turn: Optional[ContinueTurn] = None
+            if data.get("derpr_continue"):
+                think_open = data.get("derpr_think_open")
+                continue_turn = ContinueTurn(
+                    think_open=think_open if isinstance(think_open, bool) else None,
+                )
+
+            # DP-447 stale-view guard: the portal says which message its screen
+            # ends on. History is rebuilt from the DB, so a stale screen would
+            # not corrupt the prompt — but a send, retry or continue would act
+            # on a conversation the operator cannot see. Absent = no check
+            # (non-portal clients).
+            if persona_name and "derpr_expected_last_id" in data:
+                expected = data.get("derpr_expected_last_id")
+                actual = await asyncio.to_thread(
+                    self._last_transcript_id,
+                    persona_name, user_identifier, channel, server_id,
+                )
+                if expected != actual:
+                    logger.info(
+                        "OAI chat refused: stale view (persona=%s channel=%s "
+                        "expected_last_id=%s actual=%s)",
+                        persona_name, channel, expected, actual,
+                    )
+                    return JSONResponse(status_code=409, content={
+                        "error": {
+                            "code": "stale_view",
+                            "message": "The conversation changed since this page loaded it.",
+                        },
+                        "derpr_last_id": actual,
+                    })
+
             logger.info(
                 f"OAI chat -> stream_response (stream={is_stream}, "
-                f"retry={is_retry}, persona={persona_name}, "
-                f"user_text_len={len(user_text)})"
+                f"retry={is_retry}, continue={continue_turn is not None}, "
+                f"persona={persona_name}, user_text_len={len(user_text)})"
             )
 
             if not is_stream:
@@ -1568,6 +1637,7 @@ class KoboldEngineAdapter:
                     server_id=server_id,
                     message=user_text,
                     is_retry=is_retry,
+                    continue_turn=continue_turn,
                     local_inference_config=local_inference_config,
                     client_messages=msgs_in or None,
                     origin=origin,
@@ -1660,6 +1730,7 @@ class KoboldEngineAdapter:
                         server_id=server_id,
                         message=user_text,
                         is_retry=is_retry,
+                        continue_turn=continue_turn,
                         local_inference_config=local_inference_config,
                         client_messages=None,  # Explicitly None to force DB history rebuild
                         origin=origin,

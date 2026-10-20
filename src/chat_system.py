@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import (
     Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, FrozenSet, List, Optional,
-    Set, Tuple,
+    Set, Tuple, Union,
 )
 
 from src.embedding_service import EmbeddingService
@@ -26,14 +26,17 @@ from src.generation_events import (
     TokenEvent as TokenEvent,
     ToolCallResultEvent as ToolCallResultEvent,
     ToolCallStartEvent as ToolCallStartEvent,
+    ThinkCloseSplitter,
     format_internal_error as format_internal_error,
     join_reasoning,
+    render_continue_prefix,
 )
+from src.engine.providers.local import thinking_controls
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
-from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
+from src.request_builder import AssembledRequest, ContinueTurn, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
     PARK_STATUS_EXPIRED, ToolDeferredEvent, ToolLoop, _ApiPayloadEvent,
@@ -128,6 +131,40 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
           "briefly. Do not re-propose an action that was already decided, "
           "whether it was approved or denied.]"
     )
+
+
+@dataclass
+class _ContinueTarget:
+    """The assistant row a continue (DP-447) extends in place, and how its
+    stored reply is rebuilt from what streams.
+
+    Like a retry the row is overwritten in place (`retry_assistant_id`), but
+    nothing is archived — the continued text is the same reply, longer.
+    """
+    row_id: int
+    content: str
+    reasoning_prefix: str
+    prefix: str
+    #: Set when the prefix leaves the thinking open: KoboldCPP then streams
+    #: the rest of the thinking as text, which this routes back to reasoning.
+    splitter: Optional[ThinkCloseSplitter]
+
+    def route(self, ev: Union[TokenEvent, ReasoningEvent]) -> List[Union[TokenEvent, ReasoningEvent]]:
+        if self.splitter is not None and isinstance(ev, TokenEvent):
+            return self.splitter.feed(ev.delta)
+        return [ev]
+
+    def flush(self) -> List[Union[TokenEvent, ReasoningEvent]]:
+        return self.splitter.flush() if self.splitter is not None else []
+
+    def reply(self, parts: List[str]) -> str:
+        """Joined exactly: the loop's own text is stripped (a continuation
+        often starts with the space after the row's last word), and with open
+        thinking it also holds the reasoning and the closing tag."""
+        return (self.content + "".join(parts)).strip()
+
+    def reasoning(self, parts: List[str]) -> Optional[str]:
+        return (self.reasoning_prefix + "".join(parts)).strip() or None
 
 
 class ChatSystem:
@@ -292,6 +329,38 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
+    def _resolve_continue(
+            self, persona: Persona, persona_name: str, user_identifier: str,
+            channel: str, continue_turn: ContinueTurn,
+    ) -> Tuple[Optional[_ContinueTarget], str]:
+        """The row a continue extends, or None and the reason it can't."""
+        if persona.get_model_name() != "local":
+            # Prefill-and-resume is a local-server behaviour (KoboldCPP appends
+            # a trailing assistant message verbatim); a cloud API would answer
+            # it as a new turn or reject it.
+            return None, "Continue works only with `model local`."
+        row = self.memory_manager.latest_portal_assistant(
+            persona_name, user_identifier, channel,
+        )
+        if row is None:
+            return None, "Nothing to continue: the conversation does not end on an assistant reply."
+        if row.get("tool_context"):
+            return None, "Continue does not support a reply with tool steps."
+        content = row.get("content") or ""
+        reasoning = row.get("reasoning_content") or ""
+        # The template opens a think block unless this persona switched
+        # thinking off — the server default (Qwen) thinks.
+        controls = thinking_controls(persona.get_config_for_engine())
+        thinks = controls.get("chat_template_kwargs", {}).get("enable_thinking", True)
+        prefix, think_open = render_continue_prefix(
+            content, reasoning, continue_turn.think_open, template_opens_think=bool(thinks),
+        )
+        return _ContinueTarget(
+            row_id=int(row["interaction_id"]), content=content,
+            reasoning_prefix=reasoning, prefix=prefix,
+            splitter=ThinkCloseSplitter() if think_open else None,
+        ), ""
+
     async def _orchestrate(
             self,
             persona_name: str,
@@ -310,6 +379,7 @@ class ChatSystem:
             client_messages: Optional[List[Dict[str, Any]]] = None,
             continuation: Optional[_ContinuationState] = None,
             origin: Optional[Origin] = None,
+            continue_turn: Optional[ContinueTurn] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
@@ -375,6 +445,17 @@ class ChatSystem:
             )
             return
 
+        # DP-447 continue: the row being extended, resolved before any turn
+        # state so a refusal costs nothing.
+        target: Optional[_ContinueTarget] = None
+        if continue_turn is not None:
+            target, refusal = self._resolve_continue(
+                persona, persona_name, user_identifier, channel, continue_turn,
+            )
+            if target is None:
+                yield ErrorEvent(message=refusal)
+                return
+
         ctx = RequestContext(
             persona=persona, persona_name=persona_name,
             user_identifier=user_identifier, channel=channel, message=message,
@@ -385,6 +466,8 @@ class ChatSystem:
             # Fixed before assembly: the prompt stamp and the stored row must
             # carry the same time (DP-431).
             timestamp=timestamp or datetime.now(timezone.utc),
+            continue_prefix=target.prefix if target else None,
+            continue_row_content=target.content if target else "",
         )
 
         # DP-113: pin the active turn's scope so engine-side tools (e.g.
@@ -420,13 +503,18 @@ class ChatSystem:
                 #    the LLM call so the user row is always pinned even if the model
                 #    errors mid-flight.
                 user_ts = ctx.timestamp or datetime.now(timezone.utc)
-                user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
-                    is_retry=is_retry, persona_name=persona_name,
-                    user_identifier=user_identifier, channel=channel,
-                    user_display_name=user_display_name, message=message,
-                    server_id=server_id, platform_message_id=platform_message_id,
-                    timestamp=user_ts,
-                )
+                if target is not None:
+                    # A continue has no user turn; its write target is the row.
+                    user_interaction_id = None
+                    retry_assistant_id: Optional[int] = target.row_id
+                else:
+                    user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
+                        is_retry=is_retry, persona_name=persona_name,
+                        user_identifier=user_identifier, channel=channel,
+                        user_display_name=user_display_name, message=message,
+                        server_id=server_id, platform_message_id=platform_message_id,
+                        timestamp=user_ts,
+                    )
 
                 # DP-113 / DP-423: retain through the backend boundary, but only
                 # turns that have left the window this request was built from —
@@ -571,12 +659,15 @@ class ChatSystem:
                             is_first_iteration=params_first_iter,
                         )
                         params_first_iter = False
-                    elif isinstance(ev, TokenEvent):
-                        accumulated_parts.append(ev.delta)
-                        yield ev
-                    elif isinstance(ev, ReasoningEvent):
-                        accumulated_reasoning.append(ev.delta)
-                        yield ev
+                    elif isinstance(ev, (TokenEvent, ReasoningEvent)):
+                        # A continue with open thinking gets it all as text;
+                        # the target routes it back to reasoning (DP-447).
+                        for out in target.route(ev) if target else [ev]:
+                            if isinstance(out, TokenEvent):
+                                accumulated_parts.append(out.delta)
+                            else:
+                                accumulated_reasoning.append(out.delta)
+                            yield out
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
                     elif isinstance(ev, _ToolContextEvent):
@@ -657,7 +748,10 @@ class ChatSystem:
                         yield ev
                         return
                     elif isinstance(ev, _LoopFinishedEvent):
-                        final_text = ev.final_text
+                        for out in target.flush() if target else []:
+                            accumulated_reasoning.append(out.delta)
+                            yield out
+                        final_text = target.reply(accumulated_parts) if target else ev.final_text
                         response_type = ev.response_type
                         tool_context_json = ev.tool_context_json
                         retain_text = ev.retain_text
@@ -669,9 +763,14 @@ class ChatSystem:
                 # Client disconnect / abort. Flush whatever assistant text has
                 # accumulated so the row reflects what the user actually saw,
                 # then re-raise so the surrounding StreamingResponse aborts.
+                if target is not None:
+                    accumulated_reasoning.extend(e.delta for e in target.flush())
                 partial = "".join(accumulated_parts)
                 partial_reasoning = join_reasoning(accumulated_reasoning)
                 if partial.strip() or partial_reasoning:
+                    if target is not None:
+                        partial = target.reply(accumulated_parts)
+                        partial_reasoning = target.reasoning(accumulated_reasoning)
                     cancelled_id = self.turn_persistence.commit_or_update_assistant(
                         persona_name=persona_name, user_identifier=user_identifier,
                         channel=channel, server_id=server_id,
@@ -682,10 +781,13 @@ class ChatSystem:
                         tool_context_json=None,
                         reasoning_content=partial_reasoning,
                     )
-                    # DP-423: as on the error path above.
-                    self.turn_persistence.discard_overwritten_retry(
-                        cancelled_id, retry_assistant_id, partial,
-                    )
+                    # DP-423: as on the error path above. Not for a continue:
+                    # its row is still the reply the operator kept, only
+                    # longer, and the queued retain sends whatever it holds.
+                    if target is None:
+                        self.turn_persistence.discard_overwritten_retry(
+                            cancelled_id, retry_assistant_id, partial,
+                        )
                 raise
 
             # 4. Log/update assistant turn. Original text (including links)
@@ -693,6 +795,8 @@ class ChatSystem:
             #    into a separate park-only row: a turn that proposed writes still
             #    ends with real text, so it persists like any other turn and the
             #    proposals hang off that row's tool_context.
+            turn_reasoning = target.reasoning(accumulated_reasoning) if target \
+                else join_reasoning(accumulated_reasoning)
             assistant_id = self.turn_persistence.commit_or_update_assistant(
                 persona_name=persona_name, user_identifier=user_identifier,
                 channel=channel, server_id=server_id,
@@ -700,7 +804,7 @@ class ChatSystem:
                 user_interaction_id=user_interaction_id,
                 retry_assistant_id=retry_assistant_id,
                 tool_context_json=tool_context_json,
-                reasoning_content=join_reasoning(accumulated_reasoning),
+                reasoning_content=turn_reasoning,
             )
             self._register_parks(parks_this_turn, assistant_id)
             self._register_duplicates(dups_this_turn, assistant_id)
@@ -756,7 +860,7 @@ class ChatSystem:
                 response_type=response_type,
                 assistant_id=assistant_id,
                 user_interaction_id=user_interaction_id,
-                reasoning=join_reasoning(accumulated_reasoning),
+                reasoning=turn_reasoning,
                 # No ephemeral chunk: since DP-297 the turn's own text is
                 # persisted normally and each proposal carries its own token on
                 # its PendingConfirmationEvent instead.
@@ -851,6 +955,7 @@ class ChatSystem:
             local_inference_config: Optional[Dict[str, Any]] = None,
             client_messages: Optional[List[Dict[str, Any]]] = None,
             origin: Optional[Origin] = None,
+            continue_turn: Optional[ContinueTurn] = None,
     ) -> AsyncIterator[GenerationEvent]:
         """Portal-facing streaming entry. Yields TokenEvent /
         ToolCallStartEvent / ToolCallResultEvent / DoneEvent / ErrorEvent.
@@ -877,6 +982,7 @@ class ChatSystem:
             local_inference_config=local_inference_config,
             client_messages=client_messages,
             origin=origin,
+            continue_turn=continue_turn,
         )) as agen:
             async for ev in agen:
                 yield ev

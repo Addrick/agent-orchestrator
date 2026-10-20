@@ -302,11 +302,13 @@ export async function selectVersion(id: number, k: number): Promise<VersionsResp
 }
 
 // ---- row mutations ---------------------------------------------------
-export async function patchInteraction(id: number, content: string): Promise<void> {
+// `rawThink` (DP-447): `content` is the whole turn — `<think>` + reasoning +
+// `</think>` + reply — and the engine splits it back into the two fields.
+export async function patchInteraction(id: number, content: string, rawThink = false): Promise<void> {
   const r = await fetch(`${BASE}/api/v1/interaction/${id}`, {
     method: 'PATCH',
     headers: withAuth({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(rawThink ? { content, raw_think: true } : { content }),
   })
   if (!r.ok) throw new Error(`patch interaction → ${r.status}`)
 }

@@ -58,3 +58,20 @@ export function deriveTreatment(opts: {
   if (opts.hadTools && opts.emptyContent) return 'tool-only'
   return 'normal'
 }
+
+// DP-447 raw turn edits: one text holding `<think>` + reasoning + `</think>` +
+// reply. Mirrors the engine's `split_think_text`.
+export function joinRawTurn(reasoning: string | null | undefined, reply: string): string {
+  return reasoning ? `<think>\n${reasoning}\n</think>\n\n${reply}` : reply
+}
+
+// How a raw edit leaves the thinking: 'open' (no `</think>` — continue keeps
+// thinking), 'closed-empty' (closed, no reply yet — the one shape the stored
+// columns lose), 'closed', or null when the text has no think block.
+export function rawThinkState(raw: string): 'open' | 'closed-empty' | 'closed' | null {
+  const t = raw.trimStart()
+  if (!t.startsWith('<think>')) return null
+  const close = t.indexOf('</think>')
+  if (close === -1) return 'open'
+  return t.slice(close + '</think>'.length).trim() ? 'closed' : 'closed-empty'
+}
