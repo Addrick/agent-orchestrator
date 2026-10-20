@@ -5,6 +5,9 @@ Real ChatSystem + in-memory DB behind the adapter, LLM stubbed at
 `text_engine.stream_messages` — the same harness as the retry route tests.
 """
 from datetime import datetime, timedelta
+from unittest.mock import AsyncMock
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -13,6 +16,13 @@ from tests.interfaces.test_kobold_engine_adapter import (  # noqa: F401
 )
 
 _BASE = datetime(2026, 10, 20, 12, 0, 0)
+
+
+@pytest.fixture(autouse=True)
+def _kcpp_backend(monkeypatch):
+    """No network: the live server is KoboldCPP (probe tested in test_continue_turn)."""
+    monkeypatch.setattr("src.chat_system.supports_assistant_prefill",
+                        AsyncMock(return_value=True))
 
 
 def _seed(mm, reply="Red, blue,", reasoning=None, tool_context=None):

@@ -9,7 +9,9 @@ in: one text holding `<think>` + reasoning + `</think>` + reply.
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from src.generation_events import (
@@ -21,6 +23,15 @@ from src.request_builder import ContinueTurn
 from tests.test_chat_system import _drain_events, chat_system_with_mocks  # noqa: F401
 
 _TS = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _kcpp_backend(monkeypatch):
+    """The live server is KoboldCPP unless a test says otherwise — the probe
+    itself is covered below, against a mocked transport."""
+    probe = AsyncMock(return_value=True)
+    monkeypatch.setattr("src.chat_system.supports_assistant_prefill", probe)
+    return probe
 
 
 # --- think-text helpers ------------------------------------------------------
@@ -258,3 +269,56 @@ async def test_continue_refusals_touch_nothing(chat_system_with_mocks, model, ro
     assert type(events[-1]).__name__ == "ErrorEvent" and reason in events[-1].message
     memory_mock.update_interaction_content.assert_not_called()
     memory_mock.log_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_continue_on_strata_is_refused_before_generating(
+        chat_system_with_mocks, _kcpp_backend):  # noqa: F811
+    """Strata closes a trailing assistant message as a finished turn, so its
+    "continuation" would be a fresh reply glued onto the row."""
+    system, memory_mock = _continue_setup(
+        chat_system_with_mocks, {"content": "Red, blue,", "reasoning_content": None})
+    _kcpp_backend.return_value = False
+    seen: Dict[str, Any] = {}
+    _scripted(system, [{"type": "text_delta", "text": "Red, blue, yellow."}], seen)
+
+    events = await _drain_events(system.stream_response(
+        "test_persona", "portal", "web_ui", "", continue_turn=ContinueTurn()))
+
+    assert type(events[-1]).__name__ == "ErrorEvent" and "KoboldCPP" in events[-1].message
+    assert "messages" not in seen  # never reached the model
+    memory_mock.update_interaction_content.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, body, expected", [
+    (200, {"result": "KoboldCpp", "version": "1.120"}, True),
+    (404, {"detail": "Not Found"}, False),          # Strata: no /api/extra routes
+    (200, "not json", False),
+])
+async def test_prefill_probe_recognises_koboldcpp_only(monkeypatch, status, body, expected):
+    from src.engine.providers import local
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/extra/version"
+        if isinstance(body, dict):
+            return httpx.Response(status, json=body)
+        return httpx.Response(status, text=body)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(local.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    assert await local.supports_assistant_prefill() is expected
+
+
+@pytest.mark.asyncio
+async def test_prefill_probe_is_false_when_unreachable(monkeypatch):
+    from src.engine.providers import local
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(local.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    assert await local.supports_assistant_prefill() is False

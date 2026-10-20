@@ -31,7 +31,7 @@ from src.generation_events import (
     join_reasoning,
     render_continue_prefix,
 )
-from src.engine.providers.local import thinking_controls
+from src.engine.providers.local import supports_assistant_prefill, thinking_controls
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
@@ -329,7 +329,7 @@ class ChatSystem:
             is_retry=is_retry, client_messages=client_messages,
         )
 
-    def _resolve_continue(
+    async def _resolve_continue(
             self, persona: Persona, persona_name: str, user_identifier: str,
             channel: str, continue_turn: ContinueTurn,
     ) -> Tuple[Optional[_ContinueTarget], str]:
@@ -346,6 +346,12 @@ class ChatSystem:
             return None, "Nothing to continue: the conversation does not end on an assistant reply."
         if row.get("tool_context"):
             return None, "Continue does not support a reply with tool steps."
+        if not await supports_assistant_prefill():
+            # Strata (or an unreachable server): it would answer after the
+            # reply instead of resuming it, and the fresh answer would be
+            # appended to the row as if it were the continuation.
+            return None, ("Continue needs KoboldCPP: the local server running now "
+                          "can't resume a reply, it would start a new one.")
         content = row.get("content") or ""
         reasoning = row.get("reasoning_content") or ""
         # The template opens a think block unless this persona switched
@@ -449,7 +455,7 @@ class ChatSystem:
         # state so a refusal costs nothing.
         target: Optional[_ContinueTarget] = None
         if continue_turn is not None:
-            target, refusal = self._resolve_continue(
+            target, refusal = await self._resolve_continue(
                 persona, persona_name, user_identifier, channel, continue_turn,
             )
             if target is None:

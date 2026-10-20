@@ -48,6 +48,30 @@ def local_base_url() -> str:
     return local_backend.active()[0].url
 
 
+async def supports_assistant_prefill() -> bool:
+    """Whether the live local server continues a trailing assistant message
+    (DP-447 continue) rather than answering after it.
+
+    KoboldCPP does: its jinja path renders every message but the last and
+    appends that one's text verbatim. Strata does not: `render_prompt` closes
+    the trailing assistant message as a finished turn and opens a new one, so a
+    "continue" would write a fresh reply that is then glued onto the old text
+    (verified in its `serve/server.py`, 2026-10-20). Told apart by KoboldCPP's
+    `/api/extra/version` (`result: "KoboldCpp"`), the same "is it KoboldCPP"
+    question `/api/extra/perf` answers by 404 (DP-417).
+
+    Probed every time, never cached: the URL is often the `:5001` load
+    balancer, which moves between the two servers without the URL changing.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(f"{local_base_url()}/api/extra/version")
+        body = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return False
+    return isinstance(body, dict) and body.get("result") == "KoboldCpp"
+
+
 async def get_local_client(engine: "TextEngine") -> AsyncOpenAI:
     """The (lazily cached) client for the local server. No retries: a retried
     streaming request would start a second generation, and the native
