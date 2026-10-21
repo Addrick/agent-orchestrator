@@ -3,6 +3,7 @@
 import logging
 import os
 import asyncio
+import uuid
 from typing import Dict, Any, Optional, Tuple, List, Callable, AsyncGenerator, AsyncIterator
 from contextlib import aclosing, asynccontextmanager, AsyncExitStack
 
@@ -16,7 +17,7 @@ from config.global_config import (
     RATE_LIMIT_GEMINI_3_RPM,
     RATE_LIMIT_GEMMA_3_RPM, RATE_LIMIT_GEMMA_4_RPM,
     RATE_LIMIT_OPENAI_RPM, RATE_LIMIT_ANTHROPIC_RPM,
-    RATE_LIMIT_AGY_RPM, RATE_LIMIT_CC_RPM,
+    RATE_LIMIT_AGY_RPM, RATE_LIMIT_CC_RPM, RATE_LIMIT_OPENCODE_RPM,
 )
 # --- Provider-specific imports ---
 import anthropic
@@ -36,6 +37,7 @@ from src.engine.providers.anthropic import stream_anthropic
 from src.engine.providers import google
 from src.engine.providers import agy as agy_provider
 from src.engine.providers import cc as cc_provider
+from src.engine.providers.opencode import OpencodeProvider
 from src.engine.providers import _subprocess
 
 # Single source of truth lives in each provider module (the agy route is a
@@ -94,6 +96,7 @@ class TextEngine:
         self._anthropic_limiter     = AsyncLimiter(max_rate=RATE_LIMIT_ANTHROPIC_RPM, time_period=60)
         self._agy_limiter           = AsyncLimiter(max_rate=RATE_LIMIT_AGY_RPM,       time_period=60)
         self._cc_limiter            = AsyncLimiter(max_rate=RATE_LIMIT_CC_RPM,        time_period=60)
+        self._opencode_limiter      = AsyncLimiter(max_rate=RATE_LIMIT_OPENCODE_RPM,  time_period=60)
         # Persistent agy/cc workspaces are shared across calls; a per-workspace
         # lock serializes them so one call's CLI state can't clobber another's.
         self._agy_workspace_locks: Dict[str, asyncio.Lock] = {}
@@ -108,7 +111,8 @@ class TextEngine:
             f"OpenAI: {RATE_LIMIT_OPENAI_RPM} RPM | "
             f"Anthropic: {RATE_LIMIT_ANTHROPIC_RPM} RPM | "
             f"AGY: {RATE_LIMIT_AGY_RPM} RPM | "
-            f"CC: {RATE_LIMIT_CC_RPM} RPM"
+            f"CC: {RATE_LIMIT_CC_RPM} RPM | "
+            f"opencode: {RATE_LIMIT_OPENCODE_RPM} RPM"
         )
 
         # DP-244: ordered Provider registry (replaces the _get_provider_route
@@ -255,6 +259,9 @@ class TextEngine:
 
         provider = self._registry.resolve(model_name)
         limiters = provider.limiters_for(model_name)
+        # One id per call, the same on every retry below. A stateful provider
+        # (opencode, DP-448) keys on it to tell its own retry from a new turn.
+        persona_config = {**persona_config, "request_id": uuid.uuid4().hex}
 
         for attempt in range(EMPTY_RESPONSE_RETRIES + 1):
             committed = False
@@ -595,6 +602,18 @@ class TextEngine:
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         async for ev in cc_provider.stream_cc(self, config, history_object, tools):
+            yield ev
+
+    async def _stream_opencode_response(
+        self, config: Dict[str, Any], history_object: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Engine seam for the opencode provider (DP-448): one-shot like cc, so
+        the result is adapted into the unified event shape."""
+        provider = self._registry.resolve(config.get("model_name", ""))
+        assert isinstance(provider, OpencodeProvider)
+        result, api_payload = await provider.generate(config, history_object, tools)
+        async for ev in self._events_from_one_shot(result, api_payload):
             yield ev
 
     # ------------------------------------------------------------------

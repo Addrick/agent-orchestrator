@@ -31,6 +31,9 @@ def get_model_prefix(model_name: str) -> str:
     # Anthropic API family — mirrors the precedence in engine._get_provider_route.
     if name_lower.startswith("cc-"):
         return "cc"
+    elif name_lower.startswith("opencode"):
+        # Before "claude" for the same reason: opencode-<provider>/claude-* (DP-448).
+        return "opencode"
     elif name_lower.startswith("gpt"):
         return "gpt"
     elif "claude" in name_lower:
@@ -123,6 +126,7 @@ def refresh_available_anthropic_models() -> List[str]:
 STATIC_MODELS: Dict[str, List[str]] = {
     'Antigravity (OAuth tier)': ['agy-flash'],
     'Claude Code (sandboxed)': ['cc-sonnet', 'cc-opus', 'cc-haiku'],
+    'opencode (remote agent)': ['opencode'],
     'Local': ['local'],
 }
 
