@@ -638,7 +638,9 @@ session is created with them resolved: reading outside the workspace and
 reading `.env` files are allowed, the `question` tool is denied (the agent
 asks in its reply instead), and opencode's repeated-tool-call guard
 (`doom_loop`, the same call with identical arguments several times in a row) is
-denied, so a stuck agent is refused rather than left to spin. A call that runs past the timeout is
+denied. That guard only sees repeats within a single step, so it rarely fires;
+the [codr agent's loop guard](#codr-working-on-its-own-the-codr-agent-dp-449)
+covers the general case for the turns codr starts on its own. A call that runs past the timeout is
 aborted on the server, and the persona replies with an error. When DERPR
 retries a failed attempt, it picks up the turn already sent rather than sending
 the message a second time. Regenerating a reply is a new turn: the agent sees
@@ -661,6 +663,93 @@ Configure in `.env` or `config/global_config.py`:
 
 The opt-in persona `codr` (`config/optional_personas/codr.json`) uses this
 route; add it the same way as [hypr](#hypr--the-infra-operator-opt-in-not-seeded).
+
+#### codr working on its own (the `codr` agent, DP-449)
+
+With the `codr` agent running, codr no longer only answers messages. It works
+through a **task queue** by itself, decides when to tell you something, and keeps
+going while it waits for your answer. The agent is off by default
+(`auto_start: false` in `agents.json`); start it with `manage_agent` or set
+`auto_start`.
+
+**The task queue.** Each task is a folder under `config/codr_tasks/<task>/`:
+
+- `TASK.md`: what to build, written for codr. An optional first line
+  `max_attempts: N` overrides the default.
+- `check.sh`: how DERPR decides pass or fail. It is a shell script run in codr's
+  workspace folder for that task; exit code 0 means pass. **codr never sees the
+  check**: DERPR keeps it and only runs it after codr says it is done, so codr can't
+  edit it to pass.
+- `seed/` (optional): starting files, e.g. a small repo with a bug in it. Before
+  each attempt DERPR copies any of them that are missing into the task folder, so
+  what codr changed stays.
+
+When codr is idle, the agent starts the oldest task that has neither passed nor run
+out of attempts. codr gets the task text, its own folder `tasks/<task>/` in the
+workspace, and the instruction to keep an attempts log at
+`tasks/<task>/attempts.md`. When the turn ends, DERPR runs the check:
+
+- **pass**: the task is done, and a one-line result is posted to codr's channel;
+- **fail**: if attempts remain, the next tick starts a new attempt with the check's
+  output (its last 2,500 characters); if not, the task is marked failed and the
+  result is posted.
+
+Every attempt is recorded in the agent action log (task, attempt, outcome, run
+time). Results stay there, so a restart or deploy resumes the queue where it was.
+To rerun a task, rename its folder: a new name is a new task.
+
+**codr can message you.** codr has a `notify_adam` tool in every turn. While the
+agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
+one tick. It is meant for progress worth knowing and for problems you can help
+with. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
+dropped and logged, and the next task result says how many were dropped.
+
+**Talking to codr while it works.** A message to codr while one of its own tasks is
+running does not wait for the task to finish. It goes straight into the running
+turn, and codr reads it at its next step. DERPR replies at once with ✅ (delivered).
+codr's answer comes in the result it posts when the turn ends, which can be up to
+`max_turn_seconds` later, unless codr chooses to answer sooner with `notify_adam`.
+When codr is idle, a message is an ordinary chat turn, as before.
+
+**Loop guard.** DERPR watches each turn codr starts on its own and stops it when:
+
+- codr makes the same tool call with the same arguments 3 times in a row
+  (opencode's own guard only sees repeats inside a single step);
+- its reasoning repeats: the same text in 3 steps in a row;
+- nothing new appears in the turn for `stall_seconds`;
+- the turn runs past `max_turn_seconds`.
+
+The first time in a task attempt, DERPR stops the turn and starts a new one with a
+nudge naming what repeated and asking codr to change approach. The second time,
+it stops the turn, records the attempt as `aborted`, and posts the reason to the
+channel. Running past `max_turn_seconds` aborts right away, with no nudge: the
+attempt is out of time.
+
+**More than one model server.** codr can hand subtasks to a `pool` subagent
+(opencode's `task` tool, in the background if it wants to keep working). The
+subagent runs on the inference pool, which uses whichever local model servers are
+up. Each subagent stays on one server, and the servers may run different models.
+codr itself stays on its configured model.
+
+**Setup DERPR does in the workspace.** On the agent's first tick it writes
+`.opencode/` into codr's workspace: the `notify_adam` tool, the `pool` subagent
+and its provider. Edits to those files are overwritten on the next start.
+
+Settings, per instance in `agents.json` under `codr`:
+- `schedule.interval` (default `30` s): how often the agent checks codr.
+- `notification_target`: where results and `notify_adam` messages go, e.g.
+  `{"channel": "discord_channel", "recipient": "<channel id>"}`. Unset = nothing
+  is posted (logged instead).
+- `persona` (default `codr`): which opencode persona the agent drives.
+- `tasks_dir` (default `config/codr_tasks`).
+- `max_attempts` (default `3`) per task.
+- `max_turn_seconds` (default `7200`), `stall_seconds` (default `900`).
+- `check_timeout_seconds` (default `600`): how long one task's check may run.
+- `notify_per_hour` (default `6`).
+- `start_tasks` (default `true`): `false` keeps the watcher and relay running but
+  starts no new tasks.
+- `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`
+  (default `65536`): the pool provider codr's subagent uses.
 
 ## Personas
 

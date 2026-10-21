@@ -24,6 +24,7 @@ from src.agents.managr_agent import ManagrAgent
 from src.agents.sqlite_consolidator import SqliteConsolidator
 from src.agents.zammad_bot import ZammadBot
 from src.agents.reminder_agent import ReminderAgent
+from src.agents.codr_agent import CodrAgent
 from src.agents.date_tagger import DateTagger
 from src.agents.content_classifier import ContentClassifier
 from src.clients.notification import (
@@ -261,6 +262,10 @@ def _register_agents(
             "Zammad credentials missing. Zammad-dependent agents (zammad_bot, dispatch) "
             "will not be registered."
         )
+
+    # DP-449: drives the opencode persona `codr` through its task queue. Off
+    # unless agents.json says auto_start; needs OPENCODE_SERVER_URL to do anything.
+    agent_manager.register("codr", CodrAgent)
 
     # Single-shot inference agents (DP-292): DI-built on lookup, never looped.
     # Registered unconditionally.
