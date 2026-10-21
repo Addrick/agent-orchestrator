@@ -91,6 +91,31 @@ def test_stale_view_is_refused_before_anything_is_written():
     mm.close()
 
 
+def test_the_request_names_its_persona_not_the_engine_wide_active_one():
+    """Tab A shows test_persona; tab B has since switched the engine to other."""
+    adapter, mm, persona, chat_system = _make_real_adapter(deltas=(" yellow.",))
+    chat_system.personas["other"] = type(persona)(
+        persona_name="other", model_name="local", prompt="x", history_messages=10,
+    )
+    _, assistant_id = _seed(mm)
+
+    with TestClient(adapter.app) as client:
+        assert client.put("/api/v1/model", json={"model": "other"}).json() == {"result": "other"}
+        r = client.post("/v1/chat/completions", json=_body(
+            model="test_persona", derpr_continue=True,
+            derpr_expected_last_id=assistant_id))
+        assert r.status_code == 200
+        # A client naming no known persona still gets the active one.
+        r = client.post("/v1/chat/completions", json=_body(
+            model="some-backend-model", derpr_user_text="hi",
+            derpr_expected_last_id=None))
+        assert r.status_code == 200
+
+    assert _fetch_portal_rows(mm, "test_persona")[-1]["content"] == "Red, blue, yellow."
+    assert len(_fetch_portal_rows(mm, "other")) == 2
+    mm.close()
+
+
 def test_current_view_and_empty_conversation_pass_the_guard():
     adapter, mm, _, _ = _make_real_adapter(deltas=("hi there",))
     with TestClient(adapter.app) as client:

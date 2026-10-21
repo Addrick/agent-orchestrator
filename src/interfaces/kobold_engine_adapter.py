@@ -1538,7 +1538,16 @@ class KoboldEngineAdapter:
             is_retry = bool(data.get("derpr_retry"))
             sidecar_user = data.get("derpr_user_text")
             is_stream = bool(data.get("stream"))
-            persona_name = self._get_current_persona_name()
+            # The request's own `model` wins: the active persona is one
+            # engine-wide setting, so a second tab switching it would otherwise
+            # route this tab's turn into another persona's conversation (and,
+            # with the DP-447 stale-view guard, refuse every send). Clients that
+            # name no persona (or a backend model id) keep the active one.
+            requested = data.get("model")
+            persona_name = (
+                requested if isinstance(requested, str) and requested in self._personas
+                else self._get_current_persona_name()
+            )
             # DP-136 channel scoping: the portal may target a specific channel
             # (and optionally user_identifier/server_id). Defaults preserve the
             # single web_ui/portal behavior. Creating a "new channel" is just
