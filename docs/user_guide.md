@@ -1916,7 +1916,7 @@ The semantic memory tier can be backed by [vectorize-io/hindsight](https://githu
 
 ### Deployment
 
-**Production (since 2026-05-19):** Hindsight runs on `aux-desktop` / `derpr-host` (`10.0.0.70`), bound to `0.0.0.0:8888`; the derpr default `HINDSIGHT_URL` points there. The stack is **maintained out-of-repo** on that host — a Linux container since the 2026-06-23 Proxmox cutover — under `/opt/configs/hindsight/` (compose file + `kobold-lb.conf` + engine patches; the `C:\Server\Hindsight\` path older notes quote is the retired Windows install) — this repo no longer ships a Hindsight compose template. For offline/local development, recreate a compose from the host copy (bind `127.0.0.1:8888` and point the kobold-proxy upstream at a reachable kobold).
+**Production (since 2026-05-19):** Hindsight runs in CT100 `derpr-host` (`10.0.0.70`, on Proxmox host `derpr` since 2026-10-21), bound to `0.0.0.0:8888`; the derpr default `HINDSIGHT_URL` points there. The stack is **maintained out-of-repo** on that host — a Linux container since the 2026-06-23 Proxmox cutover — under `/opt/configs/hindsight/` (compose file + `kobold-lb.conf` + engine patches; the `C:\Server\Hindsight\` path older notes quote is the retired Windows install) — this repo no longer ships a Hindsight compose template. For offline/local development, recreate a compose from the host copy (bind `127.0.0.1:8888` and point the kobold-proxy upstream at a reachable kobold).
 
 The stack runs two containers:
 
