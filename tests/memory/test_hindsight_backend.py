@@ -85,7 +85,7 @@ async def test_retain_turn_threads_untrusted_tag(backend: HindsightBackend) -> N
     assert "role:user" in item["tags"]
     assert "channel:c1" in item["tags"]
     assert item["document_id"].startswith("alice:c1:")
-    assert item["update_mode"] == "replace"  # first turn in scope
+    assert item["update_mode"] == "append"  # first turn in scope creates the doc (DP-443)
 
 
 @pytest.mark.asyncio
@@ -415,8 +415,7 @@ async def test_document_id_stable_within_scope(backend: HindsightBackend) -> Non
     doc_ids = {it["document_id"] for it in seen}
     assert len(doc_ids) == 1, f"all retains in same scope must share doc_id, got {doc_ids}"
     modes = [it["update_mode"] for it in seen]
-    assert modes[0] == "replace"
-    assert all(m == "append" for m in modes[1:])
+    assert all(m == "append" for m in modes)
 
 
 @pytest.mark.asyncio
@@ -446,7 +445,7 @@ async def test_document_id_differs_across_scopes(backend: HindsightBackend) -> N
 
 @pytest.mark.asyncio
 async def test_session_gap_starts_new_document(backend: HindsightBackend) -> None:
-    """>SESSION_GAP_SECONDS gap → new document_id + update_mode='replace'."""
+    """>SESSION_GAP_SECONDS gap → new document_id + update_mode="append" (DP-443)."""
     seen: List[Dict[str, Any]] = []
 
     async def fake_aretain(bank_id: str, items, async_=True) -> Dict[str, Any]:
@@ -472,8 +471,8 @@ async def test_session_gap_starts_new_document(backend: HindsightBackend) -> Non
         await backend.aclose()
 
     assert seen[0]["document_id"] != seen[1]["document_id"]
-    assert seen[0]["update_mode"] == "replace"
-    assert seen[1]["update_mode"] == "replace"
+    assert seen[0]["update_mode"] == "append"
+    assert seen[1]["update_mode"] == "append"
 
 
 @pytest.mark.asyncio

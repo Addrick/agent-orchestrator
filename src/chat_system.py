@@ -40,8 +40,8 @@ from src.request_builder import AssembledRequest, ContinueTurn, RequestBuilder, 
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
     PARK_STATUS_EXPIRED, ToolDeferredEvent, ToolLoop, _ApiPayloadEvent,
-    _LoopFinishedEvent, _ToolContextEvent, _WriteDuplicateEvent,
-    write_call_identity,
+    _LoopFinishedEvent, _StepBoundaryEvent, _ToolContextEvent,
+    _WriteDuplicateEvent, seal_stopped_span, write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tool_policy import callable_tool_names
@@ -589,6 +589,13 @@ class ChatSystem:
             # `duplicate_of_pending` entries get corrected when the original
             # proposal resolves.
             dups_this_turn: List[_WriteDuplicateEvent] = []
+            # DP-444: where the latest tool step's prose ends. A turn that
+            # stops or errors keeps its steps; its reply is only the text
+            # written after the last of them, since every step's own prose is
+            # already on that step in the context. `stopped_span` is the loop's
+            # live history, sealed only if the turn is stopped.
+            reply_from = 0
+            stopped_span: Optional[_StepBoundaryEvent] = None
 
             def _already_pending(write_call: Dict[str, Any]) -> Optional[str]:
                 """Token of an identical proposal still awaiting the operator.
@@ -679,8 +686,12 @@ class ChatSystem:
                             yield out
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
+                    elif isinstance(ev, _StepBoundaryEvent):
+                        reply_from = len(accumulated_parts)
+                        stopped_span = ev
                     elif isinstance(ev, _ToolContextEvent):
                         tool_context_json = ev.tool_context_json
+                        ctx.turn_tainted = ctx.turn_tainted or ev.turn_tainted
                     elif isinstance(ev, ToolDeferredEvent):
                         # DP-297: a deferred call, mid-turn. Hold it — the store
                         # registration needs the assistant row id that does not
@@ -728,31 +739,17 @@ class ChatSystem:
                         # its own prose with no trace of the call that failed,
                         # and it re-proposes or hallucinates the action.
                         if tool_context_json:
-                            errored_id = self.turn_persistence.commit_or_update_assistant(
-                                persona_name=persona_name,
-                                user_identifier=user_identifier,
-                                channel=channel, server_id=server_id,
-                                final_text="".join(accumulated_parts),
-                                response_type=ResponseType.LLM_GENERATION,
-                                user_interaction_id=user_interaction_id,
-                                retry_assistant_id=retry_assistant_id,
+                            # An error only ends an iteration's model call,
+                            # after every earlier step has its results, so all
+                            # of this turn's gated writes are in that context.
+                            self._commit_interrupted_turn(
+                                persona_name, user_identifier, channel, server_id,
+                                user_interaction_id, retry_assistant_id,
+                                reply="".join(accumulated_parts[reply_from:]),
+                                reasoning=join_reasoning(accumulated_reasoning),
                                 tool_context_json=tool_context_json,
-                                reasoning_content=join_reasoning(accumulated_reasoning),
-                            )
-                            # Writes gated before the loop died are still real
-                            # proposals — register them against the row that
-                            # just captured their `awaiting_human_approval`
-                            # entries, or the operator sees affordances that
-                            # resolve to nothing.
-                            self._register_parks(parks_this_turn, errored_id)
-                            # After the parks: a duplicate can point at a park
-                            # created earlier in THIS turn, which only became
-                            # findable by token on the line above.
-                            self._register_duplicates(dups_this_turn, errored_id)
-                            # DP-423: a retry whose partial text overwrote a
-                            # queued reply is not retained, like any errored turn.
-                            self.turn_persistence.discard_overwritten_retry(
-                                errored_id, retry_assistant_id, "".join(accumulated_parts),
+                                parks=parks_this_turn, dups=dups_this_turn,
+                                tainted=ctx.turn_tainted,
                             )
                         yield ev
                         return
@@ -769,34 +766,40 @@ class ChatSystem:
                         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
                         self.request_builder.set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
-                # Client disconnect / abort. Flush whatever assistant text has
-                # accumulated so the row reflects what the user actually saw,
-                # then re-raise so the surrounding StreamingResponse aborts.
+                # Client disconnect / abort. Stopping is a normal way to end a
+                # turn ("what it has is fine"), so keep everything it did: every
+                # tool step, including the one in flight — its calls that
+                # returned keep their results, the rest are sealed as cut off —
+                # and the text written after the last step. Every gated write
+                # received so far has its history entry in that span (the loop
+                # appends it before yielding the park), so all of them stay
+                # approvable. Then re-raise so the StreamingResponse aborts.
+                tool_context_json, stopped_tainted = (
+                    seal_stopped_span(stopped_span.history, stopped_span.start)
+                    if stopped_span is not None else (tool_context_json, False)
+                )
+                # A continue (DP-447) keeps the row's original reply and
+                # thinking in front of whatever it streamed before the stop.
                 if target is not None:
                     accumulated_reasoning.extend(e.delta for e in target.flush())
-                partial = "".join(accumulated_parts)
-                partial_reasoning = join_reasoning(accumulated_reasoning)
-                if partial.strip() or partial_reasoning:
-                    if target is not None:
-                        partial = target.reply(accumulated_parts)
-                        partial_reasoning = target.reasoning(accumulated_reasoning)
-                    cancelled_id = self.turn_persistence.commit_or_update_assistant(
-                        persona_name=persona_name, user_identifier=user_identifier,
-                        channel=channel, server_id=server_id,
-                        final_text=partial,
-                        response_type=ResponseType.LLM_GENERATION,
-                        user_interaction_id=user_interaction_id,
-                        retry_assistant_id=retry_assistant_id,
-                        tool_context_json=None,
-                        reasoning_content=partial_reasoning,
-                    )
-                    # DP-423: as on the error path above. Not for a continue:
-                    # its row is still the reply the operator kept, only
-                    # longer, and the queued retain sends whatever it holds.
-                    if target is None:
-                        self.turn_persistence.discard_overwritten_retry(
-                            cancelled_id, retry_assistant_id, partial,
-                        )
+                    stopped_reply = target.reply(accumulated_parts)
+                    stopped_reasoning = target.reasoning(accumulated_reasoning)
+                else:
+                    stopped_reply = "".join(accumulated_parts[reply_from:])
+                    stopped_reasoning = join_reasoning(accumulated_reasoning)
+                self._commit_interrupted_turn(
+                    persona_name, user_identifier, channel, server_id,
+                    user_interaction_id, retry_assistant_id,
+                    reply=stopped_reply,
+                    reasoning=stopped_reasoning,
+                    tool_context_json=tool_context_json,
+                    parks=parks_this_turn, dups=dups_this_turn,
+                    tainted=ctx.turn_tainted or stopped_tainted,
+                    # DP-423 drops a retry's overwritten attempt. Not for a
+                    # continue: its row is still the reply the operator kept,
+                    # only longer, and the queued retain sends whatever it holds.
+                    discard_retry=target is None,
+                )
                 raise
 
             # 4. Log/update assistant turn. Original text (including links)
@@ -875,6 +878,63 @@ class ChatSystem:
                 # its PendingConfirmationEvent instead.
                 ephemeral_chunk_id=None,
             )
+
+    def _commit_interrupted_turn(
+            self, persona_name: str, user_identifier: str, channel: str,
+            server_id: Optional[str],
+            user_interaction_id: Optional[int],
+            retry_assistant_id: Optional[int],
+            *,
+            reply: str,
+            reasoning: Optional[str],
+            tool_context_json: Optional[str],
+            parks: List[ParkedWrite],
+            dups: List[_WriteDuplicateEvent],
+            tainted: bool,
+            discard_retry: bool = True,
+    ) -> Optional[int]:
+        """Persist a turn that ended early — errored or stopped (DP-444).
+
+        One path for both, because both keep the same thing: the finished tool
+        steps (`tool_context_json`, whose assistant entries already carry each
+        step's prose) and the text after the last of them as the reply. Saving
+        every streamed delta instead put each step's prose in the reply too,
+        so the model was sent it twice and the portal showed it glued on.
+
+        Gated writes are registered against the row like a finished turn's:
+        each is still a real proposal whose `awaiting_human_approval` entry is
+        in this row. The caller passes only the parks inside `tool_context_json`.
+        The turn is never retained (DP-423 drops a retry it overwrote; a
+        continue, `discard_retry=False`, keeps its row's queued retain).
+
+        `tainted` is set like a finished turn's sticky taint, but only ever
+        raised: the saved steps replay their tool results next turn, and an
+        untrusted one must not come back unflagged (DP-113).
+        """
+        if tainted:
+            self.request_builder.set_conversation_taint(
+                (user_identifier, persona_name, channel, server_id), True,
+            )
+        row_id = self.turn_persistence.commit_or_update_assistant(
+            persona_name=persona_name, user_identifier=user_identifier,
+            channel=channel, server_id=server_id,
+            final_text=reply,
+            response_type=ResponseType.LLM_GENERATION,
+            user_interaction_id=user_interaction_id,
+            retry_assistant_id=retry_assistant_id,
+            tool_context_json=tool_context_json,
+            reasoning_content=reasoning,
+        )
+        if parks or dups:
+            self._register_parks(parks, row_id)
+            # After the parks: a duplicate can point at a park created earlier
+            # in THIS turn, which only became findable by token on the line above.
+            self._register_duplicates(dups, row_id)
+        if discard_retry:
+            self.turn_persistence.discard_overwritten_retry(
+                row_id, retry_assistant_id, reply,
+            )
+        return row_id
 
     def _register_parks(self, parks: List[ParkedWrite],
                         assistant_id: Optional[int]) -> None:
