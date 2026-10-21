@@ -1587,12 +1587,15 @@ class KoboldEngineAdapter:
 
             # DP-447 continue: extend the trailing assistant reply in place.
             # `derpr_think_open` says whether its thinking is still open when
-            # the row alone cannot tell (closed thinking, no reply yet).
+            # the row alone cannot tell (closed thinking, no reply yet);
+            # `derpr_continue_id` is the row the screen means to extend.
             continue_turn: Optional[ContinueTurn] = None
             if data.get("derpr_continue"):
                 think_open = data.get("derpr_think_open")
+                row_id = data.get("derpr_continue_id")
                 continue_turn = ContinueTurn(
                     think_open=think_open if isinstance(think_open, bool) else None,
+                    row_id=row_id if isinstance(row_id, int) and not isinstance(row_id, bool) else None,
                 )
 
             # DP-447 stale-view guard: the portal says which message its screen

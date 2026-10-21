@@ -272,6 +272,22 @@ async def test_continue_refusals_touch_nothing(chat_system_with_mocks, model, ro
 
 
 @pytest.mark.asyncio
+async def test_continue_refuses_a_row_the_screen_does_not_end_on(
+        chat_system_with_mocks):  # noqa: F811
+    """A GLOBAL persona's view can end on another channel's reply while this
+    session's own latest is older: extending that one writes a row the
+    operator is not looking at, after a prompt that ends somewhere else."""
+    system, memory_mock = _continue_setup(
+        chat_system_with_mocks, {"content": "Red, blue,", "reasoning_content": None})
+
+    events = await _drain_events(system.stream_response(
+        "test_persona", "portal", "web_ui", "", continue_turn=ContinueTurn(row_id=7)))
+
+    assert type(events[-1]).__name__ == "ErrorEvent" and "on screen" in events[-1].message
+    memory_mock.update_interaction_content.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_continue_on_strata_is_refused_before_generating(
         chat_system_with_mocks, _kcpp_backend):  # noqa: F811
     """Strata closes a trailing assistant message as a finished turn, so its

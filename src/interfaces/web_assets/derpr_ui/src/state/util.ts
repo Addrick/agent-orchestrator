@@ -60,9 +60,13 @@ export function deriveTreatment(opts: {
 }
 
 // DP-447 raw turn edits: one text holding `<think>` + reasoning + `</think>` +
-// reply. Mirrors the engine's `split_think_text`.
+// reply. Mirrors the engine's `split_think_text`. Thinking with no reply yet
+// is left open, as the engine reads that row (`render_continue_prefix`): a
+// closing tag here would make an unchanged save mark it closed, and continue
+// would then answer instead of carrying on the thought.
 export function joinRawTurn(reasoning: string | null | undefined, reply: string): string {
-  return reasoning ? `<think>\n${reasoning}\n</think>\n\n${reply}` : reply
+  if (!reasoning) return reply
+  return reply ? `<think>\n${reasoning}\n</think>\n\n${reply}` : `<think>\n${reasoning}`
 }
 
 // How a raw edit leaves the thinking: 'open' (no `</think>` — continue keeps

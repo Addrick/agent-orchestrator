@@ -35,8 +35,10 @@ export function Composer({
 }: Props) {
   const [text, setText] = useState('')
   // Adjusted during render (not an effect) so the restored text lands in the
-  // same paint; `seq` tells a new restore from one already applied.
-  const [restoredSeq, setRestoredSeq] = useState(0)
+  // same paint; `seq` tells a new restore from one already applied. Seeded
+  // from the current one: a remount (back from the Memory/Infra view) must
+  // not re-apply a draft that was restored, and sent, before it.
+  const [restoredSeq, setRestoredSeq] = useState(() => restoredDraft?.seq ?? 0)
   if (restoredDraft && restoredDraft.seq !== restoredSeq) {
     setRestoredSeq(restoredDraft.seq)
     setText(restoredDraft.text)

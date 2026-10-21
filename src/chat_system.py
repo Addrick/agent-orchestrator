@@ -344,6 +344,9 @@ class ChatSystem:
         )
         if row is None:
             return None, "Nothing to continue: the conversation does not end on an assistant reply."
+        if continue_turn.row_id is not None and int(row["interaction_id"]) != continue_turn.row_id:
+            return None, ("Nothing to continue: the reply on screen is not this "
+                          "session's latest message.")
         if row.get("tool_context"):
             return None, "Continue does not support a reply with tool steps."
         if not await supports_assistant_prefill():

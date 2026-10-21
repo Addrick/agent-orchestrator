@@ -97,8 +97,15 @@ class ContinueTurn:
     `think_open` overrides what the row implies about its thinking — needed
     only for closed thinking with no reply yet, which the stored columns
     cannot tell apart from an open block. None = decide from the row.
+
+    `row_id` is the reply the caller means to extend. The row continue writes
+    to is this session's own latest (retry's lookup), but a GLOBAL/SERVER
+    persona's view — and its prompt — can end on another channel's row; a
+    mismatch is refused instead of extending a row the screen does not end
+    on. None = no check (non-portal callers).
     """
     think_open: Optional[bool] = None
+    row_id: Optional[int] = None
 
 
 @dataclass

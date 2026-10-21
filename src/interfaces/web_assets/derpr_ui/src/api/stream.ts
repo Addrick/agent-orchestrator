@@ -41,6 +41,8 @@ export interface ChatRequest {
   // says whether its thinking is still open when the row alone can't tell.
   derpr_continue?: boolean
   derpr_think_open?: boolean
+  // The row being continued; the engine refuses if it would extend another.
+  derpr_continue_id?: number
   // DP-447 stale-view guard: the interaction_id this screen ends on (null for
   // an empty conversation). The engine refuses the turn with 409 on mismatch.
   derpr_expected_last_id?: number | null
