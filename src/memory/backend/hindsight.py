@@ -453,8 +453,13 @@ class _DocScopeStore:
       2. Is this turn append-ing to it, or starting a new one?
 
     Heuristic: if more than SESSION_GAP_SECONDS have passed since the last
-    retain in this scope (or no row exists), open a new document with
-    update_mode="replace"; otherwise append to the existing document.
+    retain in this scope (or no row exists), open a new document; otherwise
+    append to the existing document. Both are `append` (DP-443): the new id
+    is unique, and Hindsight appends to a missing document by creating it.
+    A `replace` here would be the one write in a session that can erase
+    others — Hindsight retries a failed op on a fixed backoff and does not
+    hold a document's later ops behind it, so a session opener retried after
+    an outage could land after, and wipe, the turns that followed it.
 
     Sync sqlite3 in async land is fine at this volume — one indexed upsert
     per retain, called from the same worker that owns the queue.
@@ -538,7 +543,7 @@ class _DocScopeStore:
                 (scope_key, document_id, now_iso, int(untrusted)),
             )
             conn.commit()
-            return document_id, "replace"
+            return document_id, "append"
 
     def current(self, scope_key: str) -> Optional[Tuple[str, datetime, bool]]:
         """(document_id, session start, untrusted) of the scope's open document.
