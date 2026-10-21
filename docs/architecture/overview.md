@@ -38,7 +38,7 @@ Async, provider-agnostic LLM orchestration engine for chatbot automation (IT sup
 
 **Config:** global_config.py (limits, rate limits), default_personas.json + system_personas.json (git-tracked), data/personas.json (local override), agents.json.
 
-**Testing:** tiered (unit, integration, plus live tiers — see `../testing.md`). `.githooks/pre-push` runs `scripts/ci_check.py`, which is CI's gate; neither runs the `integration` tier. Migration tests via legacy_mem_manager fixture.
+**Testing:** tiered (unit, integration, plus live tiers — see `../testing.md`). `scripts/ci_check.py` mirrors CI's gate (`.githooks/pre-push` runs its structural stages only, no pytest); neither runs the `integration` tier. Migration tests via legacy_mem_manager fixture.
 
 **Docs:** `docs/user_guide.md` — user-facing behavior spec (commands, personas, tools, interfaces). Also serves as spec-before-implement target for new features.
 

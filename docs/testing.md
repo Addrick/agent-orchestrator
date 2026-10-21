@@ -88,19 +88,32 @@ If a component must be registered at startup to work at all, test that the regis
 
 ## Gates
 
-CI (`.github/workflows/deploy.yml`) runs five steps, and `python scripts/ci_check.py` —
-also the pre-push hook — runs the same five: the flake8 **hard subset**
+CI (`.github/workflows/deploy.yml`) runs five steps, and `python scripts/ci_check.py` runs
+the same five: the flake8 **hard subset**
 (`--select=E9,F63,F7,F82`; the full flake8 pass is `--exit-zero`, advisory only),
 `scripts/check_missing_deps.py`, `mypy src/ services/ --config-file mypy.ini`,
 `lint-imports`, and `pytest -n auto -m "not integration"`. Nothing is `QA_READY` until
 all of them pass **inside the ticket's own worktree**, using that worktree's `.venv`.
+
+Where each runs (DP-452) — the suite runs **twice** per merged PR, not on every hop:
+
+| Where | What |
+|---|---|
+| `.githooks/pre-push` | `ci_check.py --no-tests` — flake8, missing-deps, mypy, import-linter, in seconds. Skipped entirely when the push touches only `docs/`, `.agents/`, `readme.md` or `CLAUDE.md` |
+| PR CI | all five; a newer push to the PR cancels the superseded run |
+| Push to `master` | all five **in parallel** with the image build, which pushes only `:<sha>`. A `promote` job retags it `:latest` once both pass, then `deploy` runs. Master runs queue, never cancel |
+
+The master run is not redundant with the PR's: PRs are often merged seconds apart, so each
+PR's CI tested against a master that no longer exists, and only the master run tests the tree
+that ships. Because the hook no longer runs pytest, run `python scripts/ci_check.py` yourself
+before calling a change done.
 
 A push to `master` whose diff is confined to `docs/`, `readme.md` and `.agents/` does not
 run the workflow at all (`paths-ignore`, DP-414) — no tests, no image build, no prod
 restart. Pull requests always run it. `CLAUDE.md` is not in that list: it ships in the
 image and is copied into `cc-*` persona workspaces, so changing it is a deploy.
 
-> ⚠️ **The integration tier is not in the gate.** CI and the pre-push hook both select
+> ⚠️ **The integration tier is not in the gate.** CI and `ci_check.py` both select
 > `-m "not integration"`, so anything marked `integration` — including
 > `tests/integration/test_startup_wiring.py`, `test_node_transport_gate.py` and
 > `test_tool_loop_exit_invariants.py`, which other docs cite as guards — runs only when

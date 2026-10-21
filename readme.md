@@ -149,7 +149,7 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 
 ```bash
 pytest                                                                    # everything; live tiers auto-skip without creds
-pytest -n auto -m "not integration"                                       # what CI and the pre-push hook run
+pytest -n auto -m "not integration"                                       # what CI runs
 pytest -m "not integration and not zammad_live and not llm_live and not discord_live"  # unit only
 pytest -m zammad_live                                                     # against a live Zammad
 pytest -m llm_live                                                        # against real LLM APIs
