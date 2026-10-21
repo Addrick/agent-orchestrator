@@ -1736,7 +1736,7 @@ memory mode and are for `GLOBAL`/operator personas only.
 
 ## Agents
 
-Agents are autonomous background workers that run on a schedule without user interaction. They are configured in `config/agents.json`.
+Agents are autonomous background workers that run on a schedule without user interaction. Each instance reads its own `agents.json` in the data directory (`data/agents.json` on a dev box, `/data/agents.json` in the container). On first start it is copied from the shipped `config/agents.json`; after that it belongs to that instance, so turning an agent off or moving its schedule on a dev box never touches prod, and vice versa. The flip side: a change to `config/agents.json` (a new agent, a new schedule) reaches an existing instance only if you edit that instance's copy, or delete it to re-seed.
 
 A schedule is either `{"interval": <seconds>}` or `{"daily_at": "HH:MM"}`. `daily_at` is a wall-clock time in `LOCAL_TZ` (default `America/New_York`), not the host's clock, so `"17:00"` means 5 PM Eastern year-round.
 
@@ -1823,7 +1823,7 @@ Personas with `service_bindings: ["agents"]` and the relevant tools enabled can:
 
 There is no user-level permission system. Access to tools is controlled entirely by persona configuration (enabled tools and service bindings). Any user who can message a persona inherits that persona's tool access.
 
-Agent configuration (schedule intervals, notification channels, recipients) is driven by `config/agents.json`, not by LLM decisions.
+Agent configuration (schedule intervals, notification channels, recipients) is driven by the instance's `agents.json` (seeded from `config/agents.json`), not by LLM decisions.
 
 ## Long-term Memory
 

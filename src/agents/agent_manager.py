@@ -3,17 +3,16 @@
 import asyncio
 import json
 import logging
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
+from config import global_config
 from src.agents.base import Agent
 
 logger = logging.getLogger(__name__)
-
-# Default path for agent configuration
-_DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "agents.json"
 
 
 @dataclass
@@ -64,11 +63,22 @@ class AgentManager:
 
         # Load file-based config (recipients, agent defaults)
         self._config: Dict[str, Any] = {}
-        self._config_path = config_path or _DEFAULT_CONFIG_PATH
-        self._load_config()
+        self._config_path = config_path or global_config.AGENTS_SAVE_FILE
+        self._load_config(seed=config_path is None)
 
-    def _load_config(self) -> None:
-        """Load agent configuration from agents.json."""
+    def _load_config(self, seed: bool) -> None:
+        """Load agent configuration from the instance's agents.json.
+
+        Same auto-seed as personas.json: the standard path is seeded once from
+        the shipped `config/agents.json`, and from then on that copy belongs to
+        the instance — prod and a dev box keep independent schedules (DP-451).
+        An explicit `config_path` is never seeded.
+        """
+        if seed and not self._config_path.exists() and global_config.DEFAULT_AGENTS_FILE.exists():
+            logger.info(f"Auto-seeding agent config from {global_config.DEFAULT_AGENTS_FILE} "
+                        f"to {self._config_path}")
+            self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(global_config.DEFAULT_AGENTS_FILE, self._config_path)
         if self._config_path.exists():
             try:
                 with open(self._config_path) as f:

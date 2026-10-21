@@ -53,6 +53,10 @@ PERSONA_SAVE_FILE = DATA_DIR / "personas.json"
 MODEL_SAVE_FILE = (DATA_DIR if IS_TESTING else CONFIG_DIR) / "models.json"
 DEFAULT_PERSONA_SAVE_FILE = CONFIG_DIR / "default_personas.json"
 SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
+# Agent schedules are per-instance (DP-451): the live copy is DATA_DIR's, seeded
+# once from the shipped config, so a dev box never inherits prod's daily runs.
+AGENTS_SAVE_FILE = DATA_DIR / "agents.json"
+DEFAULT_AGENTS_FILE = CONFIG_DIR / "agents.json"
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR

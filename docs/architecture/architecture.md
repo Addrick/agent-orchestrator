@@ -411,7 +411,7 @@ Central registry and lifecycle controller.
 - `auto_start()`: Starts agents where config has `auto_start: true`
 - Convention-based DI (`_di_kwargs`): inspects agent `__init__` signature, injects `chat_system`, optionally `zammad_client`, `notification_router`, `agent_config`, plus **any registered single-shot inference agent whose name matches a param** (DP-294 — e.g. `ZammadBot(content_classifier=…)`; the injected instance is `get_inference_agent`'s cached singleton). Shared by scheduled (`_build_agent_instance`) and inference (`get_inference_agent`) paths.
 - `register_inference_agent(name, cls)` / `get_inference_agent(name)`: single-shot inference agents (DP-292) — DI-built on first lookup, cached, never launched as a task. `content_classifier` + `date_tagger` register here.
-- Config merging: agents.json < registration defaults < runtime overrides
+- Config merging: agents.json < registration defaults < runtime overrides. The file is `AGENTS_SAVE_FILE` (`DATA_DIR/agents.json`), auto-seeded from `config/agents.json` when missing — the same seed-once rule as `personas.json` (DP-451); an explicit `config_path` is never seeded
 - `notification_router`: Lazy-set after construction
 
 **`dispatch_agent.py` -- DispatchAgent**
@@ -693,7 +693,8 @@ Human-approval gating primitive for autonomous-agent writes — a **separate imp
 - `data/personas.json` -- gitignored, local runtime state, overrides defaults on startup
 
 ### Agent Config
-- `config/agents.json` -- agent definitions, schedule, auto_start, notification_defaults, recipient mappings
+- `config/agents.json` -- tracked in git, the shipped seed: agent definitions, schedule, auto_start, notification_defaults, recipient mappings
+- `data/agents.json` -- gitignored, per-instance runtime copy, seeded from the above on first start and authoritative after (DP-451)
 - Structure: `{agents: {name: {persona, schedule, action_history_limit, auto_start, notification_defaults, notification_targets, startup_notification_targets}}, recipients: {name: {discord_user_id, discord_channel_id, email}}}`
 
 ## Testing Structure
