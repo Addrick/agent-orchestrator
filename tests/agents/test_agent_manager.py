@@ -250,3 +250,49 @@ def test_unregistered_inference_param_is_not_injected():
     mgr = _make_manager()
     kwargs = mgr._di_kwargs("consumer", _ConsumerAgent, {})
     assert "infer" not in kwargs
+
+
+# --- DP-451: agents.json is per-instance, seeded once from the shipped copy ---
+
+def _point_config_at(monkeypatch, tmp_path, shipped: dict):
+    default = tmp_path / "config" / "agents.json"
+    default.parent.mkdir()
+    default.write_text(__import__("json").dumps(shipped))
+    save = tmp_path / "data" / "agents.json"
+    monkeypatch.setattr(global_config, "DEFAULT_AGENTS_FILE", default)
+    monkeypatch.setattr(global_config, "AGENTS_SAVE_FILE", save)
+    return default, save
+
+
+def test_missing_instance_config_is_seeded_from_shipped(monkeypatch, tmp_path):
+    shipped = {"agents": {"reminder": {"auto_start": True}}}
+    _, save = _point_config_at(monkeypatch, tmp_path, shipped)
+
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock())
+
+    assert save.exists()
+    assert mgr.config == shipped
+
+
+def test_instance_config_wins_over_shipped(monkeypatch, tmp_path):
+    """A dev box that turned an agent off keeps it off when the shipped copy changes."""
+    import json
+    _, save = _point_config_at(monkeypatch, tmp_path, {"agents": {"reminder": {"auto_start": True}}})
+    save.parent.mkdir()
+    local = {"agents": {"reminder": {"auto_start": False}}}
+    save.write_text(json.dumps(local))
+
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock())
+
+    assert mgr.config == local
+    assert json.loads(save.read_text()) == local
+
+
+def test_explicit_config_path_is_never_seeded(monkeypatch, tmp_path):
+    _point_config_at(monkeypatch, tmp_path, {"agents": {"reminder": {"auto_start": True}}})
+    explicit = tmp_path / "elsewhere" / "agents.json"
+
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock(), config_path=explicit)
+
+    assert not explicit.exists()
+    assert mgr.config == {}
