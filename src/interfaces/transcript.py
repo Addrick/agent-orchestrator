@@ -17,14 +17,22 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 
-def _is_renderable(role: Optional[str], content: str, reasoning: str) -> bool:
+def _is_renderable(role: Optional[str], content: str, reasoning: str,
+                   tools: Optional[Any] = None) -> bool:
     """A DB row becomes a visible story chunk iff it is a user/assistant turn
-    with some content or reasoning. System rows, empty rows, and tool-call-only
-    assistant rows (no content, no reasoning) are skipped — they have no chunk.
+    with some content, reasoning, or (assistant only) tool cards. System rows
+    and empty rows are skipped — they have no chunk.
+
+    Tool cards alone count (DP-444): a turn stopped or errored after its tool
+    steps, before any reply text, is still replayed to the model, so hiding it
+    would show the user less than the model sees. `tools` is the parsed
+    `_parse_tool_context` value; an unparseable or empty blob is not a card.
     """
     if role not in ("user", "assistant"):
         return False
-    return bool(content or reasoning)
+    if content or reasoning:
+        return True
+    return role == "assistant" and isinstance(tools, list) and bool(tools)
 
 
 def _parse_tool_context(raw: Any) -> Optional[Any]:
@@ -193,12 +201,12 @@ def build_transcript(
         content = (msg.get("content") or "").strip()
         reasoning = (msg.get("reasoning_content") or "").strip()
 
-        if not _is_renderable(role, content, reasoning):
+        tools = _parse_tool_context(msg.get("tool_context"))
+        if not _is_renderable(role, content, reasoning, tools):
             continue
 
         iid = msg.get("interaction_id")
         iid = iid if isinstance(iid, int) else None
-        tools = _parse_tool_context(msg.get("tool_context"))
         chunks.append({
             "interaction_id": iid,
             "role": role,

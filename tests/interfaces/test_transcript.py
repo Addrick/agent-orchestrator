@@ -157,6 +157,30 @@ def test_transcript_skips_non_renderable_rows():
     assert len(chunks) == 1
     assert chunks[0]["interaction_id"] == 1
 
+def test_transcript_keeps_a_tool_only_assistant_row():
+    """DP-444: a turn stopped after its tool steps, before any reply text, is
+    replayed to the model, so the portal must show its cards too."""
+    rows = [
+        {"author_role": "user", "content": "check it", "interaction_id": 1},
+        {"author_role": "assistant", "content": "", "interaction_id": 2,
+         "tool_context": json.dumps([
+             {"role": "assistant", "content": "Checking first.",
+              "reasoning_content": None,
+              "tool_calls": [{"id": "c1", "name": "search_tickets",
+                              "arguments": {}}]},
+             {"role": "tool", "tool_call_id": "c1", "content": "x"},
+         ])},
+        # An unparseable or empty blob is not a card.
+        {"author_role": "assistant", "content": "", "interaction_id": 3,
+         "tool_context": "not json"},
+        {"author_role": "assistant", "content": "", "interaction_id": 4,
+         "tool_context": "[]"},
+    ]
+    chunks = build_transcript(rows)["chunks"]
+    assert [c["interaction_id"] for c in chunks] == [1, 2]
+    assert chunks[1]["content"] == ""
+    assert chunks[1]["tool_context"][0]["prose"] == "Checking first."
+
 def test_transcript_appends_pending_ephemeral_chunk():
     rows = _rows(2)
     pending = [{"ephemeral_chunk_id": "tok123", "content": "awaiting approval",

@@ -225,6 +225,12 @@ export function usePortalStore() {
   useEffect(() => {
     channelsRef.current = channels
   }, [channels])
+  // Mirror of the transcript for abortTurn (DP-444): which rows were on screen
+  // before a stop, so the re-sync can recognise the stopped turn's saved row.
+  const chunksRef = useRef(chunks)
+  useEffect(() => {
+    chunksRef.current = chunks
+  }, [chunks])
 
   // ---- fired-timer alarms (SSE back-channel) ------------------------
   // A timer set from the portal fires back here: the engine pushes the alarm
@@ -269,14 +275,19 @@ export function usePortalStore() {
   // pre-first-live-success only) — keep the last real state and banner it.
   const UNREACHABLE = 'Engine unreachable — showing last loaded state'
 
+  // Returns the chunks it applied, or null when the fetch failed or `wanted`
+  // (checked once the fetch lands) says the caller's view has moved on.
   const refreshTranscript = useCallback(
-    async (p: string, channel?: string) => {
+    async (p: string, channel?: string, wanted?: () => boolean): Promise<Chunk[] | null> => {
       try {
         const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
+        if (wanted && !wanted()) return null
         setChunks(cs)
         setOffline(api.usingMock())
+        return cs
       } catch {
         setBanner(UNREACHABLE)
+        return null
       }
     },
     [],
@@ -754,8 +765,42 @@ export function usePortalStore() {
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
     setResolvingConfirm(false)
-    if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
-  }, [persona, refreshTranscript, flushTokens])
+    if (!persona) return
+    // DP-444: the server saves the stopped turn once it notices the
+    // disconnect, so this re-sync can land before or after that commit. When
+    // a re-sync shows an assistant row newer than anything on screen before
+    // the stop, that row IS the stopped turn: drop the live row, or the turn
+    // renders twice. Checked twice, briefly apart; a slower commit leaves the
+    // live row up until dismissed or the next send, which both re-sync. A
+    // retry overwrites its row in place (no newer id), so it keeps the live row.
+    const name = persona.name
+    const channel = activeChannelRef.current
+    const newest = chunksRef.current.reduce((m, c) => Math.max(m, c.interaction_id ?? -1), -1)
+    // A new turn or a view switch since the stop owns the state now — checked
+    // again once each fetch lands, so a stale transcript is never applied.
+    const current = () =>
+      !streamingRef.current &&
+      name === activePersonaRef.current &&
+      channel === activeChannelRef.current
+    for (const delayMs of [0, 800]) {
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs))
+      if (!current()) return
+      const cs = await refreshTranscript(name, channel, current)
+      if (!cs) return
+      // The stopped turn's row also follows its own user row (persisted before
+      // generation), so an older stopped turn whose row landed late is not
+      // taken for this one.
+      const floor = cs.reduce(
+        (m, c) => (c.role === 'user' ? Math.max(m, c.interaction_id ?? -1) : m),
+        newest,
+      )
+      if (cs.some((c) => c.role === 'assistant' && (c.interaction_id ?? -1) > floor)) {
+        resetTokenBuf()
+        setStream(EMPTY_STREAM)
+        return
+      }
+    }
+  }, [persona, flushTokens, resetTokenBuf, refreshTranscript])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
   // turn (persisted before generation) is only in the DB — surface it.
