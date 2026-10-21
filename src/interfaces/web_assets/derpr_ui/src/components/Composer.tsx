@@ -7,6 +7,11 @@ interface Props {
   ltmOn: boolean
   onToggleLtm: () => void
   onSend: (text: string) => void
+  // DP-447: set when the conversation ends on a continuable assistant reply —
+  // an empty composer then offers CONTINUE instead of SEND.
+  onContinue?: () => void
+  // A send the engine refused as stale comes back here to be sent again.
+  restoredDraft?: { text: string; seq: number } | null
   onAbort: () => void
   streaming: boolean
   // Fired as the draft changes so the store can debounce-fetch the LTM preview
@@ -25,8 +30,20 @@ function autosize(el: HTMLTextAreaElement) {
   el.style.height = Math.min(el.scrollHeight, MAX_DRAFT_HEIGHT) + 'px'
 }
 
-export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDraftChange }: Props) {
+export function Composer({
+  ltmOn, onToggleLtm, onSend, onContinue, restoredDraft, onAbort, streaming, onDraftChange,
+}: Props) {
   const [text, setText] = useState('')
+  // Adjusted during render (not an effect) so the restored text lands in the
+  // same paint; `seq` tells a new restore from one already applied. Seeded
+  // from the current one: a remount (back from the Memory/Infra view) must
+  // not re-apply a draft that was restored, and sent, before it.
+  const [restoredSeq, setRestoredSeq] = useState(() => restoredDraft?.seq ?? 0)
+  if (restoredDraft && restoredDraft.seq !== restoredSeq) {
+    setRestoredSeq(restoredDraft.seq)
+    setText(restoredDraft.text)
+  }
+  const continuing = !!onContinue && !text.trim()
   const [autoSend, setAutoSend] = useState(
     () => localStorage.getItem(AUTOSEND_KEY) === '1',
   )
@@ -50,7 +67,11 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
 
   const send = () => {
     const t = text.trim()
-    if (!t || streaming) return
+    if (streaming) return
+    if (!t) {
+      onContinue?.()
+      return
+    }
     onSend(t)
     setText('')
     const el = ref.current
@@ -63,7 +84,8 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
       // silently swallowing the keypress (send is gated anyway).
       if (streaming) return
       e.preventDefault()
-      send()
+      // Enter sends typed text only; CONTINUE is a deliberate click (DP-447).
+      if (text.trim()) send()
     }
   }
 
@@ -241,8 +263,13 @@ export function Composer({ ltmOn, onToggleLtm, onSend, onAbort, streaming, onDra
             ■ stop
           </button>
         ) : (
-          <button className="send" onClick={send} disabled={!text.trim()}>
-            SEND
+          <button
+            className="send"
+            onClick={send}
+            disabled={!text.trim() && !continuing}
+            title={continuing ? 'let the model carry on from where its last reply stops' : undefined}
+          >
+            {continuing ? '▶ CONTINUE' : 'SEND'}
           </button>
         )}
       </div>

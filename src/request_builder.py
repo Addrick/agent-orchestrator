@@ -84,6 +84,28 @@ class RequestContext:
     # Optional: OAI-format messages from the client (non-streaming OAI callers).
     # Used as a fallback when the DB returns no history for this channel.
     client_messages: Optional[List[Dict[str, Any]]] = None
+    # DP-447 continue: the trailing assistant message the model resumes from
+    # (`render_continue_prefix`), and the stored reply of the row it extends.
+    continue_prefix: Optional[str] = None
+    continue_row_content: str = ""
+
+
+@dataclass
+class ContinueTurn:
+    """A request to extend the trailing assistant reply in place (DP-447).
+
+    `think_open` overrides what the row implies about its thinking — needed
+    only for closed thinking with no reply yet, which the stored columns
+    cannot tell apart from an open block. None = decide from the row.
+
+    `row_id` is the reply the caller means to extend. The row continue writes
+    to is this session's own latest (retry's lookup), but a GLOBAL/SERVER
+    persona's view — and its prompt — can end on another channel's row; a
+    mismatch is refused instead of extending a row the screen does not end
+    on. None = no check (non-portal callers).
+    """
+    think_open: Optional[bool] = None
+    row_id: Optional[int] = None
 
 
 @dataclass
@@ -744,7 +766,22 @@ class RequestBuilder:
 
         ctx.tools_for_llm = self.filter_tools_for_persona(ctx.persona)
 
-        if is_retry:
+        if ctx.continue_prefix is not None:
+            # DP-447: end the wire array on the reply being continued, as the
+            # prefix the local server appends verbatim after the generation
+            # prompt. History replays the row's reply alone (a reasoning-only
+            # row not at all), so swap that message for the prefix. No tools:
+            # a prefilled turn that calls one has no defined shape.
+            ctx.tools_for_llm = []
+            last = ctx.conversation_history[-1] if ctx.conversation_history else None
+            if last is not None and last.get("role") == "assistant" \
+                    and not last.get("tool_calls") \
+                    and last.get("content") == strip_vertex_links(ctx.continue_row_content):
+                ctx.conversation_history.pop()
+            ctx.conversation_history.append(
+                {"role": "assistant", "content": ctx.continue_prefix},
+            )
+        elif is_retry:
             if ctx.conversation_history and ctx.conversation_history[-1].get("role") == "assistant":
                 ctx.conversation_history.pop()
         elif ctx.message and ctx.message.strip():

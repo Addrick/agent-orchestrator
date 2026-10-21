@@ -26,6 +26,8 @@ export function Conversation({ store }: { store: PortalStore }) {
     dismissStream,
     dismissDevRow,
     regen,
+    continueTurn,
+    restoredDraft,
     editRow,
     deleteRow,
     resolveConfirm,
@@ -89,6 +91,21 @@ export function Conversation({ store }: { store: PortalStore }) {
         firstUserChunkIndex: firstUser,
       }
     }, [chunks])
+
+  // DP-447: CONTINUE extends the last row when it is an assistant reply with
+  // no tool steps, on a persona that routes to the local server.
+  const lastChunk = chunks[chunks.length - 1]
+  const route = persona?.effective_model_name ?? persona?.model_name
+  const canContinue =
+    route === 'local' &&
+    lastChunk != null &&
+    !lastChunk.ephemeral &&
+    lastChunk.interaction_id != null &&
+    lastChunk.role === 'assistant' &&
+    !(lastChunk.tool_context || []).length
+  const onContinue = useCallback(() => void continueTurn(), [continueTurn])
+  // The row being continued is drawn by the stream row while it grows.
+  const hiddenId = stream.active || stream.aborted ? stream.continuingId : null
 
   return (
     <div className="col convo">
@@ -162,7 +179,7 @@ export function Conversation({ store }: { store: PortalStore }) {
                 <div className="text">{persona.prompt}</div>
               </div>
 
-              {chunks.map((c, i) => (
+              {chunks.map((c, i) => c.interaction_id != null && c.interaction_id === hiddenId ? null : (
                 <RenderedSlot
                   key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
                   showLtm={i === firstUserChunkIndex}
@@ -184,6 +201,7 @@ export function Conversation({ store }: { store: PortalStore }) {
                     onEdit={editRow}
                     onDelete={deleteRow}
                     onRegen={regen}
+                    onContinue={canContinue && i === chunks.length - 1 ? continueTurn : undefined}
                     onResync={onResync}
                     onResolveConfirm={resolveConfirm}
                     resolvingConfirm={resolvingConfirm}
@@ -215,7 +233,7 @@ export function Conversation({ store }: { store: PortalStore }) {
                 stream={stream}
                 tools={tools}
                 onDismiss={dismissStream}
-                onRegen={regen}
+                onRegen={stream.continuingId != null ? onContinue : regen}
               />
 
               {devRow && (
@@ -278,6 +296,8 @@ export function Conversation({ store }: { store: PortalStore }) {
         ltmOn={ltmOn}
         onToggleLtm={toggleLtm}
         onSend={(t) => sendTurn(t)}
+        onContinue={canContinue ? onContinue : undefined}
+        restoredDraft={restoredDraft}
         onAbort={abortTurn}
         streaming={stream.active}
         onDraftChange={previewLtm}

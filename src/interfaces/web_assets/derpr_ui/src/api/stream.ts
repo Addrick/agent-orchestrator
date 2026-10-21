@@ -29,11 +29,23 @@ export interface StreamHandlers {
   onIdFrame: (f: DerprIdFrame) => void
   onError: (message: string) => void
   onDone: () => void
+  // DP-447: the engine refused the turn because the conversation moved on
+  // since this page loaded it (HTTP 409 stale_view). Nothing was written.
+  onStale?: () => void
 }
 
 export interface ChatRequest {
   derpr_user_text: string
   derpr_retry?: boolean
+  // DP-447: extend the trailing assistant reply in place. `derpr_think_open`
+  // says whether its thinking is still open when the row alone can't tell.
+  derpr_continue?: boolean
+  derpr_think_open?: boolean
+  // The row being continued; the engine refuses if it would extend another.
+  derpr_continue_id?: number
+  // DP-447 stale-view guard: the interaction_id this screen ends on (null for
+  // an empty conversation). The engine refuses the turn with 409 on mismatch.
+  derpr_expected_last_id?: number | null
   model?: string
   // DP-136 6b: scope the turn to a channel (defaults to web_ui server-side).
   // The engine logs the turn under this channel and rebuilds history per the
@@ -170,6 +182,10 @@ function openSse(
     signal: ctrl.signal,
   })
     .then((resp) => {
+      if (resp.status === 409 && h.onStale) {
+        h.onStale()
+        return
+      }
       if (!resp.ok) {
         h.onError(`${label} → ${resp.status}`)
         return

@@ -72,6 +72,9 @@ export interface Persona {
   prompt: string
   // base params
   model_name: string
+  // Resolved route ("default" sentinel expanded). Optional: older engines
+  // omit it. Gates CONTINUE (DP-447), which only `local` supports.
+  effective_model_name?: string
   // Optional base params are null on personas that don't set them (the live
   // engine returns null, unlike the fully-populated mock).
   temperature: number | null

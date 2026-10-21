@@ -64,10 +64,13 @@ def truncate_messages_to_budget(
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Drop oldest non-system messages until total ≤ `max_tokens`.
 
-    Preserves: every `role == "system"` entry, and the most recent
-    `role == "user"` entry (so the current turn is never evicted).
-    The LTM block rides inside the latest user turn (DP-431) and is
-    therefore preserved implicitly.
+    Preserves: every `role == "system"` entry, the most recent
+    `role == "user"` entry (so the current turn is never evicted), and a
+    trailing assistant message without `tool_calls` — a prefill the model
+    resumes (DP-447 continue), which is the current turn too: dropping it
+    would make the server answer afresh, and that answer would be stored as
+    the continuation. The LTM block rides inside the latest user turn
+    (DP-431) and is therefore preserved implicitly.
 
     Returns `(pruned_messages, dropped_count)`. No-op (`dropped_count=0`)
     when `max_tokens` is None / non-positive, or when the input already
@@ -86,6 +89,9 @@ def truncate_messages_to_budget(
         if messages[i].get("role") == "user":
             last_user_idx = i
             break
+    tail = messages[-1]
+    prefill_idx = len(messages) - 1 \
+        if tail.get("role") == "assistant" and not tail.get("tool_calls") else None
 
     kept: List[Dict[str, Any]] = []
     dropped = 0
@@ -109,7 +115,7 @@ def truncate_messages_to_budget(
 
         is_system = msg.get("role") == "system"
         is_last_user = (i == last_user_idx)
-        if running <= max_tokens or is_system or is_last_user:
+        if running <= max_tokens or is_system or is_last_user or i == prefill_idx:
             kept.extend(span)
         else:
             running -= sum(_message_tokens(m) for m in span)

@@ -8,6 +8,7 @@ ChatSystem. chat_system re-exports the names so existing call sites
 continue to work unchanged.
 """
 
+import re
 import uuid
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -76,6 +77,99 @@ class TokenEvent:
 def join_reasoning(parts: List[str]) -> Optional[str]:
     """Streamed reasoning deltas as one `reasoning_content` value (DP-434)."""
     return "".join(parts).strip() or None
+
+
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
+_INLINE_THINK = re.compile(r"^<think>\s*(.*?)\s*(?:</think>\s*(.*))?$", re.DOTALL)
+
+
+def split_think_text(raw: str) -> Optional[Tuple[str, str, bool]]:
+    """`(reply, reasoning, think_open)` for text that opens with a `<think>`
+    block, or None when it does not. An unclosed block (a turn stopped
+    mid-think, or an edit that removed `</think>`) is all reasoning, and is
+    the one case `think_open` is True."""
+    m = _INLINE_THINK.match((raw or "").lstrip())
+    if not m:
+        return None
+    return (m.group(2) or "").strip(), m.group(1).strip(), m.group(2) is None
+
+
+def render_continue_prefix(content: str, reasoning: Optional[str],
+                           think_open: Optional[bool],
+                           template_opens_think: bool = True) -> Tuple[str, bool]:
+    """The text a continued assistant turn resumes from (DP-447), as the local
+    server appends it verbatim after the chat template's generation prompt.
+
+    No opening `<think>`: with thinking on, the generation prompt already
+    opens the block (Qwen 3.x) — so a reply with no thinking must close an
+    empty one first, or the model reads the reply as its thinking and starts
+    the answer over after `</think>`. With thinking off the prompt has already
+    closed it, and only the reply goes after it.
+
+    `think_open=None` means "decide from the row": thinking with no reply yet
+    is an open block. A row with a reply can never be open.
+    Returns `(prefix, think_open)` with `think_open` resolved.
+    """
+    if not template_opens_think:
+        return content, False
+    if not reasoning:
+        return f"\n{THINK_CLOSE}\n\n{content}", False
+    if content:
+        think_open = False
+    elif think_open is None:
+        think_open = True
+    if think_open:
+        return reasoning, True
+    return f"{reasoning}\n{THINK_CLOSE}\n\n{content}", False
+
+
+class ThinkCloseSplitter:
+    """Routes a continued turn's raw text stream to reasoning until `</think>`.
+
+    A continue whose prefix leaves the thinking open gets its whole output in
+    `content` from KoboldCPP, closing tag included — its reasoning parser does
+    not run on a prefilled turn. Text before the tag is reasoning, text after
+    it is the reply; the tag itself and the blank line after it are dropped. A
+    tag split across deltas is held back until it resolves.
+    """
+
+    def __init__(self) -> None:
+        self.open = True
+        self._held = ""
+        self._reply_started = False
+
+    def feed(self, delta: str) -> List[Union["TokenEvent", "ReasoningEvent"]]:
+        if not self.open:
+            return self._reply(delta)
+        text = self._held + delta
+        self._held = ""
+        idx = text.find(THINK_CLOSE)
+        if idx != -1:
+            self.open = False
+            out: List[Union[TokenEvent, ReasoningEvent]] = []
+            if text[:idx]:
+                out.append(ReasoningEvent(delta=text[:idx]))
+            return out + self._reply(text[idx + len(THINK_CLOSE):])
+        # Hold back any tail that could be the start of the closing tag.
+        for n in range(min(len(THINK_CLOSE) - 1, len(text)), 0, -1):
+            if THINK_CLOSE.startswith(text[-n:]):
+                self._held = text[-n:]
+                text = text[:-n]
+                break
+        return [ReasoningEvent(delta=text)] if text else []
+
+    def flush(self) -> List[Union["TokenEvent", "ReasoningEvent"]]:
+        held, self._held = self._held, ""
+        return [ReasoningEvent(delta=held)] if held else []
+
+    def _reply(self, text: str) -> List[Union["TokenEvent", "ReasoningEvent"]]:
+        if not self._reply_started:
+            text = text.lstrip()
+            if not text:
+                return []
+            self._reply_started = True
+        return [TokenEvent(delta=text)]
 
 
 @dataclass

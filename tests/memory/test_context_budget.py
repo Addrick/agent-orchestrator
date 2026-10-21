@@ -98,6 +98,20 @@ def test_truncate_last_user_preserved_even_when_alone_exceeds_budget():
     assert dropped == 2
 
 
+def test_truncate_keeps_a_trailing_prefill():
+    """DP-447: a continue ends the array on the reply being resumed. Dropping it
+    for budget would make the server answer afresh — glued onto the row."""
+    msgs = [
+        _msg("user", 100),
+        _msg("assistant", 100),
+        _msg("user", 40),
+        _msg("assistant", 400),  # the prefix: 100 tok, over the budget alone
+    ]
+    out, dropped = truncate_messages_to_budget(msgs, 50)
+    assert out[-2:] == msgs[-2:]
+    assert dropped == 2
+
+
 def test_truncate_returns_dropped_count_correctly():
     msgs = [_msg("user", 40)] * 10  # 10 tok each = 100 total
     out, dropped = truncate_messages_to_budget(msgs, 30)

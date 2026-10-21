@@ -1,6 +1,5 @@
 # src/memory/memory_manager.py
 
-import re
 import sqlite3
 import json
 import logging
@@ -15,6 +14,7 @@ from pathlib import Path
 # --- NEW: Import the global embedding model variable ---
 from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_BACKEND, HINDSIGHT_URL
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
+from src.generation_events import split_think_text
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
 from src.security.scrubber import get_scrubber
 from src.utils.timeutil import to_utc
@@ -753,19 +753,17 @@ class MemoryManager:
             conn.commit()
             logger.info("User memory database schema created or verified successfully.")
 
-    _INLINE_THINK = re.compile(r"^<think>\s*(.*?)\s*(?:</think>\s*(.*))?$", re.DOTALL)
-
     @classmethod
     def _split_think(cls, content: str, reasoning: Optional[str]) -> Optional[Tuple[str, str]]:
         """`(content, reasoning)` with a leading `<think>` block moved out of
         the content, or None when there is none. An unclosed block (a turn
         stopped mid-think) is all reasoning."""
-        m = cls._INLINE_THINK.match(content or "")
-        if not m:
+        split = split_think_text(content)
+        if split is None:
             return None
-        inline = m.group(1).strip()
+        reply, inline, _ = split
         merged = "\n\n".join(p for p in ((reasoning or "").strip(), inline) if p)
-        return (m.group(2) or "").strip(), merged
+        return reply, merged
 
     def _split_inline_reasoning(self, conn: sqlite3.Connection) -> None:
         """One-time move of inline `<think>` out of assistant `content` (DP-434).
@@ -971,27 +969,10 @@ class MemoryManager:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
-            # Inspect the single most recent *visible* interaction (any role).
             # Only a trailing assistant turn is eligible for archive-in-place;
             # if a user turn is newer (or the trailing assistant was deleted),
             # there is nothing to regenerate in place.
-            #
-            # Unrenderable rows are excluded too: DP-296 parks write an
-            # assistant row carrying only tool_context, which renders nowhere.
-            # Left in the lookup it would win "most recent", archive a blank
-            # version into the chevron, and hand the retried turn the very row
-            # the still-open PendingConfirmation points at — so approving that
-            # park later would wipe the *retried* turn's tool context.
-            cursor.execute(
-                "SELECT interaction_id, content, reasoning_content, author_role"
-                " FROM User_Interactions"
-                " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
-                + self._SUPPRESSION_SUBQUERY
-                + self._RENDERABLE_FILTER +
-                " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
-                (persona_name, user_identifier, channel),
-            )
-            row = cursor.fetchone()
+            row = self._latest_visible_row(cursor, persona_name, user_identifier, channel)
             if not row or row['author_role'] != 'assistant':
                 return None
 
@@ -1036,6 +1017,43 @@ class MemoryManager:
                 logger.error(f"handle_portal_retry failed for id={interaction_id}: {e}")
                 conn.rollback()
                 return None
+
+    def _latest_visible_row(self, cursor: sqlite3.Cursor, persona_name: str,
+                            user_identifier: str, channel: str) -> Optional[sqlite3.Row]:
+        """The single most recent *visible* interaction (any role) of a portal
+        session — the row a retry archives and a continue extends.
+
+        Unrenderable rows are excluded: DP-296 parks write an assistant row
+        carrying only tool_context, which renders nowhere. Left in the lookup
+        it would win "most recent", archive a blank version into the chevron,
+        and hand the retried turn the very row the still-open
+        PendingConfirmation points at — so approving that park later would
+        wipe the *retried* turn's tool context.
+        """
+        cursor.execute(
+            "SELECT interaction_id, content, reasoning_content, author_role, tool_context"
+            " FROM User_Interactions"
+            " WHERE persona_name = ? AND user_identifier = ? AND channel = ?"
+            + self._SUPPRESSION_SUBQUERY
+            + self._RENDERABLE_FILTER +
+            " ORDER BY timestamp DESC, interaction_id DESC LIMIT 1",
+            (persona_name, user_identifier, channel),
+        )
+        row: Optional[sqlite3.Row] = cursor.fetchone()
+        return row
+
+    def latest_portal_assistant(self, persona_name: str, user_identifier: str,
+                                channel: str) -> Optional[Dict[str, Any]]:
+        """The trailing assistant row of a portal session, unarchived — what a
+        continue (DP-447) extends in place. None when the session's latest
+        visible row is not an assistant reply."""
+        with self._lock:
+            row = self._latest_visible_row(
+                self._get_connection().cursor(), persona_name, user_identifier, channel,
+            )
+        if not row or row['author_role'] != 'assistant':
+            return None
+        return dict(row)
 
     def set_tool_context(self, interaction_id: int,
                          tool_context: Optional[str]) -> bool:
@@ -1147,6 +1165,31 @@ class MemoryManager:
                 logger.error(f"update_interaction_content failed for id={interaction_id}: {e}")
                 conn.rollback()
                 return False
+
+    def update_assistant_raw_turn(self, interaction_id: int, raw: str) -> bool:
+        """Manual edit of a whole assistant turn as one raw text (DP-447):
+        `<think>` + reasoning + `</think>` + reply, split back into the two
+        columns. Text that does not open with `<think>` is all reply and clears
+        the reasoning.
+
+        Raises ValueError for a row this cannot express: not an assistant
+        reply, or one with tool steps — their `reasoning_content` is every
+        step's thinking joined (DP-437), which one raw block would flatten.
+        """
+        with self._lock:
+            row = self._get_connection().execute(
+                "SELECT author_role, tool_context FROM User_Interactions WHERE interaction_id = ?",
+                (interaction_id,),
+            ).fetchone()
+        if row is None or row["author_role"] != "assistant":
+            raise ValueError("not an assistant reply")
+        if row["tool_context"]:
+            raise ValueError("a turn with tool steps is edited reply-only")
+        split = split_think_text(raw)
+        reply, reasoning = (split[0], split[1]) if split else (raw, "")
+        return self.update_interaction_content(
+            interaction_id, reply, reasoning_content=reasoning or None,
+        )
 
     def list_interaction_versions(self, interaction_id: int) -> List[Dict[str, Any]]:
         """Return all versions for an interaction, oldest first, canonical last.

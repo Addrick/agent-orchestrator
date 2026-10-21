@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { streamChat, streamConfirm } from '../api/stream'
 import { readPref, writePref } from './persist'
+import { rawThinkState } from './util'
 import type {
   Persona,
   ToolDef,
@@ -54,6 +55,10 @@ export interface StreamState {
   // must be null whenever a re-sync has run (else the row duplicates) and on
   // retry/regen (no new user turn exists).
   userText: string | null
+  // DP-447: the row a continue is extending. The stream is seeded with that
+  // row's text and the row itself is hidden, so the reply grows in place
+  // instead of a second assistant row appearing under it.
+  continuingId: number | null
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -66,7 +71,20 @@ const EMPTY_STREAM: StreamState = {
   errorMsg: null,
   responseType: null,
   userText: null,
+  continuingId: null,
 }
+
+// The interaction_id the screen ends on — what the stale-view guard compares
+// against the engine's view (DP-447). null for an empty conversation.
+function lastPersistedId(chunks: Chunk[]): number | null {
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const id = chunks[i].interaction_id
+    if (!chunks[i].ephemeral && id != null) return id
+  }
+  return null
+}
+
+const STALE_BANNER = 'The conversation changed on another device — reloaded it. Nothing was sent.'
 
 export interface DevRow {
   command: string
@@ -138,6 +156,9 @@ export function usePortalStore() {
   const [stream, setStream] = useState<StreamState>(EMPTY_STREAM)
   const [devRow, setDevRow] = useState<DevRow | null>(null)
   const [banner, setBanner] = useState<string | null>(null)
+  // A send the engine refused as stale (DP-447) hands its text back to the
+  // composer. `seq` makes a repeat of the same text still register.
+  const [restoredDraft, setRestoredDraft] = useState<{ text: string; seq: number } | null>(null)
   const [alarms, setAlarms] = useState<AlarmLine[]>([])
   // The /assemble dry-run payload for the Raw-req inspector (S5). Lazily
   // fetched by the Raw tab, keyed on the active persona + an optional preview
@@ -154,6 +175,25 @@ export function usePortalStore() {
   // True while a CONFIRM-mode write is parked awaiting approval — drives the
   // approve/deny bar's busy state on the ephemeral chunk.
   const [resolvingConfirm, setResolvingConfirm] = useState<boolean>(false)
+  // Mirror of `chunks` for the action callbacks: the stale-view guard must
+  // send the id the screen ends on *now*, not when the callback was built.
+  // `refreshTranscript` also writes it directly, so an action awaiting a
+  // re-sync (save & continue) reads the fresh rows before React re-renders.
+  // abortTurn (DP-444) reads it for which rows were on screen before a stop,
+  // so the re-sync can recognise the stopped turn's saved row.
+  const chunksRef = useRef(chunks)
+  useEffect(() => {
+    chunksRef.current = chunks
+  }, [chunks])
+  // Set when a turn ended without its [DONE] re-sync (errored or stopped):
+  // rows it persisted (the user turn, a partial reply) are in the DB but not
+  // on screen, so the next turn re-syncs first or the stale-view guard
+  // refuses it as if another device had moved the conversation on.
+  const resyncBeforeSendRef = useRef(false)
+  // Rows whose thinking a raw edit closed with no reply yet (DP-447). The
+  // stored columns can't tell that from an open block, so continue says it —
+  // for as long as this page is open.
+  const thinkClosedRef = useRef<Set<number>>(new Set())
 
   // ---- token delta batching ------------------------------------------
   // SSE deltas arrive faster than paint; a setStream per token re-renders the
@@ -225,12 +265,6 @@ export function usePortalStore() {
   useEffect(() => {
     channelsRef.current = channels
   }, [channels])
-  // Mirror of the transcript for abortTurn (DP-444): which rows were on screen
-  // before a stop, so the re-sync can recognise the stopped turn's saved row.
-  const chunksRef = useRef(chunks)
-  useEffect(() => {
-    chunksRef.current = chunks
-  }, [chunks])
 
   // ---- fired-timer alarms (SSE back-channel) ------------------------
   // A timer set from the portal fires back here: the engine pushes the alarm
@@ -282,6 +316,7 @@ export function usePortalStore() {
       try {
         const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
         if (wanted && !wanted()) return null
+        chunksRef.current = cs
         setChunks(cs)
         setOffline(api.usingMock())
         return cs
@@ -292,6 +327,37 @@ export function usePortalStore() {
     },
     [],
   )
+
+  // DP-447: another device may have moved the conversation on while this tab
+  // sat in the background; re-sync on return. Skipped mid-stream — the turn's
+  // own [DONE] re-sync owns the transcript then.
+  useEffect(() => {
+    const onFocus = () => {
+      if (document.visibilityState !== 'visible' || streamingRef.current) return
+      const p = activePersonaRef.current
+      const ch = activeChannelRef.current
+      api.getTranscript(p, undefined, ch).then(
+        (cs) => {
+          // A persona/channel switch or a new turn while this was in flight
+          // owns the view now — writing this would show the wrong rows.
+          if (p !== activePersonaRef.current || ch !== activeChannelRef.current
+            || streamingRef.current) return
+          chunksRef.current = cs
+          setChunks(cs)
+          // An errored turn keeps its "sending…" echo until dismissed; the
+          // row it persisted is in `cs` now, so drop the echo or it shows twice.
+          setStream((s) => (!s.active && s.userText != null ? { ...s, userText: null } : s))
+        },
+        () => {}, // a background refresh failing changes nothing on screen
+      )
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onFocus)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onFocus)
+    }
+  }, [])
 
   const refreshPersona = useCallback(async (p: string) => {
     try {
@@ -558,7 +624,7 @@ export function usePortalStore() {
   // This means a CHAINED confirm (approve → another parked write) re-appears as
   // a new ephemeral chunk with a fresh token, and the approve/deny bar re-arms.
   const buildHandlers = useCallback(
-    (personaName: string, channel: string) => ({
+    (personaName: string, channel: string, sentText?: string) => ({
       onToken: (delta: string) => {
         tokenBufRef.current += delta
         scheduleFlush()
@@ -614,6 +680,7 @@ export function usePortalStore() {
         // bar permanently disabled ("resolving…") until a page reload.
         setResolvingConfirm(false)
         setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg }))
+        resyncBeforeSendRef.current = true
       },
       onDone: async () => {
         flushTokens()
@@ -654,23 +721,35 @@ export function usePortalStore() {
         setResolvingConfirm(false)
         abortRef.current = null
       },
+      // DP-447: refused before anything was written — show the conversation
+      // as it really is and hand a typed message back to the composer.
+      onStale: () => {
+        streamingRef.current = false
+        abortRef.current = null
+        resetTokenBuf()
+        setStream({ ...EMPTY_STREAM })
+        setResolvingConfirm(false)
+        setBanner(STALE_BANNER)
+        if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
+        void refreshTranscript(personaName, channel)
+      },
     }),
-    [refreshTranscript, refreshChannels, flushTokens, scheduleFlush],
+    [refreshTranscript, refreshChannels, flushTokens, scheduleFlush, resetTokenBuf],
   )
 
   // ---- send a chat turn ---------------------------------------------
   const sendTurn = useCallback(
-    async (text: string, retry = false) => {
+    async (text: string, retry = false, cont?: { thinkOpen?: boolean }) => {
       if (!persona) return
       // One stream at a time: a second send/regen while one is in flight would
       // interleave both streams' frames into the shared stream state and leak
       // the first abort handle.
       if (streamingRef.current) return
       const trimmed = text.trim()
-      if (!trimmed && !retry) return
+      if (!trimmed && !retry && !cont) return
 
       // dev command path
-      if (trimmed.startsWith('/')) {
+      if (!cont && trimmed.startsWith('/')) {
         try {
           const resp = await api.devCommand(persona.name, trimmed)
           setDevRow({
@@ -693,14 +772,40 @@ export function usePortalStore() {
       idFrameRef.current = null
       streamingRef.current = true
       resetTokenBuf()
-      // Echo the user turn immediately; a retry replays the last persisted
-      // user turn, so it gets no new echo.
-      setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
+      if (resyncBeforeSendRef.current) {
+        resyncBeforeSendRef.current = false
+        await refreshTranscript(persona.name, activeChannel)
+      }
+      const shown = chunksRef.current
+      const continued = cont ? shown[shown.length - 1] : null
+      if (cont && (continued?.role !== 'assistant' || continued.interaction_id == null)) {
+        // The re-sync showed the conversation no longer ends on a reply.
+        streamingRef.current = false
+        return
+      }
+      if (continued) {
+        // DP-447: the row grows in place — seed the stream with what it holds.
+        setStream({
+          ...EMPTY_STREAM,
+          active: true,
+          text: continued.content,
+          reasoning: continued.reasoning ?? null,
+          continuingId: continued.interaction_id,
+        })
+      } else {
+        // Echo the user turn immediately; a retry replays the last persisted
+        // user turn, so it gets no new echo.
+        setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
+      }
 
       const handle = streamChat(
         {
           derpr_user_text: retry && !trimmed ? text : trimmed,
           derpr_retry: retry,
+          derpr_continue: cont ? true : undefined,
+          derpr_think_open: cont?.thinkOpen,
+          derpr_continue_id: continued?.interaction_id ?? undefined,
+          derpr_expected_last_id: lastPersistedId(shown),
           model: persona.name,
           channel: activeChannel,
           // null = persona leaves it unset; omit so the engine uses its own
@@ -713,11 +818,24 @@ export function usePortalStore() {
           min_p: persona.kobold_extras.min_p,
           tfs: persona.kobold_extras.tfs,
         },
-        buildHandlers(persona.name, activeChannel),
+        buildHandlers(persona.name, activeChannel, retry || cont ? undefined : trimmed),
       )
       abortRef.current = handle
     },
     [persona, activeChannel, refreshTranscript, refreshPersona, buildHandlers, resetTokenBuf],
+  )
+
+  // ---- continue (DP-447) ---------------------------------------------
+  // Extend the trailing assistant reply in place. `thinkOpen` comes from a raw
+  // edit that just ran; otherwise a row this page saw closed is said closed.
+  const continueTurn = useCallback(
+    async (thinkOpen?: boolean) => {
+      const shown = chunksRef.current
+      const id = shown[shown.length - 1]?.interaction_id
+      const closed = id != null && thinkClosedRef.current.has(id)
+      await sendTurn('', false, { thinkOpen: thinkOpen ?? (closed ? false : undefined) })
+    },
+    [sendTurn],
   )
 
   // ---- resolve a parked CONFIRM write (6a) --------------------------
@@ -765,6 +883,9 @@ export function usePortalStore() {
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
     setResolvingConfirm(false)
+    // The engine flushes the partial reply when it notices the disconnect,
+    // which can land after both re-syncs below — re-sync again before sending.
+    resyncBeforeSendRef.current = true
     if (!persona) return
     // DP-444: the server saves the stopped turn once it notices the
     // disconnect, so this re-sync can land before or after that commit. When
@@ -821,18 +942,23 @@ export function usePortalStore() {
 
   // ---- row mutations -------------------------------------------------
   const editRow = useCallback(
-    async (id: number, content: string) => {
+    async (id: number, content: string, rawThink = false): Promise<boolean> => {
       // Callers are fire-and-forget (the row editor has already closed), so a
       // rejection here would otherwise vanish — the user believes the edit
       // persisted while the DB still holds the old content.
       try {
-        await api.patchInteraction(id, content)
+        await api.patchInteraction(id, content, rawThink)
       } catch (e) {
         console.error(e)
         setBanner('Edit failed — row unchanged')
-        return
+        return false
+      }
+      if (rawThink) {
+        if (rawThinkState(content) === 'closed-empty') thinkClosedRef.current.add(id)
+        else thinkClosedRef.current.delete(id)
       }
       if (persona) await refreshTranscript(persona.name, activeChannelRef.current)
+      return true
     },
     [persona, refreshTranscript],
   )
@@ -955,6 +1081,8 @@ export function usePortalStore() {
     dismissStream,
     dismissDevRow,
     regen,
+    continueTurn,
+    restoredDraft,
     editRow,
     deleteRow,
     savePersona,
