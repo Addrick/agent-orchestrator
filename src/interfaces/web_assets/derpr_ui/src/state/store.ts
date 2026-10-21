@@ -275,14 +275,19 @@ export function usePortalStore() {
   // pre-first-live-success only) — keep the last real state and banner it.
   const UNREACHABLE = 'Engine unreachable — showing last loaded state'
 
+  // Returns the chunks it applied, or null when the fetch failed or `wanted`
+  // (checked once the fetch lands) says the caller's view has moved on.
   const refreshTranscript = useCallback(
-    async (p: string, channel?: string) => {
+    async (p: string, channel?: string, wanted?: () => boolean): Promise<Chunk[] | null> => {
       try {
         const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
+        if (wanted && !wanted()) return null
         setChunks(cs)
         setOffline(api.usingMock())
+        return cs
       } catch {
         setBanner(UNREACHABLE)
+        return null
       }
     },
     [],
@@ -770,29 +775,32 @@ export function usePortalStore() {
     // retry overwrites its row in place (no newer id), so it keeps the live row.
     const name = persona.name
     const channel = activeChannelRef.current
-    const newest = Math.max(-1, ...chunksRef.current.map((c) => c.interaction_id ?? -1))
+    const newest = chunksRef.current.reduce((m, c) => Math.max(m, c.interaction_id ?? -1), -1)
+    // A new turn or a view switch since the stop owns the state now — checked
+    // again once each fetch lands, so a stale transcript is never applied.
+    const current = () =>
+      !streamingRef.current &&
+      name === activePersonaRef.current &&
+      channel === activeChannelRef.current
     for (const delayMs of [0, 800]) {
       if (delayMs) await new Promise((r) => setTimeout(r, delayMs))
-      // A new turn or a view switch since the stop owns the state now.
-      if (streamingRef.current) return
-      if (name !== activePersonaRef.current || channel !== activeChannelRef.current) return
-      let cs: Chunk[]
-      try {
-        cs = await api.getTranscript(name, undefined, channel)
-      } catch {
-        setBanner(UNREACHABLE)
-        return
-      }
-      if (streamingRef.current) return
-      setChunks(cs)
-      setOffline(api.usingMock())
-      if (cs.some((c) => c.role === 'assistant' && (c.interaction_id ?? -1) > newest)) {
+      if (!current()) return
+      const cs = await refreshTranscript(name, channel, current)
+      if (!cs) return
+      // The stopped turn's row also follows its own user row (persisted before
+      // generation), so an older stopped turn whose row landed late is not
+      // taken for this one.
+      const floor = cs.reduce(
+        (m, c) => (c.role === 'user' ? Math.max(m, c.interaction_id ?? -1) : m),
+        newest,
+      )
+      if (cs.some((c) => c.role === 'assistant' && (c.interaction_id ?? -1) > floor)) {
         resetTokenBuf()
         setStream(EMPTY_STREAM)
         return
       }
     }
-  }, [persona, flushTokens, resetTokenBuf])
+  }, [persona, flushTokens, resetTokenBuf, refreshTranscript])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
   // turn (persisted before generation) is only in the DB — surface it.

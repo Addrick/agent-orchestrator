@@ -37,8 +37,8 @@ from src.request_builder import AssembledRequest, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
 from src.tools.tool_loop import (
     PARK_STATUS_EXPIRED, ToolDeferredEvent, ToolLoop, _ApiPayloadEvent,
-    _LoopFinishedEvent, _ToolContextEvent, _WriteDuplicateEvent,
-    write_call_identity,
+    _LoopFinishedEvent, _StepBoundaryEvent, _ToolContextEvent,
+    _WriteDuplicateEvent, seal_stopped_span, write_call_identity,
 )
 from src.turn_persistence import TurnPersistence
 from src.tool_policy import callable_tool_names
@@ -492,13 +492,13 @@ class ChatSystem:
             # `duplicate_of_pending` entries get corrected when the original
             # proposal resolves.
             dups_this_turn: List[_WriteDuplicateEvent] = []
-            # DP-444: where the last finished tool step ends, in the text and
-            # in the gated writes. A turn that stops or errors keeps the steps
-            # up to there; its reply is only the text written after it, since
-            # every step's own prose is already on that step in the context.
+            # DP-444: where the latest tool step's prose ends. A turn that
+            # stops or errors keeps its steps; its reply is only the text
+            # written after the last of them, since every step's own prose is
+            # already on that step in the context. `stopped_span` is the loop's
+            # live history, sealed only if the turn is stopped.
             reply_from = 0
-            parks_kept = 0
-            dups_kept = 0
+            stopped_span: Optional[_StepBoundaryEvent] = None
 
             def _already_pending(write_call: Dict[str, Any]) -> Optional[str]:
                 """Token of an identical proposal still awaiting the operator.
@@ -586,12 +586,12 @@ class ChatSystem:
                         yield ev
                     elif isinstance(ev, (ToolCallStartEvent, ToolCallResultEvent)):
                         yield ev
+                    elif isinstance(ev, _StepBoundaryEvent):
+                        reply_from = len(accumulated_parts)
+                        stopped_span = ev
                     elif isinstance(ev, _ToolContextEvent):
                         tool_context_json = ev.tool_context_json
-                        if ev.step_boundary:
-                            reply_from = len(accumulated_parts)
-                            parks_kept = len(parks_this_turn)
-                            dups_kept = len(dups_this_turn)
+                        ctx.turn_tainted = ctx.turn_tainted or ev.turn_tainted
                     elif isinstance(ev, ToolDeferredEvent):
                         # DP-297: a deferred call, mid-turn. Hold it — the store
                         # registration needs the assistant row id that does not
@@ -649,6 +649,7 @@ class ChatSystem:
                                 reasoning=join_reasoning(accumulated_reasoning),
                                 tool_context_json=tool_context_json,
                                 parks=parks_this_turn, dups=dups_this_turn,
+                                tainted=ctx.turn_tainted,
                             )
                         yield ev
                         return
@@ -663,20 +664,25 @@ class ChatSystem:
                         self.request_builder.set_conversation_taint(taint_key, ev.turn_tainted)
             except asyncio.CancelledError:
                 # Client disconnect / abort. Stopping is a normal way to end a
-                # turn ("what it has is fine"), so keep what finished: every
-                # completed tool step and the text written after the last one.
-                # A step still in flight is dropped with its gated writes —
-                # their history entries are not in this context, so they must
-                # not become approvable (see `_register_parks`). Then re-raise
-                # so the surrounding StreamingResponse aborts.
+                # turn ("what it has is fine"), so keep everything it did: every
+                # tool step, including the one in flight — its calls that
+                # returned keep their results, the rest are sealed as cut off —
+                # and the text written after the last step. Every gated write
+                # received so far has its history entry in that span (the loop
+                # appends it before yielding the park), so all of them stay
+                # approvable. Then re-raise so the StreamingResponse aborts.
+                tool_context_json, stopped_tainted = (
+                    seal_stopped_span(stopped_span.history, stopped_span.start)
+                    if stopped_span is not None else (tool_context_json, False)
+                )
                 self._commit_interrupted_turn(
                     persona_name, user_identifier, channel, server_id,
                     user_interaction_id, retry_assistant_id,
                     reply="".join(accumulated_parts[reply_from:]),
                     reasoning=join_reasoning(accumulated_reasoning),
                     tool_context_json=tool_context_json,
-                    parks=parks_this_turn[:parks_kept],
-                    dups=dups_this_turn[:dups_kept],
+                    parks=parks_this_turn, dups=dups_this_turn,
+                    tainted=ctx.turn_tainted or stopped_tainted,
                 )
                 raise
 
@@ -766,6 +772,7 @@ class ChatSystem:
             tool_context_json: Optional[str],
             parks: List[ParkedWrite],
             dups: List[_WriteDuplicateEvent],
+            tainted: bool,
     ) -> Optional[int]:
         """Persist a turn that ended early — errored or stopped (DP-444).
 
@@ -779,7 +786,15 @@ class ChatSystem:
         each is still a real proposal whose `awaiting_human_approval` entry is
         in this row. The caller passes only the parks inside `tool_context_json`.
         The turn is never retained (DP-423 drops a retry it overwrote).
+
+        `tainted` is set like a finished turn's sticky taint, but only ever
+        raised: the saved steps replay their tool results next turn, and an
+        untrusted one must not come back unflagged (DP-113).
         """
+        if tainted:
+            self.request_builder.set_conversation_taint(
+                (user_identifier, persona_name, channel, server_id), True,
+            )
         row_id = self.turn_persistence.commit_or_update_assistant(
             persona_name=persona_name, user_identifier=user_identifier,
             channel=channel, server_id=server_id,

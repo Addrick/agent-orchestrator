@@ -223,23 +223,13 @@ class TurnPersistence:
                     except Exception as e:
                         logger.error(f"Retry park set_tool_context failed: {e}")
                 return None
-            if not has_output:
-                # The turn died before producing prose (the error path commits
-                # whatever accumulated, which is "" whenever the model emitted
-                # tool calls and nothing else). Overwriting here would blank the
-                # canonical row: empty content + NULL reasoning fails
-                # `_is_renderable`, so the message *and* its version chevron
-                # drop out of the transcript and the archived original becomes
-                # unreachable through the UI. Keep the text, land the context.
-                if tool_context_json:
-                    try:
-                        self.memory_manager.set_tool_context(
-                            retry_assistant_id, tool_context_json,
-                        )
-                        return retry_assistant_id
-                    except Exception as e:
-                        logger.error(f"Retry set_tool_context failed: {e}")
-                return None
+            # A retry that stopped or errored after its tool steps and before
+            # any reply text (tool context, no prose) overwrites the row like
+            # any other: keeping the old attempt's text under the new attempt's
+            # steps would show the user, and send the model, an answer to calls
+            # it never saw. The row stays visible on its tool cards alone
+            # (DP-444 `_is_renderable`), so the archived original stays
+            # reachable through its version chevron.
             try:
                 # Forward tool_context so the regenerated row's stored tool calls
                 # stay paired with its new content — a retried turn may use a

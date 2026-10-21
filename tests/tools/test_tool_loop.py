@@ -1,5 +1,6 @@
 # tests/tools/test_tool_loop.py
 
+import asyncio
 import json
 from typing import Any, AsyncIterator, Dict, List
 from unittest.mock import AsyncMock, MagicMock
@@ -14,9 +15,10 @@ from src.generation_events import (
 from src.persona import ExecutionMode
 from src.tools.tool_loop import (
     PARK_STATUS_AWAITING, PARK_STATUS_DUPLICATE, ToolLoop, ToolDeferredEvent,
-    _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent,
+    SEAL_INTERRUPTED, STOPPED_INSTRUCTION,
+    _ApiPayloadEvent, _LoopFinishedEvent, _StepBoundaryEvent, _ToolContextEvent,
     render_call_summary_footer, render_max_iteration_text, replayable_tool_context,
-    write_call_identity,
+    seal_stopped_span, write_call_identity,
 )
 
 # DP-404: the loop refuses a call whose name was not offered, so these
@@ -102,21 +104,21 @@ async def test_single_tool_call_then_text():
     types = [type(e).__name__ for e in events]
     assert types == [
         "_ApiPayloadEvent",
+        "_StepBoundaryEvent",  # DP-444: the step's calls entered history
         "ToolCallStartEvent",
         "ToolCallResultEvent",
-        "_ToolContextEvent",  # DP-444: step-boundary snapshot
         "TokenEvent", "TokenEvent",
         "_ApiPayloadEvent",
         "_LoopFinishedEvent",
     ]
 
-    start = events[1]
+    start = events[2]
     assert isinstance(start, ToolCallStartEvent)
     assert start.tool_name == "search_tool"
     assert start.call_id == "abc123"
     assert start.arguments == {"q": "x"}
 
-    result = events[2]
+    result = events[3]
     assert isinstance(result, ToolCallResultEvent)
     assert result.call_id == "abc123"
     assert json.loads(result.result) == {"result": "found"}
@@ -627,11 +629,11 @@ async def test_error_exit_emits_sealed_tool_context():
 
 
 @pytest.mark.asyncio
-async def test_step_boundary_snapshot_precedes_the_next_steps_text():
-    """DP-444: after each finished step the loop snapshots the context before
-    the next model call streams, so an orchestrator that stops the turn keeps
-    exactly the finished steps, with every call answered, and treats only the
-    text after the snapshot as the reply. Nothing is emitted before step one."""
+async def test_step_boundary_marks_where_the_steps_prose_ends():
+    """DP-444: the boundary comes once the step's calls (and its prose) are in
+    history and before any of them runs, so the orchestrator treats only text
+    after it as the reply. It hands over the live history, so a stop seals
+    whatever had finished by then. Nothing is emitted before step one."""
     engine = _make_engine([
         [
             {"type": "text_delta", "text": "Checking first."},
@@ -646,20 +648,68 @@ async def test_step_boundary_snapshot_precedes_the_next_steps_text():
         ],
     ])
     loop = ToolLoop(engine, _make_tool_manager({"search_tickets": {"hits": 1}}))
+    history: List[Dict[str, Any]] = []
 
     events = await _drain(loop.run(
-        persona=_make_persona(), conversation_history=[],
+        persona=_make_persona(), conversation_history=history,
         params=MagicMock(), tools=_OFFERED,
     ))
 
-    snaps = [i for i, e in enumerate(events)
-             if isinstance(e, _ToolContextEvent) and e.step_boundary]
-    assert len(snaps) == 1
+    bounds = [i for i, e in enumerate(events)
+              if isinstance(e, _StepBoundaryEvent)]
+    assert len(bounds) == 1
     tokens = [i for i, e in enumerate(events) if isinstance(e, TokenEvent)]
-    assert tokens[0] < snaps[0] < tokens[1]
-    msgs = json.loads(events[snaps[0]].tool_context_json)
+    starts = [i for i, e in enumerate(events)
+              if isinstance(e, ToolCallStartEvent)]
+    assert tokens[0] < bounds[0] < starts[0] < tokens[1]
+    assert events[bounds[0]].history is history
+    sealed, tainted = seal_stopped_span(history, events[bounds[0]].start)
+    msgs = json.loads(sealed)
     _assert_calls_all_answered(msgs)
     assert msgs[0]["content"] == "Checking first."
+    assert tainted is True  # search_tickets produces untrusted output
+
+
+def test_stopped_seal_marks_a_cut_off_read_unknown_and_a_write_not_executed():
+    """A read with no result was cut off mid-run, and some reads change state,
+    so its outcome is unknown. A write never runs inside a turn."""
+    history = [{"role": "assistant", "tool_calls": [
+        {"id": "r1", "name": "set_timer"},
+        {"id": "w1", "name": "update_ticket"},
+    ]}]
+
+    sealed, tainted = seal_stopped_span(history, 0)
+
+    results = {m["tool_call_id"]: json.loads(m["content"])
+               for m in json.loads(sealed) if m.get("role") == "tool"}
+    assert results["r1"] == {"status": SEAL_INTERRUPTED,
+                             "error": STOPPED_INSTRUCTION}
+    assert results["w1"] == {"status": "not_executed",
+                             "reason": SEAL_INTERRUPTED}
+    assert tainted is False  # nothing actually returned
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_keeps_the_results_that_already_returned():
+    """A stop mid-batch must not lose the calls that finished: they did their
+    work, and the model needs to know it next turn."""
+    manager = MagicMock()
+    manager.execute_tool = AsyncMock(side_effect=[
+        {"result": "done"}, asyncio.CancelledError(),
+    ])
+    loop = ToolLoop(MagicMock(), manager)
+    history: List[Dict[str, Any]] = []
+    calls = [{"id": "a", "name": "search_tickets", "arguments": {}},
+             {"id": "b", "name": "search_tickets", "arguments": {}}]
+
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in loop._execute_calls(
+                calls, history, offered={"search_tickets"}):
+            pass
+
+    assert [(m["tool_call_id"], json.loads(m["content"])) for m in history] == [
+        ("a", {"result": "done"}),
+    ]
 
 
 @pytest.mark.asyncio

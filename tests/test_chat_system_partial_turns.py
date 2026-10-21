@@ -1,11 +1,11 @@
 # tests/test_chat_system_partial_turns.py
 """DP-444: what a stopped or errored turn persists.
 
-Both keep the finished tool steps and, as the reply, only the text written
-after the last of them. Each step's own prose already rides on its assistant
-entry in `tool_context` (DP-338), so saving every streamed delta as the reply
-sent the model that prose twice. A step still in flight when the turn stops is
-dropped with its gated writes; writes from finished steps stay approvable.
+Both keep their tool steps and, as the reply, only the text written after the
+last of them. Each step's own prose already rides on its assistant entry in
+`tool_context` (DP-338), so saving every streamed delta as the reply sent the
+model that prose twice. A step still in flight when the turn stops is kept,
+each call with the outcome it actually had; gated writes stay approvable.
 """
 
 import asyncio
@@ -107,25 +107,42 @@ async def test_stop_mid_loop_keeps_finished_steps_and_their_parks(chat_system_wi
 
 
 @pytest.mark.asyncio
-async def test_stop_drops_a_step_whose_calls_had_not_returned(chat_system_with_mocks):
+async def test_stop_mid_step_keeps_the_step_with_each_calls_real_outcome(
+        chat_system_with_mocks):
+    """The step in flight is kept, not dropped: dropping it left its prose as
+    the reply -- the model's plan with no trace of the calls it made -- so the
+    next turn could assume a search had run. A call that returned keeps its
+    real result; one cut off mid-run is marked unknown, since some reads
+    (`set_timer`) change state; a write never runs inside a turn, so an
+    unanswered one is `not_executed`."""
     system, memory_mock, text_engine, tool_manager = _setup(chat_system_with_mocks)
     _script(
         text_engine,
         [_say("Step one."), *_calls(_call("r1", "search_tickets", query="a"))],
-        [_say("Step two."), *_calls(_call("r2", "search_tickets", query="b"))],
+        [_say("Step two."), *_calls(_call("r2", "search_tickets", query="b"),
+                                    _call("r3", "search_tickets", query="c"),
+                                    _call("w1", "update_ticket", state="closed"))],
     )
     tool_manager.execute_tool.side_effect = [
-        {"result": "first"}, asyncio.CancelledError(),
+        {"result": "first"}, {"result": "second"}, asyncio.CancelledError(),
     ]
 
     await _stop(system)
 
     (row,) = _assistant_rows(memory_mock)
     ctx = json.loads(row["tool_context"])
-    ids = [c["id"] for m in ctx for c in (m.get("tool_calls") or [])]
-    assert ids == ["r1"]
-    # The unfinished step's prose stays as reply text; its call is gone.
-    assert row["content"] == "Step two."
+    steps = [m for m in ctx if m.get("tool_calls")]
+    assert [m["content"] for m in steps] == ["Step one.", "Step two."]
+    # Both steps' prose is on their entries, so none of it is the reply.
+    assert row["content"] == ""
+    results = {m["tool_call_id"]: json.loads(m["content"])
+               for m in ctx if m.get("role") == "tool"}
+    assert results["r2"] == {"result": "second"}
+    assert results["r3"]["status"] == "interrupted"
+    assert "unknown" in results["r3"]["error"]
+    assert results["w1"]["status"] == "not_executed"
+    # The write never parked, so nothing is approvable.
+    assert system.confirmations.list_for("user", "test_persona") == []
 
 
 @pytest.mark.asyncio
@@ -169,6 +186,31 @@ async def test_stop_before_anything_saves_nothing(chat_system_with_mocks):
     await _stop(system)
 
     assert _assistant_rows(memory_mock) == []
+
+
+@pytest.mark.parametrize("interrupt", [
+    asyncio.CancelledError(), LLMCommunicationError("upstream 500"),
+], ids=["stop", "error"])
+@pytest.mark.asyncio
+async def test_interrupted_turn_keeps_the_conversation_tainted(
+        chat_system_with_mocks, interrupt):
+    """The saved step replays its untrusted `search_tickets` result to the
+    model next turn, so the conversation stays tainted, as after a finished
+    turn. Only `_LoopFinishedEvent` used to set the sticky bit."""
+    system, _, text_engine, _ = _setup(chat_system_with_mocks)
+    _script(
+        text_engine,
+        [_say("Looking."), *_calls(_call("r1", "search_tickets", query="q"))],
+        ([_say("Found")], interrupt),
+    )
+
+    if isinstance(interrupt, asyncio.CancelledError):
+        await _stop(system)
+    else:
+        await _drain(system.stream_response("test_persona", "user", "chan", "go"))
+
+    key = ("user", "test_persona", "chan", None)
+    assert system.request_builder.conversation_taints.get(key) is True
 
 
 @pytest.mark.asyncio

@@ -330,26 +330,30 @@ def test_conversation_taints_is_bounded(chat_system_with_mocks):
 
 # --- DP-296 review: retry paths must land tool context without blanking text --
 
-def test_retry_with_empty_text_does_not_blank_the_canonical_row(chat_system_with_mocks):
-    """The error path commits whatever prose accumulated, which is "" whenever
-    the model emitted tool calls and died before writing any. On a portal retry
-    that took the UPDATE branch and wrote content="" + reasoning=None, which
-    fails `_is_renderable` — dropping the message *and* its version chevron from
-    the transcript and stranding the archived original."""
+def test_retry_with_only_tool_steps_replaces_the_prior_attempt(chat_system_with_mocks):
+    """A retry that stopped or errored after its tool steps and before any
+    reply text used to keep the prior attempt's text and attach only the new
+    tool context (DP-296), so the row showed attempt 2's steps followed by
+    attempt 1's answer — to the user and to the model. That guard existed
+    because an empty row was unrenderable; tool cards alone render since
+    DP-444, so the row is overwritten like any other retry."""
     system, mm, _, _, _ = chat_system_with_mocks
+    sealed = ('[{"role": "assistant", "content": "Checking.", '
+              '"tool_calls": [{"id": "c1", "name": "get_ticket"}]}, '
+              '{"role": "tool", "tool_call_id": "c1", "content": "{}"}]')
 
     rid = system.turn_persistence.commit_or_update_assistant(
         persona_name="test_persona", user_identifier="u", channel="c",
         server_id=None, final_text="",
         response_type=ResponseType.LLM_GENERATION,
         user_interaction_id=None, retry_assistant_id=42,
-        tool_context_json='[{"role": "tool", "name": "get_ticket"}]',
+        tool_context_json=sealed,
     )
 
     assert rid == 42
-    mm.update_interaction_content.assert_not_called()
-    mm.set_tool_context.assert_called_once_with(
-        42, '[{"role": "tool", "name": "get_ticket"}]')
+    mm.update_interaction_content.assert_called_once_with(
+        42, "", reasoning_content=None, tool_context=sealed)
+    mm.set_tool_context.assert_not_called()
 
 
 def test_retry_park_still_records_its_tool_context(chat_system_with_mocks):

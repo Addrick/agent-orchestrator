@@ -18,7 +18,8 @@ import logging
 import uuid
 from dataclasses import dataclass
 from typing import (
-    AbstractSet, Any, AsyncIterator, Callable, Dict, List, Optional, Tuple,
+    AbstractSet, Any, AsyncIterator, Callable, Dict, List, Optional, Sequence,
+    Tuple,
     Union, cast,
 )
 
@@ -82,17 +83,32 @@ class _ApiPayloadEvent:
 @dataclass
 class _ToolContextEvent:
     """Loop-internal: carries this turn's sealed tool context out of an exit
-    that has no `_LoopFinishedEvent` to hang it on (the error paths), and —
-    with `step_boundary` — a snapshot after every finished tool step (DP-444).
+    that has no `_LoopFinishedEvent` to hang it on (the error paths).
 
     The orchestrator siphons it exactly like `_ApiPayloadEvent`, so an errored
-    or cancelled turn can still persist the tool calls it made first. A
-    step-boundary snapshot is emitted before the next iteration streams
-    anything, so the text the orchestrator collects after it is exactly what
-    the model wrote after its last finished step: the reply, for a turn that
-    stops there. Calls still in flight are never in it."""
+    turn can still persist the tool calls it made before dying.
+
+    `turn_tainted` is the loop's taint at the error. A persisted span replays
+    its tool results to the model next turn, so an errored turn must keep the
+    conversation's sticky taint exactly as `_LoopFinishedEvent` does, or
+    untrusted output re-enters the context unflagged (DP-113)."""
     tool_context_json: Optional[str]
-    step_boundary: bool = False
+    turn_tainted: bool = False
+
+
+@dataclass
+class _StepBoundaryEvent:
+    """Loop-internal (DP-444): a step's calls just entered history, with its
+    prose on the assistant entry beside them.
+
+    Emitted before any of the calls runs, so the text the orchestrator collects
+    after it is what the model wrote after its latest step: the reply, for a
+    turn stopped from here on. `history` is the loop's live list, not a copy —
+    a stopped turn seals it with `seal_stopped_span` at the moment it stops, so
+    every call that finished by then keeps its real result and nothing is
+    serialized for the turns (nearly all of them) that finish normally."""
+    history: List[Dict[str, Any]]
+    start: int
 
 
 @dataclass
@@ -161,7 +177,7 @@ LoopEvent = Union[
     TokenEvent, ReasoningEvent, ErrorEvent,
     ToolCallStartEvent, ToolCallResultEvent,
     _ApiPayloadEvent, _LoopFinishedEvent, _ToolContextEvent, ToolDeferredEvent,
-    _WriteDuplicateEvent,
+    _WriteDuplicateEvent, _StepBoundaryEvent,
 ]
 
 # Status values for a deferred tool call's synthetic tool result. These are what
@@ -306,10 +322,17 @@ SEAL_MAX_ITERATIONS = "max_iterations_exceeded"
 # it exists so a call that somehow slipped through does not tell the model its
 # successful turn errored.
 SEAL_UNKNOWN = "unknown"
-# A step-boundary snapshot (DP-444): taken when every call so far has its
-# result, so like SEAL_UNKNOWN it is expected to appear in no sealed result. It
-# is what a stopped turn persists, and names that if a call ever slips through.
+# The user stopped the turn (DP-444). A write is never run inside a turn, so an
+# unanswered one is `not_executed` like any other exit. A read that has no
+# result was cut off mid-flight instead, and some reads change state
+# (`set_timer`), so its result says the outcome is unknown, as
+# INTERRUPTED_INSTRUCTION does for a park cut short by a restart.
 SEAL_INTERRUPTED = "interrupted"
+STOPPED_INSTRUCTION = (
+    "The user stopped the turn while this call was running, so whether it took "
+    "effect is unknown. Do NOT assume either outcome — check the current state "
+    "before calling it again."
+)
 
 
 def seal_tool_context(
@@ -356,15 +379,67 @@ def seal_tool_context(
             if call_id in answered:
                 continue
             answered.add(call_id)
+            if reason == SEAL_INTERRUPTED and not is_write_tool(call.get("name") or ""):
+                outcome = {"status": reason, "error": STOPPED_INSTRUCTION}
+            else:
+                outcome = {"status": "not_executed", "reason": reason}
             sealed.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "name": call.get("name"),
-                "content": json.dumps(
-                    {"status": "not_executed", "reason": reason}
-                ),
+                "content": json.dumps(outcome),
             })
     return json.dumps(sealed)
+
+
+def seal_stopped_span(
+    conversation_history: List[Dict[str, Any]], start: int,
+) -> Tuple[Optional[str], bool]:
+    """A stopped turn's tool context, and whether it carries untrusted output.
+
+    The taint is read off the span rather than the loop's `turn_tainted`, which
+    is only raised once a whole step's reads are in: a stop mid-step keeps the
+    reads that already finished, and those replay to the model next turn.
+    """
+    tainted = any(
+        get_tool_capabilities(m.get("name") or "").get("produces_untrusted")
+        for m in conversation_history[start:] if m.get("role") == "tool"
+    )
+    return seal_tool_context(conversation_history, start, SEAL_INTERRUPTED), tainted
+
+
+def _scrubbed_result(tool_result: Any) -> str:
+    """A tool's return value as the string history and the UI both carry.
+
+    Egress scrub (DP-225 boundary 1): any registered secret is redacted before
+    the result reaches either, so both stay consistent and secret-free."""
+    return cast(str, get_scrubber().scrub(json.dumps(tool_result)))
+
+
+def _tool_result_message(resolved: Dict[str, Any], result_str: str) -> Dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": resolved["call_id"],
+        "name": resolved["name"],
+        "content": result_str,
+    }
+
+
+def _keep_returned_calls(
+    resolved: List[Dict[str, Any]],
+    tasks: Sequence["asyncio.Future[Any]"],
+    conversation_history: List[Dict[str, Any]],
+) -> None:
+    """The user stopped the turn mid-batch (DP-444). A call that already
+    returned did its work, so it goes into history with its real result, where
+    a stopped turn's seal finds it. The rest have none and are sealed as cut
+    off (`SEAL_INTERRUPTED`)."""
+    for r, task in zip(resolved, tasks):
+        task.cancel()  # a no-op for the finished ones
+        if task.done() and not task.cancelled():
+            conversation_history.append(
+                _tool_result_message(r, _scrubbed_result(task.result())),
+            )
 
 
 def replayable_tool_context(tool_context_json: str) -> List[Dict[str, Any]]:
@@ -825,17 +900,6 @@ class ToolLoop:
             accumulated_parts: List[str] = []
             accumulated_reasoning: List[str] = []
 
-            # DP-444: every step before this one has all its results, so this
-            # is what a turn stopped from here on keeps. Emitted before the
-            # iteration streams, so its text is what comes after the snapshot.
-            step_context = seal_tool_context(
-                conversation_history, history_start, SEAL_INTERRUPTED,
-            )
-            if step_context is not None:
-                yield _ToolContextEvent(
-                    tool_context_json=step_context, step_boundary=True,
-                )
-
             messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
                 persona, conversation_history,
             )
@@ -889,7 +953,8 @@ class ToolLoop:
                 yield _ToolContextEvent(
                     tool_context_json=seal_tool_context(
                         conversation_history, history_start, SEAL_ERROR,
-                    )
+                    ),
+                    turn_tainted=turn_tainted,
                 )
                 _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield ErrorEvent(message=err_msg)
@@ -904,7 +969,8 @@ class ToolLoop:
                 yield _ToolContextEvent(
                     tool_context_json=seal_tool_context(
                         conversation_history, history_start, SEAL_ERROR,
-                    )
+                    ),
+                    turn_tainted=turn_tainted,
                 )
                 _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield ErrorEvent(message=err_msg)
@@ -993,6 +1059,9 @@ class ToolLoop:
             if iteration_reasoning:
                 assistant_entry["reasoning_content"] = iteration_reasoning
             conversation_history.append(assistant_entry)
+            yield _StepBoundaryEvent(
+                history=conversation_history, start=history_start,
+            )
             write_calls = [c for c in admitted if is_write_tool(c["name"])]
             read_calls = [c for c in admitted if not is_write_tool(c["name"])]
 
@@ -1216,14 +1285,6 @@ class ToolLoop:
         self._log_turn_exit(
             call_tally, iterations_used, calls_used,
             budget_exhausted=calls_used >= self.max_tool_calls,
-        )
-        # The wrap-up below is one more model call that can be stopped; the
-        # last step's results are already in, so snapshot them first (DP-444).
-        yield _ToolContextEvent(
-            tool_context_json=seal_tool_context(
-                conversation_history, history_start, SEAL_INTERRUPTED,
-            ),
-            step_boundary=True,
         )
         async for exit_ev in self._finish_exhausted_turn(
             persona=persona,
@@ -1467,17 +1528,19 @@ class ToolLoop:
                 )
                 return {"error": f"Tool execution failed: {e}"}
 
-        results = await asyncio.gather(
-            *(_run_one(r["name"], r["args"]) for r in resolved)
-        )
+        tasks = [
+            asyncio.ensure_future(_run_one(r["name"], r["args"])) for r in resolved
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            _keep_returned_calls(resolved, tasks, conversation_history)
+            raise
 
         # Append/emit in original order — concurrency must not reorder the
         # transcript the model reads next iteration.
         for r, tool_result in zip(resolved, results):
-            # Egress scrub (DP-225 boundary 1): redact any registered secret
-            # before the serialized result reaches BOTH the LLM-visible history
-            # and the UI event, so both stay consistent and secret-free.
-            result_str = cast(str, get_scrubber().scrub(json.dumps(tool_result)))
+            result_str = _scrubbed_result(tool_result)
             err_str: Optional[str] = None
             # Shared with the gated-write path (DP-323): both used to re-derive
             # "did this fail" from the envelope's `error` key alone, and both
@@ -1493,12 +1556,7 @@ class ToolLoop:
                 # scrubbed is not enough on its own.
                 err_str = cast(str, get_scrubber().scrub(failure))
 
-            conversation_history.append({
-                "role": "tool",
-                "tool_call_id": r["call_id"],
-                "name": r["name"],
-                "content": result_str,
-            })
+            conversation_history.append(_tool_result_message(r, result_str))
 
             yield ToolCallResultEvent(
                 call_id=r["call_id"],
