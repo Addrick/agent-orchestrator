@@ -118,6 +118,10 @@ def raise_for_reply_error(info: Dict[str, Any]) -> None:
         raise LLMCommunicationError(f"opencode turn failed: {error.get('name', 'error')} {detail}".strip())
 
 
+def _role(message: Dict[str, Any]) -> Any:
+    return (message.get("info") or {}).get("role")
+
+
 def _has_key(message: Dict[str, Any], key: str) -> bool:
     return any((p.get("metadata") or {}).get(_KEY_FIELD) == key for p in message.get("parts", []))
 
@@ -143,7 +147,14 @@ class OpencodeClient:
                     raise LLMCommunicationError(
                         f"opencode {method} {path} -> HTTP {resp.status}: {body[:300]}"
                     )
-                return json.loads(body) if body else None
+                try:
+                    return json.loads(body) if body else None
+                except ValueError as e:
+                    # A proxy's HTML page, a truncated body: still a failed
+                    # call, so the driver's retry policy sees it as one.
+                    raise LLMCommunicationError(
+                        f"opencode {method} {path} returned non-JSON: {body[:300]}"
+                    ) from e
         except asyncio.TimeoutError:
             # Raw, so the caller can tell a timed-out turn (abort it) from a
             # failed request. Listed first: aiohttp's ServerTimeoutError is
@@ -166,6 +177,11 @@ class OpencodeClient:
                                json_body={"agent": "build", "command": f"mkdir -p -- '{slug}'"})
         finally:
             await self.request("DELETE", f"/session/{session['id']}", directory=root)
+        # The shell endpoint reports a failed command as output, not as an HTTP
+        # error, so confirm the directory exists before the caller caches it.
+        nodes = await self.request("GET", "/file", params={"path": "."}, directory=root)
+        if not any(n.get("name") == slug and n.get("type") == "directory" for n in nodes or []):
+            raise LLMCommunicationError(f"opencode: could not create workspace {root}/{slug}.")
         logger.info("opencode: created workspace %s/%s", root, slug)
 
     async def find_or_create_session(self, title: str) -> str:
@@ -189,24 +205,36 @@ class OpencodeClient:
     async def abort(self, session_id: str) -> None:
         try:
             await self.request("POST", f"/session/{session_id}/abort")
-        except LLMCommunicationError as e:
-            logger.warning("opencode: abort of %s failed: %s", session_id, e)
+        except (LLMCommunicationError, asyncio.TimeoutError) as e:
+            logger.warning("opencode: abort of %s failed: %r", session_id, e)
+
+    async def wait_idle(self, session_id: str, deadline: float) -> None:
+        """Wait out a turn already running in the session (one derpr did not
+        post, or one whose call was dropped). Posting into a busy session
+        queues behind it and blurs which reply is whose."""
+        while await self.is_busy(session_id):
+            if time.monotonic() > deadline:
+                raise LLMCommunicationError("opencode session stayed busy with another turn.")
+            await asyncio.sleep(_POLL_SECONDS)
 
 
 async def resume_turn(client: OpencodeClient, session_id: str, key: str, deadline: float) -> Optional[str]:
-    """If the session's last user message carries `key`, this attempt is a
-    retry of a turn already posted: wait for it and return its reply. None when
-    the key is not there (the caller posts)."""
+    """If a user message in the session carries `key`, this attempt is a retry
+    of a turn already posted: wait for it and return its reply. None when the
+    key is not there (the caller posts). Any user message, not only the last:
+    the provider lock is released between driver attempts, so another call's
+    message may already sit after ours."""
     msgs = await client.messages(session_id)
-    users = [i for i, m in enumerate(msgs) if (m.get("info") or {}).get("role") == "user"]
-    if not users or not _has_key(msgs[users[-1]], key):
+    if not any(_has_key(m, key) for m in msgs if _role(m) == "user"):
         return None
     idle_since: Optional[float] = None
     while True:
         busy = await client.is_busy(session_id)
         msgs = await client.messages(session_id)
         start = max((i for i, m in enumerate(msgs) if _has_key(m, key)), default=-1)
-        replies = [m for m in msgs[start + 1:] if (m.get("info") or {}).get("role") == "assistant"]
+        # Our turn's replies end at the next user message (another call's turn).
+        end = next((i for i in range(start + 1, len(msgs)) if _role(msgs[i]) == "user"), len(msgs))
+        replies = [m for m in msgs[start + 1:end] if _role(m) == "assistant"]
         final = replies[-1] if replies else None
         if not busy and final and (final["info"].get("time") or {}).get("completed"):
             text = reply_text(final.get("parts", []))
@@ -220,6 +248,44 @@ async def resume_turn(client: OpencodeClient, session_id: str, key: str, deadlin
             await client.abort(session_id)
             raise LLMCommunicationError("opencode turn timed out; aborted on the server.")
         await asyncio.sleep(_POLL_SECONDS)
+
+
+async def run_turn(client: OpencodeClient, session_id: str, key: str,
+                   body: Dict[str, Any], timeout: float) -> Tuple[str, bool]:
+    """Resume the turn `key` names, or post `body` as a new one. Returns
+    (reply text, resumed)."""
+    deadline = time.monotonic() + timeout
+    # Whether a turn running in the session is this call's own (one it posted
+    # or is resuming) rather than one it is waiting out.
+    ours = True
+    try:
+        text = await resume_turn(client, session_id, key, deadline)
+        if text is not None:
+            return text, True
+        ours = False
+        await client.wait_idle(session_id, deadline)
+        ours = True
+        try:
+            reply = await client.request(
+                "POST", f"/session/{session_id}/message", json_body=body,
+                timeout=aiohttp.ClientTimeout(total=timeout, sock_connect=10),
+            )
+        except asyncio.TimeoutError as e:
+            await client.abort(session_id)
+            raise LLMCommunicationError(
+                f"opencode turn timed out after {timeout:.0f}s; aborted on the server."
+            ) from e
+        reply = reply or {}
+        text = reply_text(reply.get("parts", []))
+        raise_for_reply_error(reply.get("info") or {})
+        return text, False
+    except asyncio.CancelledError:
+        # The caller went away (the portal's stop button, shutdown): stop the
+        # agent rather than leave it running unobserved, as cc's process-tree
+        # kill does for its turn.
+        if ours:
+            await client.abort(session_id)
+        raise
 
 
 class OpencodeProvider(Provider):
@@ -282,29 +348,14 @@ class OpencodeProvider(Provider):
                 session_id = await client.find_or_create_session(f"{SESSION_TITLE_PREFIX}{persona_name or slug}")
                 api_payload["session"] = session_id
 
-                deadline = time.monotonic() + timeout
-                text = await resume_turn(client, session_id, key, deadline)
-                api_payload["resumed"] = text is not None
-                if text is None:
-                    body: Dict[str, Any] = {
-                        "parts": [{"type": "text", "text": prompt, "metadata": {_KEY_FIELD: key}}],
-                    }
-                    if system_prompt:
-                        body["system"] = system_prompt
-                    if model:
-                        body["model"] = model
-                    try:
-                        reply = await client.request(
-                            "POST", f"/session/{session_id}/message", json_body=body,
-                            timeout=aiohttp.ClientTimeout(total=timeout, sock_connect=10),
-                        )
-                    except asyncio.TimeoutError as e:
-                        await client.abort(session_id)
-                        raise LLMCommunicationError(
-                            f"opencode turn timed out after {timeout:.0f}s; aborted on the server."
-                        ) from e
-                    text = reply_text(reply.get("parts", []))
-                    raise_for_reply_error(reply.get("info") or {})
+                body: Dict[str, Any] = {
+                    "parts": [{"type": "text", "text": prompt, "metadata": {_KEY_FIELD: key}}],
+                }
+                if system_prompt:
+                    body["system"] = system_prompt
+                if model:
+                    body["model"] = model
+                text, api_payload["resumed"] = await run_turn(client, session_id, key, body, timeout)
         except LLMCommunicationError as e:
             if e.api_payload is None:
                 e.api_payload = api_payload

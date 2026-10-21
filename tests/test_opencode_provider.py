@@ -205,6 +205,21 @@ async def test_a_driver_retry_resumes_instead_of_posting_again(fake):
     assert payload["resumed"] is True
 
 
+async def test_a_retry_resumes_even_after_another_calls_message(fake):
+    """The lock is released between driver attempts, so a second call's turn
+    can land after ours; our retry must still find its own turn, not re-post,
+    and must read its own reply, not the other call's."""
+    provider = OpencodeProvider(TextEngine())
+    history = _history(("user", "long task"))
+    await _generate(provider, history, request_id="a")
+    fake.reply_text = "other reply."
+    await _generate(provider, _history(("user", "other")), request_id="b")
+    result, payload = await _generate(provider, history, request_id="a")
+    assert len(fake.posts()) == 2
+    assert payload["resumed"] is True
+    assert result["content"] == "done."
+
+
 async def test_same_text_on_a_new_call_is_a_new_turn(fake):
     provider = OpencodeProvider(TextEngine())
     history = _history(("user", "again"))
@@ -226,6 +241,18 @@ async def test_a_timed_out_turn_is_aborted_on_the_server(fake, monkeypatch):
         await _generate(OpencodeProvider(TextEngine()), _history(("user", "x")))
     assert [c for c in fake.calls if c[1].endswith("/abort")]
     assert exc.value.api_payload["workspace"] == f"{ROOT}/codr"
+
+
+async def test_a_cancelled_call_aborts_its_turn_on_the_server(fake):
+    """The portal's stop button cancels the call; the agent must stop too."""
+    fake.reply_delay = 5.0
+    task = asyncio.create_task(_generate(OpencodeProvider(TextEngine()), _history(("user", "x"))))
+    while not fake.posts():
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [c for c in fake.calls if c[1].endswith("/abort")]
 
 
 async def test_http_error_carries_the_payload(fake, monkeypatch):
