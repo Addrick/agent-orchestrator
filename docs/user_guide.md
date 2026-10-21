@@ -630,7 +630,7 @@ the message a second time. Regenerating a reply is a new turn: the agent sees
 your message again, after its earlier answer.
 
 Configure in `.env` or `config/global_config.py`:
-- `OPENCODE_SERVER_URL` (default unset): e.g. `http://10.0.0.75:4096`. Unset = the
+- `OPENCODE_SERVER_URL` (default unset): e.g. `http://<sandbox-host>:4096`. Unset = the
   route is refused with an error naming this setting.
 - `OPENCODE_SERVER_USERNAME` (default `opencode`) and `OPENCODE_SERVER_PASSWORD`
   (`.env` only): opencode's basic auth.
