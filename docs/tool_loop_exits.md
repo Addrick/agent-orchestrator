@@ -11,7 +11,7 @@ Components:
   turn lifecycle (context var, persistence, taint, terminal event).
 
 Coverage: `tests/integration/test_tool_loop_exit_invariants.py` (marked `integration`, so it
-runs on a plain `pytest` but **not** in CI or the pre-push gate, which use `-m "not integration"`).
+runs on a plain `pytest` but **not** in CI or `scripts/ci_check.py`, which use `-m "not integration"`).
 
 ## The five invariants
 

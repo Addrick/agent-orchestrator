@@ -25,6 +25,17 @@ on:
 permissions:
   contents: read
 
+# One pipeline per ref at a time (DP-452). Without this, two merges seconds apart
+# run two pipelines that both push :latest, and whichever build finishes LAST
+# wins — a slower older build could overwrite the newer image and deploy stale
+# code. On master a newer run QUEUES behind the running one rather than cancelling
+# it, so a deploy is never killed mid `compose up`; GitHub keeps only the newest
+# pending run, which contains every queued commit. On a PR, a new push cancels the
+# superseded run outright — nobody needs CI results for a head that no longer exists.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   # Use your actual image name here
   IMAGE_NAME: ghcr.io/addrick/orchestratr
@@ -79,9 +90,19 @@ jobs:
         run: pytest -n auto -m "not integration"
 
   # JOB 2: Build & Push Docker Image
-  # Only runs if 'test' passes and we are pushing to main (not PRs)
+  # Push to master only (not PRs). Runs IN PARALLEL with `test`, not after it
+  # (DP-452): the build is ~2.5 min and the suite ~2 min, so serializing them put
+  # the whole suite on the deploy's critical path. The gate moved to `promote`,
+  # which needs both — a red suite still blocks prod; it just no longer blocks the
+  # image build. The PR already ran the suite; this run stays because PRs are
+  # often merged seconds apart against a master their CI never saw, so it is the
+  # only test of the tree that actually ships.
+  #
+  # Because the build no longer waits for the suite, it pushes only an immutable
+  # :<sha> tag. `:latest` — what prod's compose file pulls — moves in `promote`,
+  # after both jobs pass, so a red suite never leaves an untested :latest in GHCR
+  # for a manual `compose pull` to find.
   build-and-push:
-    needs: test
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -103,10 +124,34 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE_NAME }}:latest
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-  # JOB 3: Deploy to self-hosted runner on CT100 (.70 — Proxmox LXC, Linux)
-  # Only runs if build-and-push succeeds.
+  # JOB 3: Promote the tested image to :latest
+  # A registry-side retag (manifest copy, no layers move), so it takes seconds.
+  promote:
+    needs: [test, build-and-push]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Log in to the Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Tag the tested image as latest
+        run: docker buildx imagetools create --tag ${{ env.IMAGE_NAME }}:latest ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  # JOB 4: Deploy to self-hosted runner on CT100 (.70 — Proxmox LXC, Linux)
+  # Only runs once the tested image has been promoted to :latest.
   #
   # Post-cutover (2026-06-23) .70 is a Linux LXC, not the old Windows AUX-DESKTOP
   # box, so the runner + steps are bash/compose, not PowerShell/docker-run. Prod
@@ -118,7 +163,7 @@ jobs:
   # security_opt seccomp=unconfined (cc-* bubblewrap sandbox) live in
   # docker-compose.yml + ./.env there — NOT in this workflow.
   deploy:
-    needs: build-and-push
+    needs: promote
     runs-on: [self-hosted, Linux, derpr]
     permissions:
       packages: read
