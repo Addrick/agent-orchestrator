@@ -603,6 +603,65 @@ proceeds without memory and the reason is logged at WARNING.
 > itself is cross-platform and headless, so it runs and returns text; only the
 > OS sandbox is POSIX-only. Tools stay gated to `CC_ALLOWED_TOOLS` (no yolo).
 
+### opencode (`opencode`) — persistent remote agent (DP-448)
+
+`opencode` models hand the turn to an [opencode](https://opencode.ai) server
+(`opencode serve`) running on a separate sandbox machine, over its HTTP API.
+Like `cc` it is an **autonomous agent that runs its own tools** (shell, file
+edits, search) and returns its final text; DERPR's `tools` argument is ignored,
+and DERPR's approval, read/write split and taint do **not** gate what it does.
+The sandbox machine is the only boundary, so point it only at a box you are
+willing to lose.
+
+Unlike `cc` and `agy`, it is **persistent**: it does not start fresh on every
+call.
+
+- **One workspace per persona.** Each persona works in its own directory on the
+  sandbox, `<OPENCODE_WORKSPACES_ROOT>/<persona>`, created on first use. Files it
+  writes stay there between calls, restarts and deploys.
+- **One running conversation per persona.** opencode keeps the persona's session
+  (its own history, tool results and context compaction) on the sandbox. DERPR
+  finds it again by its title, `derpr:<persona>`, so nothing about it is stored
+  on the DERPR side. Every channel that talks to the persona talks to the same
+  session.
+- **Only what is new is sent.** Because the session already holds the history,
+  DERPR forwards only the messages after the persona's last reply, not the whole
+  window. The persona's system prompt rides along on every call.
+- To start the persona over, delete or rename its session in opencode (web UI
+  or API). The next message creates a fresh one; the workspace files remain.
+
+Model names: `opencode` uses the server's default model; `opencode-<provider>/<model>`
+(e.g. `opencode-kcpp/local`) picks a model the server has configured.
+
+Because no one can answer opencode's own permission prompts mid-run, each
+session is created with them resolved: reading outside the workspace and
+reading `.env` files are allowed, the `question` tool is denied (the agent
+asks in its reply instead), and opencode's repeated-tool-call guard
+(`doom_loop`, the same call with identical arguments several times in a row) is
+denied, so a stuck agent is refused rather than left to spin. A call that runs past the timeout is
+aborted on the server, and the persona replies with an error. When DERPR
+retries a failed attempt, it picks up the turn already sent rather than sending
+the message a second time. Regenerating a reply is a new turn: the agent sees
+your message again, after its earlier answer.
+
+Configure in `.env` or `config/global_config.py`:
+- `OPENCODE_SERVER_URL` (default unset): e.g. `http://<sandbox-host>:4096`. Unset = the
+  route is refused with an error naming this setting.
+- `OPENCODE_SERVER_USERNAME` (default `opencode`) and `OPENCODE_SERVER_PASSWORD`
+  (`.env` only): opencode's basic auth.
+- `OPENCODE_WORKSPACES_ROOT` (default `/home/agent/work`): the parent directory of
+  the persona workspaces, on the sandbox.
+- `OPENCODE_CALL_TIMEOUT_SECONDS` (default `1800`): how long one turn may run.
+- `RATE_LIMIT_OPENCODE_RPM` (default `15`).
+
+> **Shared GPU.** If the sandbox's model is the same koboldcpp DERPR and
+> Hindsight use, long agent turns compete with them and can push interactive
+> chats out of the server's prompt cache. Run heavy agent work when the box is
+> otherwise idle.
+
+The opt-in persona `codr` (`config/optional_personas/codr.json`) uses this
+route; add it the same way as [hypr](#hypr--the-infra-operator-opt-in-not-seeded).
+
 ## Personas
 
 Personas are stateful LLM configuration objects. Each persona has its own model, system prompt, token limits, sampling parameters, tool access, and memory scope. Users interact with personas through the routing mechanisms described above.

@@ -824,6 +824,41 @@ def test_hypr_loads_unquarantined():
     assert loaded["hypr"].get_service_bindings() == ["proxmox", "huggingface"]
 
 
+# --- DP-448: codr, the persistent opencode agent (opt-in, not seeded) --------
+
+CODR_FILE = "optional_personas/codr.json"
+
+
+def test_codr_loads_unquarantined_on_the_opencode_route_with_no_derpr_tools():
+    """opencode runs its own tools on the sandbox, so codr holds none of
+    derpr's: a binding or allowed tool here would be offered and never run."""
+    import os
+
+    from src.personas import store
+
+    loaded = store.load_personas_from_file(
+        os.path.join(global_config.CONFIG_DIR, CODR_FILE)
+    )
+    assert loaded is not None and "codr" in loaded
+    codr = loaded["codr"]
+    assert codr.get_security_block_reasons() == []
+    assert codr.get_model_name() == "opencode"
+    assert codr.get_service_bindings() == []
+    assert codr.get_config_for_engine()["persona_name"] == "codr"
+
+
+def test_codr_is_not_seeded_into_fresh_deployments():
+    """It needs a sandbox host and OPENCODE_SERVER_URL; seeded, it would be a
+    persona that errors on every message wherever neither exists."""
+    import json
+    import os
+
+    path = os.path.join(global_config.CONFIG_DIR, "default_personas.json")
+    with open(path, "r", encoding="utf-8") as fh:
+        seed = json.load(fh)
+    assert not [p for p in seed["personas"] if p.get("name") == "codr"]
+
+
 # --- DP-330: persona origin allowlist --------------------------------------
 #
 # Config-schema change, so per CLAUDE.md both states are pinned: the key ABSENT

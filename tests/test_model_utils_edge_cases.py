@@ -118,6 +118,7 @@ def test_get_model_list_no_update_missing_file():
         assert model_utils.get_model_list(update=False) == {
             "Antigravity (OAuth tier)": ["agy-flash"],
             "Claude Code (sandboxed)": ["cc-sonnet", "cc-opus", "cc-haiku"],
+            "opencode (remote agent)": ["opencode"],
             "Local": ["local"],
         }
 
@@ -138,6 +139,7 @@ def test_get_model_list_update_saves():
         "From Anthropic": ["claude-3"],
         "Antigravity (OAuth tier)": ["agy-flash"],
         "Claude Code (sandboxed)": ["cc-sonnet", "cc-opus", "cc-haiku"],
+        "opencode (remote agent)": ["opencode"],
         "Local": ["local"],
     }
     m_save.assert_called_once_with(expected)

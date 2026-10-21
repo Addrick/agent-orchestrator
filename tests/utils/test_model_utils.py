@@ -69,6 +69,7 @@ def test_get_model_list_with_update(mock_openai, mock_google, mock_anthropic, mo
         'From Anthropic': ["claude-3"],
         'Antigravity (OAuth tier)': ['agy-flash'],
         'Claude Code (sandboxed)': ['cc-sonnet', 'cc-opus', 'cc-haiku'],
+        'opencode (remote agent)': ['opencode'],
         'Local': ['local']
     }
 

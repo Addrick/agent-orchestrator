@@ -527,6 +527,18 @@ CC_ALLOWED_TOOLS = [
     t.strip() for t in os.environ.get("CC_ALLOWED_TOOLS", "").split(",") if t.strip()
 ]
 
+# opencode (DP-448) — `opencode*` models hand the turn to a remote `opencode serve`
+# over HTTP: an autonomous agent with its own tools, one persistent session and
+# workspace per persona, both living on the sandbox host. Unset URL = route refused.
+OPENCODE_SERVER_URL = os.environ.get("OPENCODE_SERVER_URL", "").rstrip("/")
+OPENCODE_SERVER_USERNAME = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
+OPENCODE_SERVER_PASSWORD = os.environ.get("OPENCODE_SERVER_PASSWORD", "")
+# Parent of the per-persona workspace dirs, as a path ON THE SANDBOX host.
+OPENCODE_WORKSPACES_ROOT = os.environ.get("OPENCODE_WORKSPACES_ROOT", "/home/agent/work").rstrip("/")
+# One turn is a full agentic run, so it gets far more than an API call.
+OPENCODE_CALL_TIMEOUT_SECONDS = float(os.environ.get("OPENCODE_CALL_TIMEOUT_SECONDS", "1800"))
+RATE_LIMIT_OPENCODE_RPM = int(os.environ.get("RATE_LIMIT_OPENCODE_RPM", "15"))
+
 # --- DP-240: MCP bridge — derpr tools for dispatched subagents ----------------
 # A derpr-hosted MCP server (src/tools/mcp_bridge.py) mounted on the kobold
 # engine adapter, letting a *capable* dispatched subagent call ToolManager tools.

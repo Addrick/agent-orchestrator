@@ -7,7 +7,7 @@ replaces the `_get_provider_route` string-prefix waterfall.
 raises for an unknown model — byte-identical to the old waterfall, including
 the `cc-*`-before-`claude` precedence.
 
-All six providers are now fully-extracted `Provider` objects (DP-244 244a–g):
+All seven providers are now fully-extracted `Provider` objects (DP-244 244a–g):
 each owns its logic in `providers/<name>.py` (agy/cc share `providers/_subprocess.py`).
 """
 
@@ -22,6 +22,7 @@ from .providers.google import GoogleProvider
 from .providers.local import LocalProvider
 from .providers.agy import AgyProvider
 from .providers.cc import CcProvider
+from .providers.opencode import OpencodeProvider
 
 if TYPE_CHECKING:
     from src.engine.driver import TextEngine
@@ -47,6 +48,9 @@ def build_registry(engine: "TextEngine") -> ProviderRegistry:
     """Construct the ordered provider list. Order preserves the old
     `_get_provider_route` waterfall — notably `cc-*` before `claude`."""
     providers: List[Provider] = [
+        # opencode-<provider>/<model> may name a claude model; it, like cc-*,
+        # must precede the `"claude" in model_name` match below.
+        OpencodeProvider(engine),
         # cc-* must precede the `"claude" in model_name` match below.
         CcProvider(engine),
         OpenAIProvider(engine),
