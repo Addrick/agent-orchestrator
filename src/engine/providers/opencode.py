@@ -54,16 +54,16 @@ _RESUME_GRACE_SECONDS = 15.0
 
 # Headless: nobody can answer opencode's own "ask" prompts, and an unanswered
 # one stalls the turn until the timeout. Resolve each one opencode ships as
-# "ask" (1.19.3 build agent). The sandbox host is the boundary and the point
-# is to see what the agent does unhindered, so reads outside the workspace,
-# reads of .env files and doom_loop (the same tool call repeated with identical
-# args) are allowed. `question` is denied: it would wait for an answer that
-# cannot come, so the agent asks in its reply instead.
+# "ask" (1.19.3 build agent). The sandbox host is the boundary, so reads
+# outside the workspace and of .env files are allowed. `question` is denied:
+# it would wait for an answer that cannot come, so the agent asks in its reply
+# instead. doom_loop (the same tool call repeated verbatim) is denied: there is
+# no legitimate reason for it, and a long-running agent must not spin on it.
 SESSION_PERMISSIONS: List[Dict[str, str]] = [
     {"permission": "external_directory", "pattern": "*", "action": "allow"},
     {"permission": "read", "pattern": "*", "action": "allow"},
     {"permission": "question", "pattern": "*", "action": "deny"},
-    {"permission": "doom_loop", "pattern": "*", "action": "allow"},
+    {"permission": "doom_loop", "pattern": "*", "action": "deny"},
 ]
 
 

@@ -621,10 +621,10 @@ Model names: `opencode` uses the server's default model; `opencode-<provider>/<m
 
 Because no one can answer opencode's own permission prompts mid-run, each
 session is created with them resolved: reading outside the workspace and
-reading `.env` files are allowed, opencode's repeated-tool-call guard
-(`doom_loop`) is allowed (the sandbox is there to let the agent run
-unhindered), and the `question` tool is denied (the agent asks in its reply
-instead). A call that runs past the timeout is
+reading `.env` files are allowed, the `question` tool is denied (the agent
+asks in its reply instead), and opencode's repeated-tool-call guard
+(`doom_loop`, the same call with identical arguments several times in a row) is
+denied, so a stuck agent is refused rather than left to spin. A call that runs past the timeout is
 aborted on the server, and the persona replies with an error. When DERPR
 retries a failed attempt, it picks up the turn already sent rather than sending
 the message a second time. Regenerating a reply is a new turn: the agent sees
