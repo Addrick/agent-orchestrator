@@ -207,7 +207,9 @@ async def test_a_finished_turn_is_checked_recorded_and_posted_once(fake, tmp_pat
     assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["result"] == "pass"
     ((channel, recipient, body),) = router.sent
     assert (channel, recipient) == ("discord_channel", "123")
-    assert "`01-a` attempt 1/3: **PASS**" in body and "done, tests pass" in body
+    assert "`01-a` attempt 1/3: **PASS**" in body
+    assert "done, tests pass" not in body      # the final reply is not posted; notify_adam is codr's voice
+    assert "done, tests pass" in json.loads(row["outcome_payload"])["reply"]   # kept in the attempt record
 
     await agent.deploy()                                       # passed: no new attempt, no repost
     assert len(_auto_messages(fake, sid)) == 1 and len(router.sent) == 1

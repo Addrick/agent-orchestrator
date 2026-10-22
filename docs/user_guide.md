@@ -689,27 +689,29 @@ out of attempts. codr gets the task text, its own folder `tasks/<task>/` in the
 workspace, and the instruction to keep an attempts log at
 `tasks/<task>/attempts.md`. When the turn ends, DERPR runs the check:
 
-- **pass**: the task is done, and a one-line result is posted to codr's channel;
+- **pass**: the task is done, and a one-line result (task, attempt, PASS/FAIL, run time)
+  is posted to codr's channel;
 - **fail**: if attempts remain, the next tick starts a new attempt with the check's
   output (its last 2,500 characters); if not, the task is marked failed and the
   result is posted.
 
 Every attempt is recorded in the agent action log (task, attempt, outcome, run
-time). Results stay there, so a restart or deploy resumes the queue where it was.
+time, and codr's final reply). Results stay there, so a restart or deploy resumes the queue where it was.
 To rerun a task, rename its folder: a new name is a new task.
 
 **codr can message you.** codr has a `notify_adam` tool in every turn. While the
 agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
 one tick. It is meant for progress worth knowing and for problems you can help
-with. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
+with, and the task prompt tells codr to use it to report when it finishes a task:
+its final reply is not posted. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
 dropped and logged, and the next task result says how many were dropped.
 
 **Talking to codr while it works.** A message to codr while one of its own tasks is
 running does not wait for the task to finish. It goes straight into the running
 turn, and codr reads it at its next step. DERPR marks your message with a ✅ reaction
 at once (delivered), instead of posting a reply.
-codr's answer comes in the result it posts when the turn ends, which can be up to
-`max_turn_seconds` later, unless codr chooses to answer sooner with `notify_adam`.
+codr answers with `notify_adam`, mid-task or in its report at the end, which can be
+up to `max_turn_seconds` later.
 Messages codr sends with `notify_adam` are saved as its replies in your most recent
 conversation with it, so they are part of the chat history like any other answer.
 When codr is idle, a message is an ordinary chat turn, as before.

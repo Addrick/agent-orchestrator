@@ -415,10 +415,12 @@ class CodrAgent(Agent):
             "",
             f"Work in `tasks/{task.id}/` in your workspace. Keep an attempts log at "
             f"`tasks/{task.id}/attempts.md`: what you tried and what happened. Read it first if it exists.",
-            "When you are done, end your turn with a short summary. DERPR then runs its own check on "
-            f"`tasks/{task.id}/`; you will see its output if it fails.",
-            f"`{NOTIFY_TOOL}` tells Adam something now without ending your turn. For an independent "
-            "subtask you can use the `pool` subagent (task tool, background if you want to keep working).",
+            f"`{NOTIFY_TOOL}` tells Adam something now without ending your turn. Your final reply is not "
+            f"posted, so when you are done, tell Adam with `{NOTIFY_TOOL}` what you did and anything he "
+            f"should know, then end your turn. DERPR then runs its own check on `tasks/{task.id}/`; you "
+            "will see its output if it fails.",
+            "For an independent subtask you can use the `pool` subagent (task tool, background if you "
+            "want to keep working).",
         ]
         if previous:
             try:
@@ -554,7 +556,5 @@ class CodrAgent(Agent):
         if self._dropped:
             line += f" ({self._dropped} notify_adam message(s) dropped by the rate limit)"
             self._dropped = 0
-        if detail.get("reply"):
-            line += f"\n> {detail['reply'][:600]}"
         await self._post(line)
         logger.info("codr agent: task %s attempt %s -> %s", task_id, auto.get("attempt"), outcome)
