@@ -67,7 +67,7 @@ class ResponseType(Enum):
     LLM_GENERATION = auto()
     PENDING_CONFIRMATION = auto()
     # The reply is a mark on the user's message, not a message (DP-449): the
-    # text is the emoji. Persisted like a reply so history keeps the turn.
+    # text is the emoji. Not persisted; the user's message is.
     REACTION = auto()
 
 

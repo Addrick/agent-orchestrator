@@ -5,7 +5,8 @@ Each tick looks at codr's one opencode session (the same one chat uses,
 `providers/opencode`) and does at most one of:
 
   - relay: every completed `notify_adam` tool call not yet in the action log
-    is logged, then posted to the configured channel (rate-limited);
+    is logged, then posted to the configured channel (rate-limited) and
+    stored as codr's reply in its latest conversation;
   - watch: a turn this agent started is still running, so check it for loops,
     a stall or an overrun, and nudge or abort it;
   - finish: that turn has ended, so run the task's check, record the attempt
@@ -38,6 +39,7 @@ import aiohttp
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
+from src.generation_events import ResponseType
 from src.engine.providers.opencode import (
     AUTO_FIELD, OpencodeClient, auth_headers, current_turn_start, ensure_opencode_supported,
     message_meta, opencode_model, part_meta, session_title, turn_finished,
@@ -371,7 +373,29 @@ class CodrAgent(Agent):
                     self._dropped += 1
                     logger.info("codr agent: notify_adam rate limit hit; dropped: %s", text[:200])
                     continue
-                await self._post(f"codr: {text[:1500]}")
+                if await self._post(f"codr: {text[:1500]}"):
+                    self._commit_reply(text[:1500])
+
+    def _commit_reply(self, text: str) -> None:
+        """Store a relayed `notify_adam` message as codr's reply in its latest
+        conversation, so derpr's history has codr's side of the chat. The
+        conversation is the persona's most recently active channel (a relay
+        has no originating chat turn to take it from)."""
+        channels = self.memory_manager.get_distinct_channels(self.persona_name)
+        if not channels:
+            logger.info("codr agent: no conversation with %s yet; relay not stored in history", self.persona_name)
+            return
+        channel, server_id = channels[0]["channel"], channels[0].get("server_id")
+        persistence = self.chat_system.turn_persistence
+        row_id = persistence.commit_or_update_assistant(
+            persona_name=self.persona_name, user_identifier=f"agent:{self.agent_name}",
+            channel=channel, server_id=server_id, final_text=text,
+            response_type=ResponseType.LLM_GENERATION, user_interaction_id=None,
+            retry_assistant_id=None, tool_context_json=None,
+        )
+        if row_id is not None:
+            persistence.queue_retain_safe(interaction_id=row_id, persona_name=self.persona_name,
+                                          channel=channel, untrusted=False)
 
     # -- start
 

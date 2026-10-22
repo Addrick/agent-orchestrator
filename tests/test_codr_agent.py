@@ -14,6 +14,7 @@ from src.agents.codr_agent import (
     CodrAgent, detect_loop, load_tasks, parse_check, sync_script, workspace_files,
 )
 from src.engine.providers import opencode
+from src.generation_events import ResponseType
 from tests import test_opencode_provider as provider_tests
 from tests.test_opencode_provider import ROOT
 
@@ -27,6 +28,10 @@ class FakeMemory:
 
     def __init__(self):
         self.rows = []
+        self.channels = [{"channel": "codr-chat", "server_id": "9"}]
+
+    def get_distinct_channels(self, persona_name=None):
+        return self.channels
 
     def log_agent_action(self, agent_name, action_type, trigger_context=None, action_payload=None,
                          outcome=None, outcome_payload=None, parent_id=None):
@@ -45,6 +50,20 @@ class FakeMemory:
         rows = [r for r in self.rows if r["agent_name"] == agent_name
                 and (action_type is None or r["action_type"] == action_type)]
         return list(reversed(rows))[:limit]          # newest first, like the DB
+
+
+class Persistence:
+    """The TurnPersistence calls a relayed reply makes."""
+
+    def __init__(self):
+        self.committed, self.queued = [], []
+
+    def commit_or_update_assistant(self, **kw):
+        self.committed.append(kw)
+        return 100 + len(self.committed)
+
+    def queue_retain_safe(self, **kw):
+        self.queued.append(kw)
 
 
 class Router:
@@ -68,7 +87,8 @@ def _task(tmp_path, name, text="Build it.", check="exit 0", seed=None):
 
 def _agent(tmp_path, **cfg):
     persona = SimpleNamespace(get_prompt=lambda: "You are codr.", get_model_name=lambda: "opencode")
-    chat = SimpleNamespace(text_engine=None, memory_manager=FakeMemory(), personas={"codr": persona})
+    chat = SimpleNamespace(text_engine=None, memory_manager=FakeMemory(), personas={"codr": persona},
+                           turn_persistence=Persistence())
     router = Router()
     agent = CodrAgent(chat, router, {
         "tasks_dir": str(tmp_path), "_recipients": {},
@@ -286,9 +306,29 @@ async def test_notify_adam_is_relayed_once_and_rate_limited(fake, tmp_path):
     relays = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.RELAY_ACTION]
     assert [r["outcome"] for r in relays] == ["sent", "dropped"]
     assert agent._dropped == 1
+    # The posted one (only) is codr's reply in its latest conversation.
+    persistence = agent.chat_system.turn_persistence
+    (row,) = persistence.committed
+    assert (row["channel"], row["server_id"], row["final_text"]) == ("codr-chat", "9", "tests pass, starting auth")
+    assert row["response_type"] == ResponseType.LLM_GENERATION
+    assert [q["interaction_id"] for q in persistence.queued] == [101]
     # The agent's own parts are never written to: opencode sends an assistant
     # part's metadata to the model, and a foreign key there breaks the session.
     assert not [c for c in fake.calls if c[0] == "PATCH"]
+
+
+async def test_a_relay_with_no_conversation_yet_is_posted_but_not_stored(fake, tmp_path):
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    agent.memory_manager.channels = []
+    await agent.deploy()
+    sid = _session(fake)
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": {"message": "hi"}}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    await agent.deploy()
+    assert [b for _, _, b in router.sent] == ["codr: hi"]
+    assert agent.chat_system.turn_persistence.committed == []
 
 
 async def test_no_task_starts_while_a_chat_turn_runs(fake, tmp_path):

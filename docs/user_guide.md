@@ -710,6 +710,8 @@ turn, and codr reads it at its next step. DERPR marks your message with a ✅ re
 at once (delivered), instead of posting a reply.
 codr's answer comes in the result it posts when the turn ends, which can be up to
 `max_turn_seconds` later, unless codr chooses to answer sooner with `notify_adam`.
+Messages codr sends with `notify_adam` are saved as its replies in your most recent
+conversation with it, so they are part of the chat history like any other answer.
 When codr is idle, a message is an ordinary chat turn, as before.
 
 **Loop guard.** DERPR watches each turn codr starts on its own and stops it when:

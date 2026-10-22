@@ -10,7 +10,7 @@
 # Invariants every exit must satisfy:
 #   I1  get_turn_context() is None after the turn      (no ContextVar leak)
 #   I2  user turn persisted even on mid-flight error
-#   I3  assistant persisted iff final_text and LLM_GENERATION (or REACTION, DP-449)
+#   I3  assistant persisted iff final_text and LLM_GENERATION
 #   I4  _conversation_taints written with correct value
 #   I5  exactly one terminal event (DoneEvent xor ErrorEvent)
 #
@@ -59,10 +59,9 @@ def _script_engine(chat_system, scripted, *, capture=None):
 
 
 @pytest.mark.asyncio
-async def test_reaction_result_ends_the_turn_as_a_persisted_reaction(mocked_chat_system):
+async def test_reaction_result_ends_the_turn_as_a_reaction(mocked_chat_system):
     """DP-449: a provider's `reaction` result reaches the interface as
-    ResponseType.REACTION, and its row is stored (I3) so the opencode
-    provider's last-reply cutoff moves past the acked message."""
+    ResponseType.REACTION; the user's turn is stored, the ✅ is not (I3)."""
     chat_system, _ = mocked_chat_system
     _script_engine(chat_system, [({"type": "reaction", "content": "✅"}, {})])
 
@@ -70,7 +69,8 @@ async def test_reaction_result_ends_the_turn_as_a_persisted_reaction(mocked_chat
     (done,) = [e for e in events if isinstance(e, DoneEvent)]
     assert done.response_type == ResponseType.REACTION
     assert done.text == "✅"
-    assert done.assistant_id is not None
+    assert done.assistant_id is None
+    assert done.user_interaction_id is not None
 
 
 # --------------------------------------------------------------------------

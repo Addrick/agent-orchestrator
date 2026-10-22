@@ -58,9 +58,8 @@ _KEY_FIELD = "derpr_key"
 # a chat message delivered into one of those turns while it ran.
 AUTO_FIELD = "derpr_auto"
 INJECTED_FIELD = "derpr_injected"
-# Just a mark, not prose: the ack becomes the persona's reply in DERPR's
-# history, and anything worded there can be read back to a model later. It is
-# returned as a `reaction` result, so Discord puts it on the user's message.
+# Returned as a `reaction` result: Discord puts it on the user's message and no
+# reply row is stored. codr's real answer, if any, is a relayed `notify_adam`.
 INJECTED_ACK = "✅"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 _POLL_SECONDS = 2.0
