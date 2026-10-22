@@ -750,7 +750,7 @@ Settings, per instance in `agents.json` under `codr`:
 - `max_attempts` (default `3`) per task.
 - `max_turn_seconds` (default `7200`), `stall_seconds` (default `900`).
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
-- `notify_per_hour` (default `6`).
+- `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but
   starts no new tasks.
 - `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`

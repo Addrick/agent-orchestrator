@@ -65,7 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_turn_seconds": 7200,
     "stall_seconds": 900,
     "check_timeout_seconds": 600,
-    "notify_per_hour": 6,
+    "notify_per_hour": 20,
     "start_tasks": True,
     "pool_url": "http://10.0.0.70:5002/v1",
     "pool_context": 65536,
