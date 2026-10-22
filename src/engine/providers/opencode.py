@@ -184,6 +184,21 @@ def current_turn_start(messages: List[Dict[str, Any]]) -> Optional[int]:
     return None
 
 
+def turn_end(messages: List[Dict[str, Any]], start: int) -> int:
+    """End (exclusive) of the turn started at `start`: the next user message
+    that was not delivered into it, or the end of the list."""
+    return next((i for i in range(start + 1, len(messages)) if _role(messages[i]) == "user"
+                 and not message_meta(messages[i], INJECTED_FIELD)), len(messages))
+
+
+def open_auto(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The `AUTO_FIELD` state of a turn the codr agent started and has not
+    closed yet (no `result`), else None. A closed turn (passed, failed,
+    aborted, nudged) is never running, whatever its last step says."""
+    meta = message_meta(message, AUTO_FIELD)
+    return meta if isinstance(meta, dict) and not meta.get("result") else None
+
+
 def turn_finished(messages: List[Dict[str, Any]], start: int) -> bool:
     """Whether the turn started at `start` has a completed final reply: its
     newest assistant message finished on something other than a tool call.
@@ -201,7 +216,7 @@ def auto_turn_running(messages: List[Dict[str, Any]]) -> bool:
     """Whether the session's latest turn is one the codr agent started and it
     has not finished."""
     start = current_turn_start(messages)
-    return (start is not None and bool(message_meta(messages[start], AUTO_FIELD))
+    return (start is not None and open_auto(messages[start]) is not None
             and not turn_finished(messages, start))
 
 

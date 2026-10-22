@@ -28,10 +28,6 @@ class FakeMemory:
 
     def __init__(self):
         self.rows = []
-        self.channels = [{"channel": "codr-chat", "server_id": "9"}]
-
-    def get_distinct_channels(self, persona_name=None):
-        return self.channels
 
     def log_agent_action(self, agent_name, action_type, trigger_context=None, action_payload=None,
                          outcome=None, outcome_payload=None, parent_id=None):
@@ -69,10 +65,16 @@ class Persistence:
 class Router:
     def __init__(self):
         self.sent = []
+        self.ok = True
+        self.keys = {"123": ("codr-chat", "9")}     # notification recipient -> conversation
 
     async def send(self, channel, recipient, subject, body):
-        self.sent.append((channel, recipient, body))
-        return True
+        if self.ok:
+            self.sent.append((channel, recipient, body))
+        return self.ok
+
+    async def conversation_key(self, channel, recipient):
+        return self.keys.get(recipient)
 
 
 def _task(tmp_path, name, text="Build it.", check="exit 0", seed=None):
@@ -308,7 +310,7 @@ async def test_notify_adam_is_relayed_once_and_rate_limited(fake, tmp_path):
     relays = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.RELAY_ACTION]
     assert [r["outcome"] for r in relays] == ["sent", "dropped"]
     assert agent._dropped == 1
-    # The posted one (only) is codr's reply in its latest conversation.
+    # The posted one (only) is codr's reply, in the conversation it was posted to.
     persistence = agent.chat_system.turn_persistence
     (row,) = persistence.committed
     assert (row["channel"], row["server_id"], row["final_text"]) == ("codr-chat", "9", "tests pass, starting auth")
@@ -319,10 +321,10 @@ async def test_notify_adam_is_relayed_once_and_rate_limited(fake, tmp_path):
     assert not [c for c in fake.calls if c[0] == "PATCH"]
 
 
-async def test_a_relay_with_no_conversation_yet_is_posted_but_not_stored(fake, tmp_path):
+async def test_a_relay_to_a_target_with_no_conversation_is_posted_but_not_stored(fake, tmp_path):
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path)
-    agent.memory_manager.channels = []
+    router.keys = {}
     await agent.deploy()
     sid = _session(fake)
     fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
@@ -331,6 +333,91 @@ async def test_a_relay_with_no_conversation_yet_is_posted_but_not_stored(fake, t
     await agent.deploy()
     assert [b for _, _, b in router.sent] == ["codr: hi"]
     assert agent.chat_system.turn_persistence.committed == []
+
+
+async def test_a_relay_that_fails_to_post_is_marked_and_reported(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()                                       # starts 01-a
+    sid = _session(fake)
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": {"message": "done"}}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    router.ok = False
+    await agent.deploy()
+    (relay,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.RELAY_ACTION]
+    assert relay["outcome"] == "failed"
+    assert agent.chat_system.turn_persistence.committed == []
+    router.ok = True
+    _reply(fake, sid)
+    await agent.deploy()                                       # finish: the result line says so
+    assert "1 notify_adam message(s) failed to post" in router.sent[-1][2]
+
+
+async def test_a_task_turn_followed_by_a_chat_turn_is_still_finished(fake, tmp_path):
+    """A chat message sent after the task turn ended but before the next tick
+    starts a turn of its own; the task turn must still be checked and recorded."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    _reply(fake, sid, "task done")
+    fake.add(sid, "user", [{"type": "text", "text": "User: hi"}])
+    _reply(fake, sid, "hello")
+
+    await agent.deploy()
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "pass"
+    assert json.loads(row["outcome_payload"])["reply"] == "task done"   # its own reply, not the chat's
+    assert len(_auto_messages(fake, sid)) == 1                 # passed: no restart of the attempt
+
+
+async def test_a_closed_task_turn_is_not_running_even_if_its_last_step_never_completed(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    _task(tmp_path, "02-b")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()                                       # starts 01-a
+    sid = _session(fake)
+    fake.add(sid, "assistant", [{"type": "text", "text": "half"}], time={"created": 1})   # never completed
+    start = _auto_messages(fake, sid)[0]["parts"][0]
+    start["metadata"][AUTO]["result"] = "aborted"
+    msgs = fake.messages[sid]
+    assert not opencode.auto_turn_running(msgs)                # a chat message is an ordinary turn
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 2                 # the queue moves on
+
+
+async def test_the_loop_guard_holds_the_workspace_lock_until_the_nudge_is_in(fake, tmp_path, monkeypatch):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, stall_seconds=0)
+    await agent.deploy()
+    sid = _session(fake)
+    fake.busy.add(sid)
+    _tool_step(fake, sid)
+    seen = []
+    real_prompt = agent._prompt
+
+    async def prompt(*a, **k):
+        seen.append(opencode.workspace_lock(agent.directory).locked())
+        await real_prompt(*a, **k)
+    monkeypatch.setattr(agent, "_prompt", prompt)
+    await agent.deploy()                                       # notes progress
+    agent._progress = (agent._progress[0], 0.0)                # long ago
+    await agent.deploy()                                       # stalled: abort + nudge
+    assert seen == [True]
+
+
+def test_a_long_check_output_still_stores_valid_json(tmp_path):
+    agent, _ = _agent(tmp_path)
+    detail = {"reply": "→ ✓ " * 300, "check_tail": "line\n" * 1000 + "FAIL: the end"}
+    fitted = agent._fit_payload(detail)
+    stored = agent._serialize_payload(fitted)
+    assert len(stored) <= agent.MAX_PAYLOAD_CHARS
+    assert json.loads(stored)["check_tail"].endswith("FAIL: the end")   # the end says what failed
 
 
 async def test_no_task_starts_while_a_chat_turn_runs(fake, tmp_path):

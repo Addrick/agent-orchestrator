@@ -41,9 +41,9 @@ from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.generation_events import ResponseType
 from src.engine.providers.opencode import (
-    AUTO_FIELD, OpencodeClient, auth_headers, current_turn_start, ensure_opencode_supported,
-    message_meta, opencode_model, part_meta, session_title, turn_finished,
-    workspace_directory, workspace_lock,
+    AUTO_FIELD, INJECTED_FIELD, OpencodeClient, auth_headers, current_turn_start,
+    ensure_opencode_supported, message_meta, open_auto, opencode_model, part_meta, session_title,
+    turn_end, turn_finished, workspace_directory, workspace_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -263,6 +263,7 @@ class CodrAgent(Agent):
         self._dispose_pending = False
         self._sent_at: Deque[float] = deque()
         self._dropped = 0
+        self._undelivered = 0
         self._progress: Tuple[Any, float] = (None, 0.0)
 
     # -- plumbing
@@ -302,11 +303,13 @@ class CodrAgent(Agent):
             msgs = await client.turn_messages(sid)
             await self._relay(msgs)
 
-            start = current_turn_start(msgs)
-            auto = message_meta(msgs[start], AUTO_FIELD) if start is not None else None
-            if start is not None and isinstance(auto, dict) and not auto.get("result"):
-                if turn_finished(msgs, start):
-                    await self._finish(client, msgs, start, auto)
+            start = self._open_turn(msgs)
+            if start is not None:
+                auto = open_auto(msgs[start]) or {}
+                # A later turn (a chat message sent between ticks) means this one ended.
+                end = turn_end(msgs, start)
+                if end < len(msgs) or turn_finished(msgs, start):
+                    await self._finish(client, msgs[:end], start, auto)
                 else:
                     await self._watch(client, sid, msgs, start, auto)
                 return
@@ -327,8 +330,23 @@ class CodrAgent(Agent):
             raise RuntimeError(f"codr workspace setup failed: {out[-500:]}")
         self._workspace_synced = True
 
+    @staticmethod
+    def _open_turn(msgs: List[Dict[str, Any]]) -> Optional[int]:
+        """Index of the newest turn this agent started and has not closed. It
+        is not always the latest turn: a chat message sent after the task turn
+        ended but before this tick ran starts a turn of its own after it."""
+        for i in range(len(msgs) - 1, -1, -1):
+            m = msgs[i]
+            if _role(m) == "user" and not message_meta(m, INJECTED_FIELD) and open_auto(m) is not None:
+                return i
+        return None
+
     async def _dispose(self, client: OpencodeClient) -> None:
-        await client.request("POST", "/instance/dispose")
+        lock = workspace_lock(self.directory)
+        if lock.locked():
+            return                  # a chat turn is starting; next tick
+        async with lock:
+            await client.request("POST", "/instance/dispose")
         self._dispose_pending = False
         logger.info("codr agent: workspace config changed; opencode instance reloaded.")
 
@@ -367,25 +385,30 @@ class CodrAgent(Agent):
                 text = str((state.get("input") or {}).get("message") or "").strip()
                 allowed = self._rate_ok()
                 # Record first: a crash after the post must not post it twice.
-                self._log_task_root(RELAY_ACTION, trigger_context=key, action_payload={"message": text[:1500]},
-                                    outcome="sent" if allowed else "dropped")
+                row = self._log_task_root(RELAY_ACTION, trigger_context=key,
+                                          action_payload={"message": text[:1500]},
+                                          outcome="sent" if allowed else "dropped")
                 if not allowed:
                     self._dropped += 1
                     logger.info("codr agent: notify_adam rate limit hit; dropped: %s", text[:200])
                     continue
                 if await self._post(f"codr: {text[:1500]}"):
-                    self._commit_reply(text[:1500])
+                    await self._commit_reply(text[:1500])
+                else:
+                    self.memory_manager.update_agent_action_outcome(row, "failed")
+                    self._undelivered += 1
 
-    def _commit_reply(self, text: str) -> None:
-        """Store a relayed `notify_adam` message as codr's reply in its latest
-        conversation, so derpr's history has codr's side of the chat. The
-        conversation is the persona's most recently active channel (a relay
-        has no originating chat turn to take it from)."""
-        channels = self.memory_manager.get_distinct_channels(self.persona_name)
-        if not channels:
-            logger.info("codr agent: no conversation with %s yet; relay not stored in history", self.persona_name)
+    async def _commit_reply(self, text: str) -> None:
+        """Store a relayed `notify_adam` message as codr's reply in the
+        conversation it was posted to, so derpr's history has codr's side of
+        the chat."""
+        target = self.cfg.get("notification_target") or {}
+        key = await self.notification_router.conversation_key(
+            target.get("channel", "discord_channel"), str(target.get("recipient")))
+        if key is None:
+            logger.info("codr agent: no conversation for the notification target; relay not stored in history")
             return
-        channel, server_id = channels[0]["channel"], channels[0].get("server_id")
+        channel, server_id = key
         persistence = self.chat_system.turn_persistence
         row_id = persistence.commit_or_update_assistant(
             persona_name=self.persona_name, user_identifier=f"agent:{self.agent_name}",
@@ -447,7 +470,7 @@ class CodrAgent(Agent):
             msgs = await client.turn_messages(sid)
             start = current_turn_start(msgs)
             if await client.is_busy(sid) or (start is not None and not turn_finished(msgs, start)
-                                             and message_meta(msgs[start], AUTO_FIELD)):
+                                             and open_auto(msgs[start]) is not None):
                 return
             await client.run_shell(seed_script(task))
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
@@ -465,6 +488,22 @@ class CodrAgent(Agent):
             body["model"] = model
         await client.prompt_async(sid, body)
         self._progress = (None, time.monotonic())
+        await self._wait_posted(client, sid, meta)
+
+    async def _wait_posted(self, client: OpencodeClient, sid: str, meta: Dict[str, Any],
+                           limit: float = 15.0) -> None:
+        """Hold the caller's workspace lock until the prompt is in the session.
+        `prompt_async` returns before the message is written, and a chat call
+        that looks in that gap sees no running task and posts a blocking turn
+        that folds into this one."""
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            msgs = await client.turn_messages(sid)
+            start = current_turn_start(msgs)
+            if start is not None and message_meta(msgs[start], AUTO_FIELD) == meta:
+                return
+            await asyncio.sleep(0.5)
+        logger.warning("codr agent: prompt not visible in the session after %.0f s", limit)
 
     # -- watch
 
@@ -489,6 +528,14 @@ class CodrAgent(Agent):
         reason, nudgeable = self._stuck_reason(msgs[start + 1:], auto)
         if not reason:
             return
+        # Held from the abort to the nudge being in the session: with the turn
+        # stopped, a chat message would otherwise start a turn in between and
+        # the nudge would land inside it.
+        async with workspace_lock(self.directory):
+            await self._stop(client, sid, msgs, start, auto, reason, nudgeable)
+
+    async def _stop(self, client: OpencodeClient, sid: str, msgs: List[Dict[str, Any]], start: int,
+                    auto: Dict[str, Any], reason: str, nudgeable: bool) -> None:
         await client.abort(sid)
         await self._wait_idle(client, sid)
         start_part = self._auto_part(msgs[start])
@@ -518,7 +565,7 @@ class CodrAgent(Agent):
     async def _finish(self, client: OpencodeClient, msgs: List[Dict[str, Any]],
                       start: int, auto: Dict[str, Any]) -> None:
         task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
-        final = next(m for m in reversed(msgs) if _role(m) == "assistant")
+        final = next((m for m in reversed(msgs[start + 1:]) if _role(m) == "assistant"), {})
         reply = "\n".join(p.get("text", "") for p in final.get("parts", [])
                           if p.get("type") == "text" and not p.get("synthetic")).strip()
         error = ((final.get("info") or {}).get("error") or {})
@@ -538,6 +585,23 @@ class CodrAgent(Agent):
         await client.patch_part(self._auto_part(msgs[start]), **{AUTO_FIELD: {**auto, "result": outcome}})
         await self._record(auto, outcome, detail, task)
 
+    def _fit_payload(self, detail: Dict[str, Any]) -> Dict[str, Any]:
+        """Shrink `detail` until its stored (escaped) form fits the action
+        log's cap. Cut as stored, the JSON would not parse and the next
+        attempt's prompt would lose the reason and the check output. The reply
+        goes first (the next prompt does not use it), then the start of the
+        check output (its end says what failed)."""
+        detail = dict(detail)
+        for field, keep_end in (("reply", False), ("check_tail", True)):
+            while detail.get(field):
+                over = len(json.dumps(detail, default=str, ensure_ascii=True)) - self.MAX_PAYLOAD_CHARS
+                if over <= 0:
+                    return detail
+                value = detail[field]
+                cut = max(over, 50)
+                detail[field] = value[cut:] if keep_end else value[:-cut]
+        return detail
+
     async def _record(self, auto: Dict[str, Any], outcome: str, detail: Dict[str, Any],
                       task: Optional[CodrTask]) -> None:
         task_id = str(auto.get("task"))
@@ -547,7 +611,7 @@ class CodrAgent(Agent):
             ATTEMPT_ACTION, trigger_context=f"task:{task_id}",
             action_payload={"task": task_id, "attempt": auto.get("attempt")},
             contexts=[("task", task_id)])
-        self._finalize_action(action_id, outcome, detail)
+        self._finalize_action(action_id, outcome, self._fit_payload(detail))
         total = task.max_attempts if task else "?"
         line = (f"codr task `{task_id}` attempt {auto.get('attempt')}/{total}: **{outcome.upper()}** "
                 f"({seconds // 60} min)")
@@ -556,5 +620,8 @@ class CodrAgent(Agent):
         if self._dropped:
             line += f" ({self._dropped} notify_adam message(s) dropped by the rate limit)"
             self._dropped = 0
+        if self._undelivered:
+            line += f" ({self._undelivered} notify_adam message(s) failed to post)"
+            self._undelivered = 0
         await self._post(line)
         logger.info("codr agent: task %s attempt %s -> %s", task_id, auto.get("attempt"), outcome)

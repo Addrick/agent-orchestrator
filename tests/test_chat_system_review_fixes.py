@@ -134,6 +134,20 @@ def test_reaction_turn_stores_no_reply_row(chat_system_with_mocks):
     mm.log_message.assert_not_called()
 
 
+def test_a_regenerate_answered_with_a_reaction_keeps_the_archived_reply(chat_system_with_mocks):
+    """DP-449 review: regenerating codr's reply while a task runs is answered
+    with the ✅ reaction; that must not overwrite the reply it regenerated."""
+    system, mm, _, _, _ = chat_system_with_mocks
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="✅", response_type=ResponseType.REACTION,
+        user_interaction_id=None, retry_assistant_id=42, tool_context_json=None,
+    )
+    assert rid is None
+    mm.update_interaction_content.assert_not_called()
+
+
 # --- #9: overwriting an unresolved parked write must be audited -------------
 
 @pytest.mark.asyncio

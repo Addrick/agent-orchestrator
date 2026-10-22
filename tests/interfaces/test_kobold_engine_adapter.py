@@ -504,6 +504,22 @@ def test_chat_completions_stream_emits_dev_command_text():
     mm.close()
 
 
+def test_chat_completions_stream_emits_a_reaction_ack_as_text():
+    """DP-449: codr's delivered-into-task ack streams no tokens and stores no
+    reply, so the portal gets it as this turn's text, like a dev command."""
+    events = [{"type": "api_payload", "payload": {}}, {"type": "reaction"},
+              {"type": "done", "full_text": "✅"}]
+    adapter, mm, _, _ = _make_real_adapter(stream_messages=_make_stream_messages([events]))
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=_chat_body("how is it going?", stream=True)) as r:
+            text = b"".join(chunk for chunk in r.iter_raw()).decode("utf-8")
+    chunk_match = re.search(r"data: (\{.*?\"delta\".*?\})\n\n", text)
+    assert chunk_match is not None, f"missing content delta in:\n{text}"
+    assert json.loads(chunk_match.group(1))["choices"][0]["delta"]["content"] == "✅"
+    assert '"response_type": "REACTION"' in text
+    mm.close()
+
+
 def _confirm_stream_messages():
     """Stateful stub: turn 1 proposes a write (parks), turn 2 (the resume
     continuation) answers with text."""

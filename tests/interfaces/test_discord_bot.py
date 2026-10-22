@@ -112,6 +112,23 @@ async def test_reaction_reply_marks_the_message_instead_of_posting(mock_reset, m
 
 
 @pytest.mark.asyncio
+async def test_conversation_key_matches_what_on_message_files_under(mock_discord_client):
+    """DP-449: a relayed codr message is stored where on_message would file a
+    chat in that channel: guild channel name + guild id, "DM", or nothing."""
+    guild_channel = MagicMock(spec=discord.TextChannel)
+    guild_channel.name = "codr"
+    guild_channel.guild = MagicMock(id=9)
+    dm = MagicMock(spec=discord.DMChannel)
+    thread = MagicMock(spec=discord.Thread)
+    lookup = {1: guild_channel, 2: dm, 3: thread}
+    with patch.object(mock_discord_client, "wait_until_ready", AsyncMock()), \
+            patch.object(mock_discord_client, "get_channel", side_effect=lookup.get):
+        assert await mock_discord_client.conversation_key(1) == ("codr", "9")
+        assert await mock_discord_client.conversation_key(2) == ("DM", None)
+        assert await mock_discord_client.conversation_key(3) is None
+
+
+@pytest.mark.asyncio
 @patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
 async def test_dev_command_flow(mock_reset, mock_send_dev, mock_discord_client, mock_chat_system, mock_message):

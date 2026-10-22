@@ -86,6 +86,21 @@ class CustomDiscordBot(discord.Client):
             logger.error(f"Failed to send message to channel {channel_id}: {e}")
             return False
 
+    async def conversation_key(self, channel_id: int) -> Optional[Tuple[str, Optional[str]]]:
+        """The (channel, server_id) `on_message` files a message in this
+        channel under: the guild channel's name and guild id, or "DM"."""
+        try:
+            await self.wait_until_ready()
+            channel = self.get_channel(channel_id) or await self.fetch_channel(channel_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to look up channel {channel_id}: {e}")
+            return None
+        if isinstance(channel, discord.abc.GuildChannel):
+            return channel.name, str(channel.guild.id)
+        if isinstance(channel, discord.DMChannel):
+            return "DM", None
+        return None                 # a thread: on_message does not hold conversations there
+
     async def create_agent_thread(self, parent_channel_id: int, name: str) -> Optional[int]:
         """Create a standalone public thread under ``parent_channel_id`` (DP-230).
 

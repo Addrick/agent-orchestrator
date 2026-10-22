@@ -2066,7 +2066,10 @@ class KoboldEngineAdapter:
             # emit no TokenEvents (no LLM call), so unlike LLM turns the text was
             # never streamed. Transcode it as a content delta here or the portal
             # shows a blank reply even though the command ran + persisted.
-            if ev.response_type == ResponseType.DEV_COMMAND and ev.text:
+            # A REACTION (DP-449, codr's delivered-into-task ack) is not
+            # persisted either, so the portal shows the emoji as this turn's
+            # reply the same way; a reload drops it, as nothing stores it.
+            if ev.response_type in (ResponseType.DEV_COMMAND, ResponseType.REACTION) and ev.text:
                 frames.append(("DevCommandText", delta_frame("content", ev.text)))
             # DP-130 history contract (C3): emit the `event: derpr` id-frame on
             # EVERY terminal turn — including parked writes (assistant_id=None),

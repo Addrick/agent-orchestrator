@@ -679,7 +679,9 @@ going while it waits for your answer. The agent is off by default
 - `check.sh`: how DERPR decides pass or fail. It is a shell script run in codr's
   workspace folder for that task; exit code 0 means pass. **codr never sees the
   check**: DERPR keeps it and only runs it after codr says it is done, so codr can't
-  edit it to pass.
+  edit it to pass. The folder is codr's to write, so a check's own Python should run
+  as `python3 -I` and refuse files that shadow standard-library modules (the shipped
+  checks do both). Otherwise a planted `hashlib.py` or `unittest.py` could fake a pass.
 - `seed/` (optional): starting files, e.g. a small repo with a bug in it. Before
   each attempt DERPR copies any of them that are missing into the task folder, so
   what codr changed stays.
@@ -712,8 +714,9 @@ turn, and codr reads it at its next step. DERPR marks your message with a ✅ re
 at once (delivered), instead of posting a reply.
 codr answers with `notify_adam`, mid-task or in its report at the end, which can be
 up to `max_turn_seconds` later.
-Messages codr sends with `notify_adam` are saved as its replies in your most recent
-conversation with it, so they are part of the chat history like any other answer.
+Messages codr sends with `notify_adam` are saved as its replies in the conversation of
+the channel they are posted to, so they are part of that chat's history like any other
+answer. In the portal, the ✅ shows as the reply to your message until you reload.
 When codr is idle, a message is an ordinary chat turn, as before.
 
 **Loop guard.** DERPR watches each turn codr starts on its own and stops it when:

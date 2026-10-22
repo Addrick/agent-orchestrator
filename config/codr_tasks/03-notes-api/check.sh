@@ -1,7 +1,16 @@
 set -u
 [ -f app.py ] || { echo "FAIL: app.py missing"; exit 1; }
-python3 - <<'PY'
+python3 -I - <<'PY'
 import json, os, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
+
+# Hidden-check hardening (DP-449 review): `-I` keeps the task folder off this
+# interpreter's path, and nothing at its top level may shadow the standard
+# library for the child Pythons the check runs from it (`-m unittest` puts the
+# working directory first on their path).
+_shadows = sorted(n for n in os.listdir(".") if n.removesuffix(".py") in sys.stdlib_module_names)
+if _shadows:
+    print(f"FAIL: these names shadow Python's standard library: {', '.join(_shadows)}")
+    sys.exit(1)
 
 failures = []
 
