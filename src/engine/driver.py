@@ -212,7 +212,7 @@ class TextEngine:
         # was retried inside the driver. This check is the final guard for
         # the historical contract that generate_response never returns an
         # empty/invalid result.
-        if result.get('type') == 'text' and result.get('content', '').strip():
+        if result.get('type') in ('text', 'reaction') and result.get('content', '').strip():
             return result, api_payload
         if result.get('type') == 'tool_calls' and result.get('calls'):
             return result, api_payload
@@ -474,6 +474,12 @@ class TextEngine:
             # in the turn's history for the next iteration to read, not streamed
             # to the user as if it were the answer.
             yield {"type": "done", "full_text": result.get("content", "") or ""}
+        elif result.get("type") == "reaction":
+            # DP-449: the reply is an emoji to put on the user's message. It
+            # rides `done` so the attempt counts as answered; no text_delta,
+            # because nothing is streamed as a message.
+            yield {"type": "reaction"}
+            yield {"type": "done", "full_text": result.get("content", "") or ""}
         else:
             text = result.get("content", "") or ""
             if text:
@@ -730,6 +736,7 @@ class TextEngine:
         text_parts: List[str] = []
         full_text: Optional[str] = None
         calls: Optional[List[Dict[str, Any]]] = None
+        reaction = False
         async for ev in stream:
             etype = ev.get("type")
             if etype == "api_payload":
@@ -740,6 +747,8 @@ class TextEngine:
                 calls = list(ev.get("calls", []))
             elif etype == "done":
                 full_text = ev.get("full_text")
+            elif etype == "reaction":
+                reaction = True
         if calls is not None:
             # A tool_calls event — even with an empty list (e.g. every call
             # failed to parse) — means the model chose the tool path; mirror
@@ -767,4 +776,4 @@ class TextEngine:
                 }, api_payload
             return {"type": "tool_calls", "calls": calls}, api_payload
         text = full_text if full_text is not None else "".join(text_parts)
-        return {"type": "text", "content": text}, api_payload
+        return {"type": "reaction" if reaction else "text", "content": text}, api_payload

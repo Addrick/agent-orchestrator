@@ -246,7 +246,10 @@ class TurnPersistence:
                 logger.error(f"Retry update_interaction_content failed: {e}")
                 return None
 
-        if response_type != ResponseType.LLM_GENERATION:
+        # A REACTION is stored like a reply (DP-449): the opencode provider
+        # forwards only what follows the persona's last reply, so dropping the
+        # row would send the acknowledged message again on the next turn.
+        if response_type not in (ResponseType.LLM_GENERATION, ResponseType.REACTION):
             # DP-296: a turn that gated writes still has to leave a trace of the
             # actions it took and proposed, or an operator who never answers
             # makes the whole turn invisible to the model — it then re-proposes

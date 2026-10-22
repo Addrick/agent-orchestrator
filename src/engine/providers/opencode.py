@@ -24,8 +24,8 @@ DP-449: the `codr` agent (`src/agents/codr_agent.py`) also starts turns in the
 same session, fire-and-forget (`prompt_async`), and marks them with
 `AUTO_FIELD` in the user part's metadata. While such a turn runs, a chat
 message is delivered into it (opencode picks a new user message up at the
-running turn's next step) and answered with `INJECTED_ACK` at once, instead of
-waiting for the task to finish. The workspace lock is shared with the agent so
+running turn's next step) and answered at once with `INJECTED_ACK` as a
+reaction on the user's message, instead of waiting for the task to finish. The workspace lock is shared with the agent so
 the two never start a turn at the same moment.
 """
 
@@ -59,7 +59,8 @@ _KEY_FIELD = "derpr_key"
 AUTO_FIELD = "derpr_auto"
 INJECTED_FIELD = "derpr_injected"
 # Just a mark, not prose: the ack becomes the persona's reply in DERPR's
-# history, and anything worded there can be read back to a model later.
+# history, and anything worded there can be read back to a model later. It is
+# returned as a `reaction` result, so Discord puts it on the user's message.
 INJECTED_ACK = "✅"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 _POLL_SECONDS = 2.0
@@ -488,7 +489,7 @@ class OpencodeProvider(Provider):
 
                 if await deliver_into_auto_turn(client, session_id, key, prompt):
                     api_payload["delivered_into_task"] = True
-                    return {"type": "text", "content": INJECTED_ACK}, api_payload
+                    return {"type": "reaction", "content": INJECTED_ACK}, api_payload
 
                 body: Dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt, "metadata": {_KEY_FIELD: key}}],

@@ -66,6 +66,9 @@ class ResponseType(Enum):
     DEV_COMMAND = auto()
     LLM_GENERATION = auto()
     PENDING_CONFIRMATION = auto()
+    # The reply is a mark on the user's message, not a message (DP-449): the
+    # text is the emoji. Persisted like a reply so history keeps the turn.
+    REACTION = auto()
 
 
 @dataclass

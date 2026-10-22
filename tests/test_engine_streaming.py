@@ -258,6 +258,17 @@ async def test_collect_stream_prefers_done_full_text_over_concat():
 
 
 @pytest.mark.asyncio
+async def test_one_shot_reaction_round_trips_through_the_event_shape():
+    """DP-449: a provider's `reaction` result survives one-shot → events →
+    collect_stream, and is never streamed as a text delta."""
+    events = [e async for e in TextEngine._events_from_one_shot(
+        {"type": "reaction", "content": "✅"}, {"x": 1})]
+    assert not any(e["type"] == "text_delta" for e in events)
+    result, _ = await TextEngine.collect_stream(_aiter(events))
+    assert result == {"type": "reaction", "content": "✅"}
+
+
+@pytest.mark.asyncio
 async def test_collect_stream_tool_calls_take_priority_over_text():
     events = [
         {"type": "api_payload", "payload": {}},

@@ -339,7 +339,8 @@ async def test_a_message_during_a_codr_task_is_delivered_into_it(fake):
     fake.busy.add(sid)
 
     result, payload = await _generate(provider, _history(("user", "how is it going?")), request_id="b")
-    assert result["content"] == opencode.INJECTED_ACK and payload["delivered_into_task"]
+    assert result == {"type": "reaction", "content": opencode.INJECTED_ACK}
+    assert payload["delivered_into_task"]
     assert len(fake.posts()) == 1                              # no blocking turn posted
     delivered = fake.messages[sid][-1]["parts"][0]
     assert delivered["text"] == "User: how is it going?"

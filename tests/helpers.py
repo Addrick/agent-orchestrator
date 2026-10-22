@@ -118,6 +118,9 @@ def engine_stream_events(result: Dict[str, Any],
     if result.get("type") == "tool_calls":
         events.append({"type": "tool_calls", "calls": list(result.get("calls", []))})
         events.append({"type": "done", "full_text": ""})
+    elif result.get("type") == "reaction":
+        events.append({"type": "reaction"})
+        events.append({"type": "done", "full_text": result.get("content", "") or ""})
     else:
         text = result.get("content", "") or ""
         if text:

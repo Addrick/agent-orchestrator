@@ -899,6 +899,7 @@ class ToolLoop:
             tool_calls_collected: Optional[List[Dict[str, Any]]] = None
             accumulated_parts: List[str] = []
             accumulated_reasoning: List[str] = []
+            reaction = False
 
             messages_for_llm: List[Dict[str, Any]] = build_wire_messages(
                 persona, conversation_history,
@@ -941,6 +942,8 @@ class ToolLoop:
                             _normalize_call_identity(c)
                     elif etype == "done":
                         full_text_from_done = ev.get("full_text")
+                    elif etype == "reaction":
+                        reaction = True
             except LLMCommunicationError as e:
                 payload_to_store = e.api_payload or api_payload
                 if payload_to_store:
@@ -990,7 +993,8 @@ class ToolLoop:
                 _log_turn_call_tally(call_tally, iterations_used, calls_used)
                 yield _LoopFinishedEvent(
                     final_text=final_text,
-                    response_type=ResponseType.LLM_GENERATION,
+                    response_type=(ResponseType.REACTION if reaction
+                                   else ResponseType.LLM_GENERATION),
                     tool_context_json=tool_context_json,
                     turn_tainted=turn_tainted,
                 )

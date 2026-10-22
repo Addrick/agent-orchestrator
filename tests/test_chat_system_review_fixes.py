@@ -120,6 +120,22 @@ def test_retry_update_persists_tool_context(chat_system_with_mocks):
     assert kwargs.get("tool_context") == '[{"role": "tool", "name": "get_ticket"}]'
 
 
+def test_reaction_turn_is_persisted_like_a_reply(chat_system_with_mocks):
+    """DP-449: the opencode provider forwards only what follows the persona's
+    last reply, so a reaction ack must leave its row or the acked message is
+    sent again on the next turn."""
+    system, mm, _, _, _ = chat_system_with_mocks
+    mm.log_message.return_value = 7
+
+    rid = system.turn_persistence.commit_or_update_assistant(
+        persona_name="test_persona", user_identifier="u", channel="c",
+        server_id=None, final_text="✅", response_type=ResponseType.REACTION,
+        user_interaction_id=None, retry_assistant_id=None, tool_context_json=None,
+    )
+    assert rid == 7
+    assert mm.log_message.call_args.kwargs["content"] == "✅"
+
+
 # --- #9: overwriting an unresolved parked write must be audited -------------
 
 @pytest.mark.asyncio

@@ -17,7 +17,7 @@ from src.personas.store import save_personas_to_file
 from src.chat_system import ChatSystem
 from src.persona import Persona
 from src.self_edit.dispatcher import DispatcherError
-from src.generation_events import format_internal_error
+from src.generation_events import ResponseType, format_internal_error
 from src.security.scrubber import get_scrubber
 
 # THE FIX: Initialize the logger at the top of the module.
@@ -702,6 +702,11 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
                     file_buffer = io.BytesIO(file_content.encode('utf-8'))
                     discord_file = discord.File(fp=file_buffer, filename=filename)
                     await message.channel.send("Here is the context dump:", file=discord_file)
+
+                elif response_type == ResponseType.REACTION and response_text:
+                    # DP-449: an acknowledgement, marked on the message the way
+                    # a mutating dev command is, not posted as a reply.
+                    await message.add_reaction(response_text.strip())
 
                 elif response_text and response_text.strip():
                     persona: Persona = chat_system.personas[active_persona_name]

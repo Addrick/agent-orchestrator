@@ -706,7 +706,8 @@ dropped and logged, and the next task result says how many were dropped.
 
 **Talking to codr while it works.** A message to codr while one of its own tasks is
 running does not wait for the task to finish. It goes straight into the running
-turn, and codr reads it at its next step. DERPR replies at once with ✅ (delivered).
+turn, and codr reads it at its next step. DERPR marks your message with a ✅ reaction
+at once (delivered), instead of posting a reply.
 codr's answer comes in the result it posts when the turn ends, which can be up to
 `max_turn_seconds` later, unless codr chooses to answer sooner with `notify_adam`.
 When codr is idle, a message is an ordinary chat turn, as before.

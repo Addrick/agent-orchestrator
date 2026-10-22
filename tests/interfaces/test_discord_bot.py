@@ -99,6 +99,19 @@ async def test_llm_flow_without_display_name(mock_reset, mock_discord_client, mo
 
 
 @pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_reaction_reply_marks_the_message_instead_of_posting(mock_reset, mock_discord_client,
+                                                                    mock_chat_system, mock_message):
+    """DP-449: a message delivered into a running codr task is acked with a
+    reaction on it, not a ✅ posted as a reply."""
+    mock_chat_system.generate_response.return_value = ("✅", ResponseType.REACTION, 46, None)
+    await mock_discord_client.on_message(mock_message)
+
+    mock_message.add_reaction.assert_called_once_with("✅")
+    mock_message.channel.send.assert_not_called()
+
+
+@pytest.mark.asyncio
 @patch('src.interfaces.discord_bot._send_dev_response', new_callable=AsyncMock)
 @patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
 async def test_dev_command_flow(mock_reset, mock_send_dev, mock_discord_client, mock_chat_system, mock_message):
