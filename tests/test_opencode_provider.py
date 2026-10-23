@@ -5,7 +5,9 @@
 # returns (captured from the live sandbox server).
 
 import asyncio
+import base64
 import itertools
+import re
 
 import pytest
 from aiohttp import web
@@ -33,7 +35,17 @@ class FakeOpencode:
         self.reply_text = "done."
         self.reply_error = None
         self.reply_delay = 0.0
+        self.scripts = []       # (directory, script) run through /shell
+        self.shell_output = ""  # what a non-mkdir script prints
         self._ids = itertools.count(1)
+
+    def add(self, sid, role, parts, **info):
+        """Store a message the way opencode returns it: ids on every part."""
+        mid = f"msg_{next(self._ids)}"
+        stored = [{"id": f"prt_{next(self._ids)}", "sessionID": sid, "messageID": mid, **p} for p in parts]
+        message = {"info": {"id": mid, "role": role, **info}, "parts": stored}
+        self.messages[sid].append(message)
+        return message
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -62,38 +74,60 @@ class FakeOpencode:
             return web.json_response(self.sessions[sid])
         if path == "/session" and request.method == "GET":
             return web.json_response([s for s in self.sessions.values() if s["directory"] == directory])
+        if path == "/instance/dispose":
+            return web.json_response(True)
         if path == "/session/status":
             return web.json_response({sid: {"type": "busy"} for sid in self.busy})
+        return await self.session_route(request.method, parts, directory, body)
+
+    async def session_route(self, method, parts, directory, body) -> web.Response:
+        """/session/{id}[/action[/…]]."""
         sid = parts[1]
-        if len(parts) == 2 and request.method == "DELETE":
+        if len(parts) == 2 and method == "DELETE":
             self.sessions.pop(sid)
             return web.json_response(True)
         action = parts[2]
         if action == "shell":
-            name = body["command"].split("'")[1]
-            self.dirs[name] = "directory"
-            return web.json_response({"info": {"role": "assistant"}, "parts": []})
+            return self.shell(directory, body["command"])
+        if action == "prompt_async":
+            self.add(sid, "user", body["parts"])
+            return web.Response(status=204)
+        if action == "message" and len(parts) == 6 and method == "PATCH":
+            part = next(p for m in self.messages[sid] for p in m["parts"] if p["id"] == parts[5])
+            part.update(body)
+            return web.json_response(part)
         if action == "abort":
             self.busy.discard(sid)
             return web.json_response(True)
-        if action == "message" and request.method == "GET":
+        if action == "message" and method == "GET":
             return web.json_response(self.messages[sid])
-        if action == "message" and request.method == "POST":
-            self.messages[sid].append({"info": {"role": "user"}, "parts": body["parts"]})
+        if action == "message" and method == "POST":
+            self.add(sid, "user", body["parts"])
             self.busy.add(sid)
             await asyncio.sleep(self.reply_delay)
             self.busy.discard(sid)
-            info = {"role": "assistant", "time": {"created": 1, "completed": 2}}
+            info = {"time": {"created": 1, "completed": 2}, "finish": "stop"}
             if self.reply_error:
                 info["error"] = self.reply_error
-            reply = {"info": info, "parts": [
+            reply = self.add(sid, "assistant", [
                 {"type": "step-start"},
                 {"type": "text", "text": self.reply_text},
                 {"type": "text", "text": "(synthetic)", "synthetic": True},
-            ]}
-            self.messages[sid].append(reply)
+            ], **info)
             return web.json_response(reply)
-        raise AssertionError(f"unexpected {request.method} {path}")
+        raise AssertionError(f"unexpected {method} /{'/'.join(parts)}")
+
+    def shell(self, directory, command) -> web.Response:
+        encoded = re.fullmatch(r"echo (\S+) \| base64 -d \| bash", command).group(1)
+        script = base64.b64decode(encoded).decode()
+        self.scripts.append((directory, script))
+        made = re.fullmatch(r"mkdir -p -- '([^']+)'", script)
+        if made:
+            self.dirs[made.group(1)] = "directory"
+        output = "" if made else (self.shell_output(script) if callable(self.shell_output)
+                                  else self.shell_output)
+        return web.json_response({"info": {"role": "assistant"}, "parts": [
+            {"type": "tool", "tool": "bash", "state": {"status": "completed", "output": output}}]})
 
     def posts(self):
         return [c for c in self.calls if c[0] == "POST" and c[1].endswith("/message")]
@@ -174,6 +208,7 @@ async def test_first_call_creates_workspace_and_session_then_reuses_both(fake):
                     request_id="req-2")
     assert len(fake.sessions) == 1
     assert len([c for c in fake.calls if c[1] == "/session/" + session["id"] + "/shell"]) == 0
+    assert fake.scripts == [(ROOT, "mkdir -p -- 'codr'")]
 
 
 async def test_existing_workspace_is_not_recreated(fake):
@@ -282,3 +317,71 @@ async def test_driver_streams_the_reply_and_keeps_request_id_across_retries(fake
         {"model_name": "opencode", "persona_name": "codr"}, _history(("user", "hi")))]
     assert events[-1] == {"type": "done", "full_text": "done."}
     assert len(seen) == 2 and seen[0] == seen[1]
+
+
+# --- a running codr task (DP-449) ---------------------------------------------
+
+
+def _auto_turn(fake, sid, *, finished=False):
+    fake.add(sid, "user", [{"type": "text", "text": "task", "metadata": {opencode.AUTO_FIELD: {"task": "t1"}}}])
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "bash", "state": {"status": "completed"}}],
+             time={"created": 1}, finish="tool-calls")
+    if finished:
+        fake.add(sid, "assistant", [{"type": "text", "text": "all done"}],
+                 time={"created": 1, "completed": 2}, finish="stop")
+
+
+async def test_a_message_during_a_codr_task_is_delivered_into_it(fake):
+    provider = OpencodeProvider(TextEngine())
+    await _generate(provider, _history(("user", "hi")), request_id="a")
+    (sid,) = fake.sessions
+    _auto_turn(fake, sid)
+    fake.busy.add(sid)
+
+    result, payload = await _generate(provider, _history(("user", "how is it going?")), request_id="b")
+    assert result == {"type": "reaction", "content": opencode.INJECTED_ACK}
+    assert payload["delivered_into_task"]
+    assert len(fake.posts()) == 1                              # no blocking turn posted
+    delivered = fake.messages[sid][-1]["parts"][0]
+    assert delivered["text"] == "User: how is it going?"
+    assert delivered["metadata"] == {"derpr_key": "b", opencode.INJECTED_FIELD: True}
+
+    # A driver retry of the same call finds it and does not deliver it twice.
+    await _generate(provider, _history(("user", "how is it going?")), request_id="b")
+    assert len(fake.messages[sid]) == 5
+
+
+async def test_a_message_after_a_codr_task_finished_is_an_ordinary_turn(fake):
+    provider = OpencodeProvider(TextEngine())
+    await _generate(provider, _history(("user", "hi")), request_id="a")
+    (sid,) = fake.sessions
+    _auto_turn(fake, sid, finished=True)
+    result, _ = await _generate(provider, _history(("user", "and now?")), request_id="b")
+    assert result["content"] == "done."
+    assert len(fake.posts()) == 2
+
+
+async def test_a_task_just_started_counts_as_running_before_the_server_says_busy(fake):
+    """prompt_async returns before the session shows as busy; a chat message in
+    that gap must not post a blocking turn behind the task."""
+    provider = OpencodeProvider(TextEngine())
+    await _generate(provider, _history(("user", "hi")), request_id="a")
+    (sid,) = fake.sessions
+    fake.add(sid, "user", [{"type": "text", "text": "task", "metadata": {opencode.AUTO_FIELD: {"task": "t1"}}}])
+    result, _ = await _generate(provider, _history(("user", "quick q")), request_id="b")
+    assert result["content"] == opencode.INJECTED_ACK
+
+
+async def test_run_shell_sends_the_script_base64_encoded(fake):
+    """opencode's /shell expands `$` before running the command, so the
+    script must not reach it as plain text."""
+    from aiohttp import ClientSession
+    fake.shell_output = "ok\n"
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        client = opencode.OpencodeClient(http, f"{ROOT}/codr")
+        out = await client.run_shell('false; echo "exit=$?"')
+    assert out == "ok\n"
+    assert fake.scripts == [(f"{ROOT}/codr", 'false; echo "exit=$?"')]
+    shell_call = next(c for c in fake.calls if c[1].endswith("/shell"))
+    assert "$" not in shell_call[3]["command"]
+    assert not fake.sessions                                   # throwaway session deleted

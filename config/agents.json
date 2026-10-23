@@ -56,6 +56,22 @@
             ],
             "description": "Daily board-level Manager's Report: snapshots the whole ticket board, gathers analyst briefs, posts a plan digest, and queues whitelist-validated action proposals for human review (DP-280 Phase 0 + DP-282 Phase 1). No direct write path."
         },
+        "codr": {
+            "persona": "codr",
+            "schedule": {"interval": 30},
+            "auto_start": false,
+            "notification_target": {"channel": "discord_channel", "recipient": "1562589289332609075"},
+            "tasks_dir": "config/codr_tasks",
+            "max_attempts": 3,
+            "max_turn_seconds": 7200,
+            "stall_seconds": 900,
+            "check_timeout_seconds": 600,
+            "notify_per_hour": 20,
+            "start_tasks": true,
+            "pool_url": "http://10.0.0.70:5002/v1",
+            "pool_context": 65536,
+            "description": "DP-449: lets the opencode persona codr work through config/codr_tasks on its own: starts each attempt, runs the hidden check, relays notify_adam calls, and stops loops (nudge once, then abort)."
+        },
         "date_tagger": {
             "persona": "date_tagger",
             "report_unmatched_formats": true,

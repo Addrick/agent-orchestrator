@@ -11,3 +11,6 @@ services/pve/derpr-model-install  text eol=lf
 services/pve/derpr-pve-wrapper    text eol=lf
 services/pve/derpr-model-tier     text eol=lf
 services/pve/*.in                 text eol=lf
+
+# DP-449: codr task files are shell/heredoc input on Linux and hashed by their checks.
+config/codr_tasks/** text eol=lf

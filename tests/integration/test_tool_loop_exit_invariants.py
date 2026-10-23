@@ -58,6 +58,21 @@ def _script_engine(chat_system, scripted, *, capture=None):
     chat_system.text_engine.generate_response.side_effect = fake_generate_response
 
 
+@pytest.mark.asyncio
+async def test_reaction_result_ends_the_turn_as_a_reaction(mocked_chat_system):
+    """DP-449: a provider's `reaction` result reaches the interface as
+    ResponseType.REACTION; the user's turn is stored, the ✅ is not (I3)."""
+    chat_system, _ = mocked_chat_system
+    _script_engine(chat_system, [({"type": "reaction", "content": "✅"}, {})])
+
+    events = await _drain(chat_system.stream_response("test_persona", "u1", "c1", "hi"))
+    (done,) = [e for e in events if isinstance(e, DoneEvent)]
+    assert done.response_type == ResponseType.REACTION
+    assert done.text == "✅"
+    assert done.assistant_id is None
+    assert done.user_interaction_id is not None
+
+
 # --------------------------------------------------------------------------
 # Finding #1 — turn-context ContextVar leak across exit paths.
 # Each test asserts I1 (get_turn_context() is None after the turn).

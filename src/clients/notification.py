@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,11 @@ class Notifier(ABC):
         """
         ...
 
+    async def conversation_key(self, recipient: str) -> Optional[Tuple[str, Optional[str]]]:
+        """The (channel, server_id) chat history files a message to
+        `recipient` under, or None when it is not a chat conversation."""
+        return None
+
 
 class DiscordNotifier(Notifier):
     """Sends a Discord DM via the bot client."""
@@ -52,6 +57,10 @@ class DiscordChannelNotifier(Notifier):
     async def send(self, recipient: str, subject: str, body: str) -> bool:
         full_content = f"**{subject}**\n{body}" if subject else body
         return bool(await self._client.send_to_channel(int(recipient), full_content))
+
+    async def conversation_key(self, recipient: str) -> Optional[Tuple[str, Optional[str]]]:
+        key: Optional[Tuple[str, Optional[str]]] = await self._client.conversation_key(int(recipient))
+        return key
 
 
 class ZammadNotifier(Notifier):
@@ -121,3 +130,10 @@ class NotificationRouter:
         if notifier is self._fallback and channel not in self._notifiers:
             logger.warning(f"No notifier registered for channel '{channel}'. Using fallback logger.")
         return await notifier.send(recipient, subject, body)
+
+    async def conversation_key(self, channel: str, recipient: str) -> Optional[Tuple[str, Optional[str]]]:
+        """Where chat history files a message sent to `recipient` on `channel`
+        (see `Notifier.conversation_key`), so a message posted on a persona's
+        behalf can be stored as its reply in that conversation."""
+        notifier = self._notifiers.get(channel)
+        return await notifier.conversation_key(recipient) if notifier else None

@@ -201,6 +201,11 @@ class TurnPersistence:
         has_output = bool((final_text and final_text.strip()) or reasoning_content)
         if not has_output and not tool_context_json:
             return None
+        if response_type == ResponseType.REACTION:
+            # A mark on the user's message, never a reply (DP-449). Checked
+            # before the retry branch: a regenerate answered with a reaction
+            # must not overwrite the archived reply with the emoji.
+            return None
 
         if retry_assistant_id is not None:
             if response_type == ResponseType.PENDING_CONFIRMATION:

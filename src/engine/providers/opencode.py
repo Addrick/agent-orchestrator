@@ -19,9 +19,18 @@ whole agentic turn, so each forwarded message carries the driver's per-call
 `request_id` in its part metadata. An attempt whose id is already the
 session's last user message resumes that turn (waits for it to finish and
 reads its reply) instead of posting again.
+
+DP-449: the `codr` agent (`src/agents/codr_agent.py`) also starts turns in the
+same session, fire-and-forget (`prompt_async`), and marks them with
+`AUTO_FIELD` in the user part's metadata. While such a turn runs, a chat
+message is delivered into it (opencode picks a new user message up at the
+running turn's next step) and answered at once with `INJECTED_ACK` as a
+reaction on the user's message, instead of waiting for the task to finish. The workspace lock is shared with the agent so
+the two never start a turn at the same moment.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -45,8 +54,17 @@ logger = logging.getLogger(__name__)
 MODEL_PREFIX = "opencode"
 SESSION_TITLE_PREFIX = "derpr:"
 _KEY_FIELD = "derpr_key"
+# User-part metadata: a turn the codr agent started (value: its task state), and
+# a chat message delivered into one of those turns while it ran.
+AUTO_FIELD = "derpr_auto"
+INJECTED_FIELD = "derpr_injected"
+# Returned as a `reaction` result: Discord puts it on the user's message and no
+# reply row is stored. codr's real answer, if any, is a relayed `notify_adam`.
+INJECTED_ACK = "✅"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 _POLL_SECONDS = 2.0
+# How far back to page when the latest turn started before the default window.
+_LONG_WINDOW = 2000
 # A resumed turn that is idle yet has no finished reply gets this long to
 # produce one before it is reported as lost (the server may not have marked
 # the session busy yet when we first look).
@@ -118,6 +136,90 @@ def raise_for_reply_error(info: Dict[str, Any]) -> None:
         raise LLMCommunicationError(f"opencode turn failed: {error.get('name', 'error')} {detail}".strip())
 
 
+_workspace_locks: Dict[str, asyncio.Lock] = {}
+
+
+def workspace_lock(directory: str) -> asyncio.Lock:
+    """One turn starts at a time per workspace, whether the chat path or the
+    codr agent starts it."""
+    return _workspace_locks.setdefault(directory, asyncio.Lock())
+
+
+def workspace_directory(persona_name: Optional[str]) -> Tuple[str, str, str]:
+    """(workspaces root, persona slug, workspace directory)."""
+    root = global_config.OPENCODE_WORKSPACES_ROOT
+    slug = workspace_slug(persona_name)
+    return root, slug, f"{root}/{slug}"
+
+
+def session_title(persona_name: Optional[str]) -> str:
+    return f"{SESSION_TITLE_PREFIX}{persona_name or workspace_slug(persona_name)}"
+
+
+def auth_headers() -> Dict[str, str]:
+    return {"Authorization": aiohttp.encode_basic_auth(
+        global_config.OPENCODE_SERVER_USERNAME, global_config.OPENCODE_SERVER_PASSWORD)}
+
+
+def part_meta(part: Dict[str, Any]) -> Dict[str, Any]:
+    meta = part.get("metadata")
+    return meta if isinstance(meta, dict) else {}
+
+
+def message_meta(message: Dict[str, Any], field: str) -> Any:
+    """`field` from the first part of `message` whose metadata carries it."""
+    for p in message.get("parts", []):
+        if field in part_meta(p):
+            return part_meta(p)[field]
+    return None
+
+
+def current_turn_start(messages: List[Dict[str, Any]]) -> Optional[int]:
+    """Index of the user message that started the session's latest turn: the
+    newest user message that was not delivered into a running turn."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if _role(m) == "user" and not message_meta(m, INJECTED_FIELD):
+            return i
+    return None
+
+
+def turn_end(messages: List[Dict[str, Any]], start: int) -> int:
+    """End (exclusive) of the turn started at `start`: the next user message
+    that was not delivered into it, or the end of the list."""
+    return next((i for i in range(start + 1, len(messages)) if _role(messages[i]) == "user"
+                 and not message_meta(messages[i], INJECTED_FIELD)), len(messages))
+
+
+def open_auto(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The `AUTO_FIELD` state of a turn the codr agent started and has not
+    closed yet (no `result`), else None. A closed turn (passed, failed,
+    aborted, nudged) is never running, whatever its last step says."""
+    meta = message_meta(message, AUTO_FIELD)
+    return meta if isinstance(meta, dict) and not meta.get("result") else None
+
+
+def turn_finished(messages: List[Dict[str, Any]], start: int) -> bool:
+    """Whether the turn started at `start` has a completed final reply: its
+    newest assistant message finished on something other than a tool call.
+    Status alone is not enough: a turn just posted with `prompt_async` is
+    briefly idle before the server marks it busy."""
+    for m in reversed(messages[start + 1:]):
+        if _role(m) != "assistant":
+            continue
+        info = m.get("info") or {}
+        return bool((info.get("time") or {}).get("completed")) and info.get("finish") != "tool-calls"
+    return False
+
+
+def auto_turn_running(messages: List[Dict[str, Any]]) -> bool:
+    """Whether the session's latest turn is one the codr agent started and it
+    has not finished."""
+    start = current_turn_start(messages)
+    return (start is not None and open_auto(messages[start]) is not None
+            and not turn_finished(messages, start))
+
+
 def _role(message: Dict[str, Any]) -> Any:
     return (message.get("info") or {}).get("role")
 
@@ -163,20 +265,48 @@ class OpencodeClient:
         except aiohttp.ClientError as e:
             raise LLMCommunicationError(f"opencode {method} {path} failed: {e}") from e
 
+    async def run_shell(self, script: str, *, directory: Optional[str] = None,
+                        timeout: Optional[aiohttp.ClientTimeout] = _REQUEST_TIMEOUT) -> str:
+        """Run a bash script on the server in `directory` (default: this
+        client's) with no LLM call, from a throwaway session so it leaves
+        nothing in any persona's history. Returns stdout+stderr.
+
+        The script travels base64-encoded: opencode puts the command inside a
+        double-quoted `eval` (1.19.3 `Shell.args`), so the outer shell would
+        expand every `$` in it before it ran."""
+        where = directory or self.directory
+        encoded = base64.b64encode(script.encode()).decode()
+        session = await self.request("POST", "/session", json_body={"title": "derpr:bootstrap"},
+                                     directory=where)
+        try:
+            reply = await self.request(
+                "POST", f"/session/{session['id']}/shell", directory=where, timeout=timeout,
+                json_body={"agent": "build", "command": f"echo {encoded} | base64 -d | bash"})
+        finally:
+            await self.request("DELETE", f"/session/{session['id']}", directory=where)
+        return "".join(
+            str((p.get("state") or {}).get("output") or "")
+            for p in (reply or {}).get("parts", []) if p.get("type") == "tool"
+        )
+
+    async def prompt_async(self, session_id: str, body: Dict[str, Any]) -> None:
+        """Start a turn, or deliver into the running one, without waiting."""
+        await self.request("POST", f"/session/{session_id}/prompt_async", json_body=body)
+
+    async def patch_part(self, part: Dict[str, Any], **metadata: Any) -> None:
+        """Merge `metadata` into a part's metadata on the server."""
+        updated = {**part, "metadata": {**part_meta(part), **metadata}}
+        await self.request("PATCH", f"/session/{part['sessionID']}/message/{part['messageID']}"
+                                    f"/part/{part['id']}", json_body=updated)
+
     async def ensure_directory(self, root: str, slug: str) -> None:
         """Create the workspace on first use. opencode creates no directory for
         a session and every tool fails in a missing one, so make it with the
-        server's shell endpoint from a throwaway session in the root (no LLM call)."""
+        server's shell endpoint from the root (no LLM call)."""
         nodes = await self.request("GET", "/file", params={"path": "."}, directory=root)
         if any(n.get("name") == slug and n.get("type") == "directory" for n in nodes or []):
             return
-        session = await self.request("POST", "/session", json_body={"title": "derpr:bootstrap"},
-                                     directory=root)
-        try:
-            await self.request("POST", f"/session/{session['id']}/shell", directory=root,
-                               json_body={"agent": "build", "command": f"mkdir -p -- '{slug}'"})
-        finally:
-            await self.request("DELETE", f"/session/{session['id']}", directory=root)
+        await self.run_shell(f"mkdir -p -- '{slug}'", directory=root)
         # The shell endpoint reports a failed command as output, not as an HTTP
         # error, so confirm the directory exists before the caller caches it.
         nodes = await self.request("GET", "/file", params={"path": "."}, directory=root)
@@ -194,9 +324,22 @@ class OpencodeClient:
         logger.info("opencode: new session %s for %s in %s", created["id"], title, self.directory)
         return str(created["id"])
 
+    async def ensure_session(self, root: str, slug: str, title: str) -> str:
+        await self.ensure_directory(root, slug)
+        return await self.find_or_create_session(title)
+
     async def messages(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         return await self.request("GET", f"/session/{session_id}/message",
                                   params={"limit": str(limit)}) or []
+
+    async def turn_messages(self, session_id: str) -> List[Dict[str, Any]]:
+        """The session's recent messages, reaching back at least to the user
+        message that started the latest turn (a long turn writes one assistant
+        message per step, so it can outgrow the usual window)."""
+        msgs = await self.messages(session_id)
+        if current_turn_start(msgs) is None and len(msgs) >= 50:
+            msgs = await self.messages(session_id, limit=_LONG_WINDOW)
+        return msgs
 
     async def is_busy(self, session_id: str) -> bool:
         status = await self.request("GET", "/session/status") or {}
@@ -216,6 +359,22 @@ class OpencodeClient:
             if time.monotonic() > deadline:
                 raise LLMCommunicationError("opencode session stayed busy with another turn.")
             await asyncio.sleep(_POLL_SECONDS)
+
+
+async def deliver_into_auto_turn(client: OpencodeClient, session_id: str, key: str, prompt: str) -> bool:
+    """If a turn the codr agent started is running, deliver `prompt` into it
+    (it is read at the turn's next step) and return True. A driver retry of a
+    call already delivered finds its key and is not sent twice."""
+    msgs = await client.turn_messages(session_id)
+    if any(_has_key(m, key) and message_meta(m, INJECTED_FIELD) for m in msgs if _role(m) == "user"):
+        return True
+    if not auto_turn_running(msgs):
+        return False
+    await client.prompt_async(session_id, {"parts": [{
+        "type": "text", "text": prompt, "metadata": {_KEY_FIELD: key, INJECTED_FIELD: True},
+    }]})
+    logger.info("opencode: delivered a message into the running codr task in %s", session_id)
+    return True
 
 
 async def resume_turn(client: OpencodeClient, session_id: str, key: str, deadline: float) -> Optional[str]:
@@ -295,9 +454,6 @@ class OpencodeProvider(Provider):
 
     def __init__(self, engine: "TextEngine") -> None:
         self._engine = engine
-        # One turn at a time per workspace: a second prompt to a busy session
-        # would queue behind it on the server and blur which reply is whose.
-        self._locks: Dict[str, asyncio.Lock] = {}
         self._ready_dirs: Set[str] = set()
 
     def matches(self, model_name: str) -> bool:
@@ -314,9 +470,7 @@ class OpencodeProvider(Provider):
         system_prompt, history = self._engine._extract_system_prompt(history_object)
         model = opencode_model(config.get("model_name", ""))
         persona_name = config.get("persona_name")
-        slug = workspace_slug(persona_name)
-        root = global_config.OPENCODE_WORKSPACES_ROOT
-        directory = f"{root}/{slug}"
+        root, slug, directory = workspace_directory(persona_name)
         forwarded = new_messages(history)
         prompt = "\n\n".join(b.text for b in render_transcript_blocks(forwarded))
         # The driver's per-call id, stable across its retries (a user's
@@ -336,17 +490,20 @@ class OpencodeProvider(Provider):
                               if "function" in t and "name" in t["function"]],
         }
 
-        auth = {"Authorization": aiohttp.encode_basic_auth(
-            global_config.OPENCODE_SERVER_USERNAME, global_config.OPENCODE_SERVER_PASSWORD)}
-        lock = self._locks.setdefault(directory, asyncio.Lock())
         try:
-            async with lock, aiohttp.ClientSession(headers=auth) as http:
+            # One turn at a time per workspace: a second prompt to a busy
+            # session would queue behind it and blur which reply is whose.
+            async with workspace_lock(directory), aiohttp.ClientSession(headers=auth_headers()) as http:
                 client = OpencodeClient(http, directory)
                 if directory not in self._ready_dirs:
                     await client.ensure_directory(root, slug)
                     self._ready_dirs.add(directory)
-                session_id = await client.find_or_create_session(f"{SESSION_TITLE_PREFIX}{persona_name or slug}")
+                session_id = await client.find_or_create_session(session_title(persona_name))
                 api_payload["session"] = session_id
+
+                if await deliver_into_auto_turn(client, session_id, key, prompt):
+                    api_payload["delivered_into_task"] = True
+                    return {"type": "reaction", "content": INJECTED_ACK}, api_payload
 
                 body: Dict[str, Any] = {
                     "parts": [{"type": "text", "text": prompt, "metadata": {_KEY_FIELD: key}}],

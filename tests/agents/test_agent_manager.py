@@ -296,3 +296,47 @@ def test_explicit_config_path_is_never_seeded(monkeypatch, tmp_path):
 
     assert not explicit.exists()
     assert mgr.config == {}
+
+
+# --- codr agent (DP-449) --------------------------------------------------------
+
+
+def test_codr_agent_built_from_the_shipped_config():
+    """The shipped `codr` block reaches the agent through DI: target, schedule
+    and every tuning key, with nothing else needed."""
+    from src.agents.codr_agent import CodrAgent
+
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock(),
+                       notification_router=MagicMock(), config_path=global_config.DEFAULT_AGENTS_FILE)
+    mgr.register("codr", CodrAgent)
+    shipped = mgr.config["agents"]["codr"]
+    assert shipped["auto_start"] is False
+    agent = mgr._build_agent_instance("codr", CodrAgent, shipped)
+    assert agent.cfg["notification_target"] == {"channel": "discord_channel", "recipient": "1562589289332609075"}
+    assert agent.cfg["pool_url"] == "http://10.0.0.70:5002/v1"
+    assert agent.persona_name == "codr" and agent.directory.endswith("/codr")
+    assert "_recipients" not in agent.cfg
+    assert {t.id for t in agent._tasks()} >= {"01-csvstats", "02-seeded-bug", "03-notes-api"}
+
+
+def test_codr_agent_with_an_empty_config_block_uses_the_defaults(tmp_path):
+    """An instance agents.json seeded before DP-449 has no `codr` block."""
+    from src.agents.codr_agent import DEFAULTS, CodrAgent
+
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock(),
+                       notification_router=MagicMock(), config_path=tmp_path / "agents.json")
+    mgr.register("codr", CodrAgent)
+    agent = mgr._build_agent_instance("codr", CodrAgent, {})
+    assert {k: agent.cfg[k] for k in DEFAULTS} == DEFAULTS
+    assert "notification_target" not in agent.cfg      # posts are logged, not sent
+
+
+def test_codr_agent_registered_at_startup():
+    from src.agents.codr_agent import CodrAgent
+    from src.main import _register_agents
+
+    for zammad in (MagicMock(), None):
+        manager = MagicMock()
+        _register_agents(manager, zammad_client=zammad)
+        registered = {c.args[0]: c.args[1] for c in manager.register.call_args_list}
+        assert registered.get("codr") is CodrAgent

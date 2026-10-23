@@ -118,7 +118,15 @@ The DP-345 family. A tool call whose real answer arrives after its turn ended.
 |---|---|---|---|---|
 | Model calls a gated write | `Parked_Writes` (`kind='approval'`) | row claim (`take`) | `stream_resolve_park` → `_stream_settle` → one continuation turn | `is_write_tool` / `is_irreversible` / `ALWAYS_CONFIRM_TOOLS`; human approve/deny |
 | Model calls `install_model`; node job detaches under `systemd-run` | `Parked_Writes` (`kind='node_job'`), token **is** the job id | row claim (`take`) | `stream_resolve_deferral` → `_stream_settle` → one continuation turn | `HF_TOOLS_ENABLED`; the inbound ping is unauthenticated (DP-355) |
+| `CodrAgent` tick finds codr idle with an open task (DP-449) | the opencode session on the sandbox: `derpr_auto` metadata on the turn's user part (task, attempt, nudges, start, `result`); outcomes in `Agent_Actions` (`task_attempt`) | `result` patched onto the user part **before** the action is logged and posted; each `notify_adam` call's part id logged as a `notify_relay` row before it is posted (never written onto the assistant part — opencode sends that metadata to the model) | the next `CodrAgent` tick (watch → finish) | `start_tasks`; `workspace_lock`; loop guard (abort / nudge once) |
 | ⚠️ fixr agent emits an event (`self_edit/integration.py:307`) | **none** — nothing durable | **none** — in-process only | `_wake_fixr` → `ChatSystem.generate_response` (a *new* turn, not a continuation) | none |
+
+**The codr row is `by design`, not a fifth deferral (DP-449).** Its shape differs on the
+columns that matter: no derpr turn is waiting (nothing to continue through `_stream_settle`),
+and the durable store already exists on the remote server, so a `Parked_Writes` row would be a
+second copy of state opencode holds. Nearest sibling by consumer: `ReminderAgent` in family B
+(the agent's own interval loop). It is also not `_wake_fixr`: that starts a derpr chat turn
+through `ChatSystem`; this one starts the remote agent's own turn and derpr only watches it.
 
 **Finding A1 — `_wake_fixr` is the implementation DP-345 did not converge.**
 `src/deferral_kinds.py:33` names it explicitly and defers it to future work
