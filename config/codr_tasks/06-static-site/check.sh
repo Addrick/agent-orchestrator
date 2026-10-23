@@ -107,7 +107,9 @@ except OSError as e:
     failures.append(f"index.html: {e}")
 
 def snapshot():
-    return {n: os.stat(os.path.join(out, n)).st_mtime_ns for n in os.listdir(out)} if os.path.isdir(out) else {}
+    """Pages only: build state kept next to them (a manifest) is codr's business."""
+    return ({n: os.stat(os.path.join(out, n)).st_mtime_ns for n in os.listdir(out) if n.endswith(".html")}
+            if os.path.isdir(out) else {})
 
 time.sleep(1.1)
 before = snapshot()

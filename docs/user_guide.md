@@ -686,6 +686,13 @@ going while it waits for your answer. The agent is off by default
   each attempt DERPR copies any of them that are missing into the task folder, so
   what codr changed stays.
 
+The shipped tasks are a test battery that gets harder as it goes: 01-03 are small
+builds and a bug fix, 04 extends codr's own task-03 app (auth and a schema
+migration), 05 has a deliberately ambiguous spec, 06 is a long build (a static site
+generator), 07 asks for a package the sandbox doesn't have, and 08 is a library
+built from a spec alone and graded by a hidden suite. 08's check shows only how many
+cases in each group passed, never which ones, so a retry can't fit the tests.
+
 When codr is idle, the agent starts the oldest task that has neither passed nor run
 out of attempts. codr gets the task text, its own folder `tasks/<task>/` in the
 workspace, and the instruction to keep an attempts log at
