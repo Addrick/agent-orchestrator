@@ -331,6 +331,47 @@ def test_codr_agent_with_an_empty_config_block_uses_the_defaults(tmp_path):
     assert "notification_target" not in agent.cfg      # posts are logged, not sent
 
 
+def _codr_manager(tmp_path, mcp=None) -> AgentManager:
+    """A manager over the shipped agents.json, with `codr.mcp` set if given."""
+    import json
+
+    from src.agents.codr_agent import CodrAgent
+
+    config = json.loads(global_config.DEFAULT_AGENTS_FILE.read_text(encoding="utf-8"))
+    if mcp is not None:
+        config["agents"]["codr"]["mcp"] = mcp
+    path = tmp_path / "agents.json"
+    path.write_text(json.dumps(config), encoding="utf-8")
+    mgr = AgentManager(chat_system=MagicMock(), memory_manager=MagicMock(),
+                       notification_router=MagicMock(), config_path=path)
+    mgr.register("codr", CodrAgent)
+    return mgr
+
+
+def test_codr_mcp_absent_writes_no_mcp_block_and_present_passes_through(tmp_path):
+    """DP-462: no `mcp` key (the shipped config, and every older instance
+    file) leaves opencode.json as before; a configured one reaches it as is."""
+    import json
+
+    from src.agents.codr_agent import CodrAgent, workspace_files
+
+    def managed(mgr):
+        agent = mgr._build_agent_instance("codr", CodrAgent, mgr.config["agents"]["codr"])
+        return json.loads(workspace_files(agent.cfg)[".opencode/opencode.json"])
+
+    assert "mcp" not in managed(_codr_manager(tmp_path))
+    mcp = {"docs": {"type": "local", "command": ["python3", "-m", "docs_mcp"], "environment": {"X": "1"}},
+           "derpr": {"type": "remote", "url": "http://10.0.0.70:9000/mcp", "enabled": False}}
+    assert managed(_codr_manager(tmp_path, mcp))["mcp"] == mcp
+
+
+async def test_a_malformed_codr_mcp_stops_the_agent_from_starting(tmp_path):
+    mgr = _codr_manager(tmp_path, {"docs": {"type": "local", "command": "docs-mcp"}})
+    with pytest.raises(ValueError, match="mcp.docs"):
+        await mgr.start_agent("codr")
+    assert "codr" not in mgr._running
+
+
 def test_codr_agent_registered_at_startup():
     from src.agents.codr_agent import CodrAgent
     from src.main import _register_agents

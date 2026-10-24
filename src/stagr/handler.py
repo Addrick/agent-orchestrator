@@ -9,10 +9,15 @@ What crosses a boundary is gated (``is_write``) instead:
 - `request_web_access` adds a domain to the allowlist for a while, through the
   node verb `derpr-egress` over the shared node gate (`run_node_command`), the
   same SSH key and wrapper as the proxmox tools;
-- `deliver_to_codr` copies a folder from stagr into a task folder in codr's
-  offline sandbox. Any `.git` is left behind and the folder arrives as a fresh
-  one-commit repo, so upstream history (a later fix, say) never reaches codr;
-- `retrieve_from_codr` copies a codr task folder back to stagr.
+- `copy_to_codr` / `copy_from_codr` copy a file or folder between stagr and
+  codr's offline sandbox, to a path that must not exist yet. Any `.git` is left
+  behind unless asked for, so upstream history (a later fix, say) never reaches
+  codr by accident.
+
+`codr_shell` runs unapproved too, in codr's workspace (DP-462): codr-vm is
+offline and is restored from a backup if a command wrecks it. It holds codr's
+workspace lock and runs only while every session there is idle, so the
+environment changes between tasks, never under one.
 
 Files move with `OpencodeClient.write_file` / `read_file` (DP-455), as one
 tar.gz each way; derpr is the only thing that talks to both boxes.
@@ -21,10 +26,11 @@ tar.gz each way; derpr is the only thing that talks to both boxes.
 from __future__ import annotations
 
 import logging
+import posixpath
 import re
 import shlex
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 import aiohttp
 
@@ -46,11 +52,10 @@ CODR_PERSONA = "codr"
 # letter, so no IP literal is accepted.
 DOMAIN_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
 PATH_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
-TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_GRANT_MINUTES = 1440
 MAX_SHELL_SECONDS = 3600
 DEFAULT_SHELL_SECONDS = 600
-# What one delivery may carry, compressed. write_file moves ~0.5 MB/s.
+# What one copy may carry, compressed. write_file moves ~0.5 MB/s.
 MAX_TRANSFER_BYTES = 200 * 1024 * 1024
 _EXIT_MARK = "__STAGR_EXIT="
 _OK_MARK = "__STAGR_OK"
@@ -87,6 +92,42 @@ def _rel_path(path: str) -> Optional[str]:
     return path
 
 
+def _flag(value: Any) -> bool:
+    """A boolean tool argument; models sometimes send it as a string."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return bool(value)
+
+
+def _shell_script(command: str, timeout_seconds: Optional[int]) -> Union[Tuple[str, int], Dict[str, Any]]:
+    """The bash that runs `command` under a timeout and reports its exit code,
+    plus that timeout; or the error to return."""
+    if not (command or "").strip():
+        return _error("command is empty.")
+    try:
+        seconds = DEFAULT_SHELL_SECONDS if timeout_seconds is None else int(timeout_seconds)
+    except (TypeError, ValueError):
+        return _error("timeout_seconds must be a whole number of seconds.")
+    seconds = min(max(seconds, 1), MAX_SHELL_SECONDS)
+    # The command runs in its own bash, so an `exit` in it still reports. It
+    # travels as an argument, not on stdin: a heredoc would be read by any
+    # command in it that reads stdin, swallowing the lines after it.
+    return (f"timeout {seconds} bash -c {shlex.quote(command.rstrip())} </dev/null\n"
+            f'echo "{_EXIT_MARK}$?"\n'), seconds
+
+
+def _shell_result(out: str, seconds: int) -> Dict[str, Any]:
+    # The last marker, wherever it is: stderr may arrive after stdout.
+    marks = list(re.finditer(rf"{_EXIT_MARK}(\d+)\n?", out))
+    body = out[:marks[-1].start()] + out[marks[-1].end():] if marks else out
+    exit_code = int(marks[-1].group(1)) if marks else None
+    result: Dict[str, Any] = {"status": "ok", "exit_code": exit_code,
+                              "output": _clip(body, global_config.STAGR_OUTPUT_CHARS)}
+    if exit_code == 124:
+        result["note"] = f"timed out after {seconds} s"
+    return result
+
+
 class StagrToolHandler:
     def __init__(self, runner: SSHRunner | None = None) -> None:
         self._ssh = runner or SSHRunner()
@@ -95,8 +136,9 @@ class StagrToolHandler:
         manager.register("stagr_shell", self._stagr_shell)
         manager.register("list_web_access", self._list_web_access)
         manager.register("request_web_access", self._request_web_access)
-        manager.register("deliver_to_codr", self._deliver_to_codr)
-        manager.register("retrieve_from_codr", self._retrieve_from_codr)
+        manager.register("codr_shell", self._codr_shell)
+        manager.register("copy_to_codr", self._copy_to_codr)
+        manager.register("copy_from_codr", self._copy_from_codr)
 
     # -- clients ---------------------------------------------------------------
 
@@ -114,23 +156,15 @@ class StagrToolHandler:
     def _stagr_session() -> aiohttp.ClientSession:
         return aiohttp.ClientSession(headers=auth_headers(global_config.STAGR_SERVER_PASSWORD))
 
-    # -- stagr_shell -------------------------------------------------------------
+    # -- shells ------------------------------------------------------------------
 
     async def _stagr_shell(self, command: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
         if (err := self._configured()):
             return err
-        if not (command or "").strip():
-            return _error("command is empty.")
-        try:
-            seconds = DEFAULT_SHELL_SECONDS if timeout_seconds is None else int(timeout_seconds)
-        except (TypeError, ValueError):
-            return _error("timeout_seconds must be a whole number of seconds.")
-        seconds = min(max(seconds, 1), MAX_SHELL_SECONDS)
-        # The command runs in its own bash, so an `exit` in it still reports. It
-        # travels as an argument, not on stdin: a heredoc would be read by any
-        # command in it that reads stdin, swallowing the lines after it.
-        script = (f"timeout {seconds} bash -c {shlex.quote(command.rstrip())} </dev/null\n"
-                  f'echo "{_EXIT_MARK}$?"\n')
+        prepared = _shell_script(command, timeout_seconds)
+        if isinstance(prepared, dict):
+            return prepared
+        script, seconds = prepared
         try:
             async with self._stagr_session() as http:
                 out = await self._stagr(http).run_shell(
@@ -139,15 +173,29 @@ class StagrToolHandler:
             return _error(f"stagr shell failed: {e}")
         except TimeoutError:
             return _error(f"stagr shell gave no answer within {seconds + 60} s.")
-        # The last marker, wherever it is: stderr may arrive after stdout.
-        marks = list(re.finditer(rf"{_EXIT_MARK}(\d+)\n?", out))
-        body = out[:marks[-1].start()] + out[marks[-1].end():] if marks else out
-        exit_code = int(marks[-1].group(1)) if marks else None
-        result: Dict[str, Any] = {"status": "ok", "exit_code": exit_code,
-                                  "output": _clip(body, global_config.STAGR_OUTPUT_CHARS)}
-        if exit_code == 124:
-            result["note"] = f"timed out after {seconds} s"
-        return result
+        return _shell_result(out, seconds)
+
+    async def _codr_shell(self, command: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+        prepared = _shell_script(command, timeout_seconds)
+        if isinstance(prepared, dict):
+            return prepared
+        script, seconds = prepared
+        _, _, codr_dir = workspace_directory(CODR_PERSONA)
+        lock = workspace_lock(codr_dir)
+        if lock.locked():
+            return _error("codr is starting or running a turn; try again when it is idle.")
+        try:
+            # Held for the whole command, so codr starts nothing while it runs.
+            async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
+                codr = OpencodeClient(http, codr_dir)
+                if not await self._codr_idle(codr):
+                    return _error("codr is working; try again when it is idle.")
+                out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+        except LLMCommunicationError as e:
+            return _error(f"codr shell failed: {e}")
+        except TimeoutError:
+            return _error(f"codr shell gave no answer within {seconds + 60} s.")
+        return _shell_result(out, seconds)
 
     # -- web access ----------------------------------------------------------------
 
@@ -182,94 +230,116 @@ class StagrToolHandler:
         return all((v or {}).get("type", "idle") == "idle" for v in status.values())
 
     @staticmethod
-    async def _pack(client: OpencodeClient, folder: str, *, exclude_git: bool) -> bytes:
-        """`folder` on that box as a tar.gz of its contents."""
+    async def _pack(client: OpencodeClient, path: str, *, keep_git: bool) -> bytes:
+        """`path` (a file or folder) on that box as a tar.gz holding it under
+        its own name."""
         staged = f".stagr-out-{uuid.uuid4().hex[:8]}.tar.gz"
-        exclude = "--exclude=.git " if exclude_git else ""
+        exclude = "" if keep_git else "--exclude=.git "
+        parent, name = posixpath.split(path)
         out = await client.run_shell(
-            f"[ -d {shlex.quote(folder)} ] && tar -czf {staged} {exclude}-C {shlex.quote(folder)} . "
-            f'&& echo "{_OK_MARK} $(stat -c %s {staged})"', timeout=_LONG)
+            f"[ -e {shlex.quote(path)} ] && tar -czf {staged} {exclude}-C {shlex.quote(parent or '.')} "
+            f'-- {shlex.quote(name)} && echo "{_OK_MARK} $(stat -c %s {staged})"', timeout=_LONG)
         try:
             packed = re.search(rf"{_OK_MARK} (\d+)", out)
             if not packed:
-                raise _Refused(f"could not pack {folder}: {out[-500:] or 'no such folder'}")
+                raise _Refused(f"could not pack {path}: {out[-500:] or 'no such file or folder'}")
             # Checked on the box, before the archive is pulled into derpr's memory.
             size = int(packed.group(1))
             if size > MAX_TRANSFER_BYTES:
-                raise _Refused(f"{folder} is {size} bytes compressed; the limit is {MAX_TRANSFER_BYTES}.")
+                raise _Refused(f"{path} is {size} bytes compressed; the limit is {MAX_TRANSFER_BYTES}.")
             return await client.read_file(staged)
         finally:
             await client.run_shell(f"rm -f -- {staged}")
 
-    async def _deliver_to_codr(self, path: str, task: str) -> Dict[str, Any]:
+    @staticmethod
+    async def _refuse_existing(client: OpencodeClient, dest: str, box: str) -> None:
+        """Checked before anything is packed, so a doomed copy moves no bytes."""
+        exists = await client.run_shell(f"[ -e {shlex.quote(dest)} ] && echo EXISTS || true")
+        if "EXISTS" in exists:
+            raise _Refused(f"{dest} already exists on {box}, and a copy never overwrites: "
+                           "pick a new path or remove it first.")
+
+    @staticmethod
+    async def _unpack(client: OpencodeClient, archive: bytes, name: str, dest: str) -> None:
+        """Unpack `archive` (which holds `name`) and move it to `dest`, which
+        must not exist. It is unpacked beside `dest` first and moved in one
+        rename, so a failure leaves no half copy."""
+        tag = uuid.uuid4().hex[:8]
+        staged, tmp = f".stagr-in-{tag}.tar.gz", f".stagr-in-{tag}"
+        await client.write_file(staged, archive)
+        parent = posixpath.dirname(dest)
+        mkparent = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
+        out = await client.run_shell(
+            f"mkdir {tmp} && tar -xzf {staged} -C {tmp} && {mkparent}"
+            f"[ ! -e {shlex.quote(dest)} ] && mv -T -- {tmp}/{shlex.quote(name)} {shlex.quote(dest)} "
+            f"&& echo {_OK_MARK}; rm -rf -- {tmp} {staged}", timeout=_LONG)
+        if _OK_MARK not in out:
+            raise _Refused(f"unpacking to {dest} failed: {out[-500:] or 'it exists now, or the copy was empty'}")
+
+    @staticmethod
+    def _copy_paths(source: str, dest: str) -> Tuple[Optional[str], Optional[str]]:
+        """Both as safe relative paths naming something (not the workdir
+        itself), or None."""
+        src, dst = _rel_path(source), _rel_path(dest)
+        return (None if src == "." else src), (None if dst == "." else dst)
+
+    async def _copy_to_codr(self, source: str, dest: str, keep_git: Any = False) -> Dict[str, Any]:
         if (err := self._configured()):
             return err
-        src = _rel_path(path)
+        src, dst = self._copy_paths(source, dest)
         if src is None:
-            return _error(f"path must be relative to {global_config.STAGR_WORKDIR}, with no '..': {path!r}")
-        if not TASK_RE.match(task or ""):
-            return _error(f"not a task folder name: {task!r}")
+            return _error(f"source must name a file or folder relative to {global_config.STAGR_WORKDIR}, "
+                          f"with no '..': {source!r}")
+        if dst is None:
+            return _error(f"dest must be a new path relative to codr's workspace, with no '..': {dest!r}")
+        keep = _flag(keep_git)
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
         lock = workspace_lock(codr_dir)
         if lock.locked():
             return _error("codr is starting or running a turn; try again when it is idle.")
         try:
+            async with aiohttp.ClientSession(headers=auth_headers()) as http:
+                await self._refuse_existing(OpencodeClient(http, codr_dir), dst, "codr")
             async with self._stagr_session() as http:
-                archive = await self._pack(self._stagr(http), src, exclude_git=True)
+                archive = await self._pack(self._stagr(http), src, keep_git=keep)
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                await self._unpack_into_codr(OpencodeClient(http, codr_dir), archive, f"tasks/{task}")
+                codr = OpencodeClient(http, codr_dir)
+                if not await self._codr_idle(codr):
+                    raise _Refused("codr is working; copy when it is idle.")
+                await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
             return _error(str(e))
         except LLMCommunicationError as e:
-            return _error(f"delivery failed: {e}")
+            return _error(f"copy to codr failed: {e}")
         except TimeoutError:
-            return _error("delivery failed: a call to stagr or codr's sandbox timed out.")
-        return {"status": "ok", "delivered": f"{src} -> codr tasks/{task}", "bytes": len(archive),
-                "history": "fresh repo, one commit (any .git on stagr was not copied)"}
+            return _error("copy to codr failed: a call to stagr or codr's sandbox timed out.")
+        return {"status": "ok", "copied": f"stagr {src} -> codr {dst}", "bytes": len(archive),
+                "git": "kept" if keep else "any .git was left behind"}
 
-    async def _unpack_into_codr(self, codr: OpencodeClient, archive: bytes, target: str) -> None:
-        """Unpack into a new folder in codr's workspace as a one-commit repo.
-        Caller holds codr's workspace lock."""
-        if not await self._codr_idle(codr):
-            raise _Refused("codr is working; deliver when it is idle.")
-        exists = await codr.run_shell(f"[ -e {target} ] && echo EXISTS || true")
-        if "EXISTS" in exists:
-            raise _Refused(f"{target} already exists in codr's workspace; pick a new task name.")
-        await codr.write_file(".stagr-in.tar.gz", archive)
-        out = await codr.run_shell(
-            f"mkdir -p {target} && tar -xzf .stagr-in.tar.gz -C {target} && rm -f .stagr-in.tar.gz "
-            f"&& cd {target} && git init -q && git add -A "
-            "&& git -c user.name=stagr -c user.email=stagr@derpr commit -qm 'task start (delivered by stagr)' "
-            "&& git rev-list --all --count", timeout=_LONG)
-        if out.strip().splitlines()[-1:] != ["1"]:
-            # The folder did not exist before (checked above, under the lock),
-            # so a half-made one is ours: remove it, or every retry reads as
-            # "already exists".
-            await codr.run_shell(f"rm -rf -- {target} .stagr-in.tar.gz")
-            raise _Refused(f"unpacking in codr's sandbox failed: {out[-500:]}")
-
-    async def _retrieve_from_codr(self, task: str) -> Dict[str, Any]:
+    async def _copy_from_codr(self, source: str, dest: str, keep_git: Any = False) -> Dict[str, Any]:
         if (err := self._configured()):
             return err
-        if not TASK_RE.match(task or ""):
-            return _error(f"not a task folder name: {task!r}")
+        src, dst = self._copy_paths(source, dest)
+        if src is None:
+            return _error(f"source must name a file or folder relative to codr's workspace, "
+                          f"with no '..': {source!r}")
+        if dst is None:
+            return _error(f"dest must be a new path relative to {global_config.STAGR_WORKDIR}, "
+                          f"with no '..': {dest!r}")
+        keep = _flag(keep_git)
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
-        dest = f"from-codr/{task}"
         try:
-            async with aiohttp.ClientSession(headers=auth_headers()) as http:
-                archive = await self._pack(OpencodeClient(http, codr_dir), f"tasks/{task}", exclude_git=False)
             async with self._stagr_session() as http:
-                stagr = self._stagr(http)
-                await stagr.write_file(".stagr-in.tar.gz", archive)
-                out = await stagr.run_shell(
-                    f"rm -rf {dest} && mkdir -p {dest} && tar -xzf .stagr-in.tar.gz -C {dest} "
-                    f"&& rm -f .stagr-in.tar.gz && echo {_OK_MARK}", timeout=_LONG)
+                await self._refuse_existing(self._stagr(http), dst, "stagr")
+            async with aiohttp.ClientSession(headers=auth_headers()) as http:
+                archive = await self._pack(OpencodeClient(http, codr_dir), src, keep_git=keep)
+            async with self._stagr_session() as http:
+                await self._unpack(self._stagr(http), archive, posixpath.basename(src), dst)
         except _Refused as e:
             return _error(str(e))
         except LLMCommunicationError as e:
-            return _error(f"retrieving tasks/{task} failed: {e}")
+            return _error(f"copy from codr failed: {e}")
         except TimeoutError:
-            return _error(f"retrieving tasks/{task} failed: a call to codr's sandbox or stagr timed out.")
-        if _OK_MARK not in out:
-            return _error(f"unpacking on stagr failed: {out[-300:]}")
-        return {"status": "ok", "retrieved": f"codr tasks/{task} -> stagr {dest}", "bytes": len(archive)}
+            return _error("copy from codr failed: a call to codr's sandbox or stagr timed out.")
+        return {"status": "ok", "copied": f"codr {src} -> stagr {dst}", "bytes": len(archive),
+                "git": "kept" if keep else "any .git was left behind"}

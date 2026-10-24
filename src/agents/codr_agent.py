@@ -180,6 +180,30 @@ You are a worker subagent. Do the one subtask you are given, in the files and fo
 """
 
 
+def validate_mcp(mcp: Any) -> None:
+    """Refuse a malformed `mcp` setting (DP-462) before it reaches codr's
+    opencode.json, where opencode would reject the whole file at instance
+    start. The shape is opencode's own, passed through as is."""
+    if mcp is None:
+        return
+    if not isinstance(mcp, dict):
+        raise ValueError("codr agent: `mcp` must be an object mapping server names to their config")
+    for name, entry in mcp.items():
+        where = f"codr agent: mcp.{name}"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} must be an object")
+        kind = entry.get("type")
+        if kind == "local":
+            command = entry.get("command")
+            if not (isinstance(command, list) and command and all(isinstance(c, str) and c for c in command)):
+                raise ValueError(f"{where}: a local server needs `command`, a list of strings, program first")
+        elif kind == "remote":
+            if not (isinstance(entry.get("url"), str) and re.match(r"^https?://\S+$", entry["url"])):
+                raise ValueError(f"{where}: a remote server needs `url`, an http(s) URL")
+        elif not (set(entry) == {"enabled"} and isinstance(entry["enabled"], bool)):
+            raise ValueError(f"{where}: `type` must be \"local\" or \"remote\" (or the entry only {{\"enabled\": bool}})")
+
+
 def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:
     """The `.opencode/` files DERPR keeps in codr's workspace. The empty
     `node_modules/` plus package files stop opencode's npm install of its plugin
@@ -195,6 +219,8 @@ def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:
                                  "limit": {"context": int(cfg["pool_context"]), "output": 16384}}},
         }},
     }
+    if cfg.get("mcp"):
+        config["mcp"] = cfg["mcp"]
     return {
         ".opencode/tool/notify_adam.js": _NOTIFY_JS % {"per_hour": int(cfg["notify_per_hour"])},
         ".opencode/agent/pool.md": _POOL_AGENT_MD,
@@ -282,6 +308,7 @@ class CodrAgent(Agent):
         self.notification_router = notification_router
         self.agent_config = agent_config or {}
         self.cfg = {**DEFAULTS, **{k: v for k, v in self.agent_config.items() if not k.startswith("_")}}
+        validate_mcp(self.cfg.get("mcp"))
         self.persona_name: str = self.cfg["persona"]
         self.root, self.slug, self.directory = workspace_directory(self.persona_name)
         self._workspace_synced = False
