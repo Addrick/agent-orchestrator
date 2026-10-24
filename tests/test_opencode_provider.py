@@ -154,8 +154,9 @@ def real_bash(cwd):
 
     def run(script):
         # On stdin, as `run_shell` sends it (and a Windows command line caps at 32K).
-        done = subprocess.run([bash], input=script, cwd=cwd, capture_output=True, text=True)
-        return done.stdout + done.stderr
+        # Bytes, not text: text mode on Windows writes \r\n, which ends no heredoc.
+        done = subprocess.run([bash], input=script.encode(), cwd=cwd, capture_output=True)
+        return (done.stdout + done.stderr).decode()
     return run
 
 

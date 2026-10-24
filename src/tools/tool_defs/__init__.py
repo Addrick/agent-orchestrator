@@ -14,6 +14,7 @@ from src.tools.tool_defs.fixr import FIXR_TOOLS
 from src.tools.tool_defs.voice import VOICE_TOOLS
 from src.tools.tool_defs.proxmox import PROXMOX_TOOLS
 from src.tools.tool_defs.huggingface import HUGGINGFACE_TOOLS
+from src.tools.tool_defs.stagr import STAGR_TOOLS
 from src.tools.tool_defs.mcp import MCP_TOOLS
 from src.tools.tool_defs.proposals import PROPOSAL_TOOLS
 
@@ -26,6 +27,7 @@ __all__ = [
     "VOICE_TOOLS",
     "PROXMOX_TOOLS",
     "HUGGINGFACE_TOOLS",
+    "STAGR_TOOLS",
     "MCP_TOOLS",
     "PROPOSAL_TOOLS",
 ]

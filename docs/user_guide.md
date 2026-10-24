@@ -768,42 +768,67 @@ Settings, per instance in `agents.json` under `codr`:
 - `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`
   (default `65536`): the pool provider codr's subagent uses.
 
-#### Preparing codr's work: the setup box and setup agent (planned, DP-455 / DP-456)
+#### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456)
 
 codr's sandbox stays offline while it works. Anything codr needs from the
 internet (a repo at a given commit, packages, data) is prepared somewhere else
-and handed in, and codr's finished work is pulled back out. DERPR is the only
-thing that crosses between the two:
+and handed in, and codr's finished work can be pulled back out. DERPR is the
+only thing that talks to both:
 
-- **The setup box** is a second VM, separate from codr's. It can't reach the LAN:
-  not CT100, not Proxmox, not dt21, not anything else at home. Only DERPR can
-  connect to it. Nothing is kept there (no keys, no `.env`, no DERPR data), so
-  anything run there can only hurt the setup box itself.
-- **Its internet goes through an allowlist.** The box has no direct way out; its
-  only route is a proxy outside the box that lets through only approved domains.
-  GitHub and PyPI are allowed by default. Any other domain is refused (and the
-  refusal logged) until the setup agent asks for it with `request_web_access`,
-  naming the domain and why, and you approve it. An approved domain stays open for
-  a limited time, not for good. This matters because the box's traffic leaves
+- **The setup box** (`stagr-vm`, a second VM; codr's is `codr-vm`) can't reach the LAN: not CT100, not
+  Proxmox, not dt21, not anything else at home. Only DERPR (and dt21, for SSH)
+  can connect to it. Nothing is kept there (no keys, no `.env`, no DERPR data),
+  so anything run there can only hurt the setup box itself.
+- **Its internet goes through an allowlist.** The box has no direct way out and no
+  DNS; its only route is a proxy in a separate container that lets through only
+  allowed domains. GitHub, PyPI and the Debian mirrors are allowed by default (a
+  domain also admits its subdomains). Any other domain is refused with HTTP 403,
+  and the refusal is logged, until the setup agent asks for it with
+  `request_web_access`, naming the domain, how long, and why, and you approve it.
+  A grant lasts at most 24 hours. This matters because the box's traffic leaves
   through your home connection, and the agent reads untrusted text (READMEs,
   issue threads) that could try to steer it.
-- **The setup agent** is an ordinary persona that you work with directly, in the
-  portal or Discord, and only you can talk to it. It gets a shell on the setup
-  box, and **its commands there run without approval**: the box is built so that
-  nothing it reaches matters, which is what saves you from reading each command.
-  It can work out what a task needs, fetch it, install it, and dry-run the task's
-  check.
-- **Moving things into codr's box** is a separate tool, and it needs your approval
-  like any other write. It takes a path on the setup box and copies it into a task
-  folder in codr's workspace. The setup agent never gets a shell in codr's box.
-- **Pulling codr's work out**: a task folder that is a git repo comes back as a
-  `git bundle`, which you can clone or diff anywhere.
+- **The setup agent** is the opt-in persona `stagr`
+  (`config/optional_personas/stagr.json`), on `model local` by default. You work
+  with it directly. Its `stagr_shell` runs bash on the setup box **without
+  approval**: the box is built so that nothing it reaches matters, which is what
+  saves you from reading each command. `list_web_access` shows the allowlist.
+- **Moving things into codr's box**: `deliver_to_codr` copies a folder from the
+  setup box into `tasks/<task>/` in codr's workspace, and needs your approval. Any
+  `.git` is left behind and the folder arrives as a **fresh git repo with one
+  commit**, so a repo checked out before an upstream fix never carries the fix in
+  its history. (Files can still give an answer away, such as a changelog entry or
+  the fix's own test; the setup agent is told to look for those.) It is refused
+  while codr is working and if `tasks/<task>` already exists, so it never
+  overwrites codr's work. The setup agent never gets a shell in codr's box.
+- **Pulling codr's work out**: `retrieve_from_codr` copies codr's `tasks/<task>/`
+  to `from-codr/<task>/` on the setup box (replacing an earlier copy), to review
+  or test it there. Needs your approval.
 - **Seeing what it did**: the portal shows each tool call as a card with the
-  command and its full output. Discord gets a one-line summary per call.
+  command and its output (the middle of very long output is cut, at
+  `STAGR_OUTPUT_CHARS`). Discord shows the persona's replies and the approval
+  prompts.
+
+To give codr a real-repo task: ask stagr to prepare it (clone, check out the
+start commit, download wheels for what the tests need into the folder, run the
+tests the way codr will), approve the delivery, and only then add the task's
+`TASK.md` and `check.sh` to `config/codr_tasks/` under the same name. The codr
+agent starts a task as soon as its folder is in the queue, and its seeding never
+replaces files that are already there.
+
+**Setting it up.** `STAGR_SERVER_URL` (e.g. `http://10.0.0.76:4096`) and
+`STAGR_SERVER_PASSWORD` (from `/etc/opencode/serve.env` on the setup box) in
+`.env`; the web-access tools also need `PVE_TOOLS_ENABLED` and the `derpr-egress`
+verb on the node (`services/pve/README.md`). Add the persona the same way as
+[hypr](#hypr--the-infra-operator-opt-in-not-seeded), and pin it to yourself with
+`set origin_allowlist <guild>/<channel>/<your user id> portal` from that channel.
+Optional: `STAGR_WORKDIR` (default `/home/agent/work`), `STAGR_OUTPUT_CHARS`
+(default `20000`). The box and proxy themselves are described in
+`services/egress/README.md`.
 
 The transfer itself (DP-455) has no size limit: files go in as an archive sent in
 pieces through the sandbox's shell endpoint, and come out compressed through its
-file endpoint, byte for byte.
+file endpoint, byte for byte. One delivery is capped at 200 MB compressed.
 
 ## Personas
 
@@ -1445,6 +1470,19 @@ matches, nothing is posted.
 - "Can't be checked" includes the node refusing the hash request. That happens
   when the node's wrapper is older than DP-418, so it reads as stale too.
 - It reports and nothing more. It never redeploys and never blocks startup.
+
+### stagr Tools (requires `service_bindings: ["stagr"]`, DP-456)
+
+The setup agent's tools. How they fit together, and why the shell needs no
+approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-setup-agent-dp-455--dp-456).
+
+| Tool | Approval | What it does |
+|---|---|---|
+| `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
+| `list_web_access` | no | The proxy allowlist: defaults and live grants |
+| `request_web_access` | yes | Allow one more domain for 1-1440 minutes |
+| `deliver_to_codr` | yes | Copy a setup-box folder into codr's `tasks/<task>/` as a fresh one-commit repo |
+| `retrieve_from_codr` | yes | Copy codr's `tasks/<task>/` to `from-codr/<task>/` on the setup box |
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 

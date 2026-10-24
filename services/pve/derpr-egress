@@ -1,0 +1,36 @@
+#!/bin/bash
+# derpr-egress — the node-side verb behind the stagr web-access tools (DP-456).
+#
+# The stagr setup VM reaches the internet only through tinyproxy in the egress
+# container, and tinyproxy admits only allowlisted domains. derpr changes that
+# list here, over the same SSH key and wrapper as every other node tool:
+#
+#   derpr-egress allow <domain> <minutes>   after a human approved request_web_access
+#   derpr-egress list                       defaults and live grants
+#
+# Installed at /usr/local/sbin/derpr-egress on the node that hosts the egress
+# container. The container's own egress-ctl (services/egress/) does the work;
+# this only checks the arguments and forwards them with `pct exec`.
+set -euo pipefail
+
+ct="${DERPR_EGRESS_CT:-110}"
+ctl=/usr/local/sbin/egress-ctl
+# Same gate as src/stagr/handler.py and egress-ctl. The last label starts with a
+# letter, so no IP literal gets through.
+domain_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+
+die() { echo "derpr-egress: $1" >&2; exit 1; }
+
+case "${1:-}" in
+  allow)
+    [ "$#" -eq 3 ] || die "usage: derpr-egress allow <domain> <minutes>"
+    [ "${#2}" -le 253 ] && [[ "$2" =~ $domain_re ]] || die "not a domain name: $2"
+    [[ "$3" =~ ^[0-9]+$ ]] && [ "$3" -ge 1 ] && [ "$3" -le 1440 ] || die "minutes must be 1-1440"
+    exec pct exec "$ct" -- "$ctl" allow "$2" "$3"
+    ;;
+  list)
+    [ "$#" -eq 1 ] || die "usage: derpr-egress list"
+    exec pct exec "$ct" -- "$ctl" list
+    ;;
+  *) die "usage: derpr-egress {allow <domain> <minutes>|list}" ;;
+esac

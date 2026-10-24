@@ -33,6 +33,7 @@ from src.huggingface.handler import HuggingFaceToolHandler
 from src.proxmox.artifacts import NODE_ARTIFACTS, check_node_artifacts
 from src.proxmox.handler import ProxmoxToolHandler
 from src.proxmox.ssh import SSHResult
+from src.stagr.handler import StagrToolHandler
 
 _BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(_BASH is None, reason="needs bash to run the wrapper")
@@ -174,6 +175,10 @@ def emitted(monkeypatch) -> List[List[str]]:
         await hf.job_status("newmodel-abc123def456")
         # DP-418: the startup drift check is a node caller too.
         await check_node_artifacts(recorder)  # type: ignore[arg-type]
+        # DP-456: the stagr egress allowlist rides the same gate.
+        stagr = StagrToolHandler(recorder)  # type: ignore[arg-type]
+        await stagr._list_web_access()
+        await stagr._request_web_access("files.example.org", 30, "test")
 
     asyncio.run(drive())
     assert recorder.calls
@@ -276,6 +281,14 @@ def test_a_cold_target_promotes_and_touches_nothing_else(emitted):
     "pct exec 101 -- cat /sys/class/drm/card1/device/mem_info_vram_total /etc/shadow",
     # A directory listing that is not the DRM one.
     "pct exec 101 -- ls /root",
+    # DP-456 egress verb: IP literals, extra args, other verbs.
+    "/usr/local/sbin/derpr-egress allow 10.0.0.70 30",
+    "/usr/local/sbin/derpr-egress allow example.com",
+    "/usr/local/sbin/derpr-egress allow example.com 30 extra",
+    "/usr/local/sbin/derpr-egress allow example.com -5",
+    "/usr/local/sbin/derpr-egress allow localhost 30",
+    "/usr/local/sbin/derpr-egress revoke example.com",
+    "/usr/local/sbin/derpr-egress list extra",
 ])
 def test_hostile_shapes_are_refused(wrapper, cmd):
     assert _verdict(wrapper, shlex.split(cmd)) == "DENY"
@@ -325,3 +338,8 @@ def test_the_hash_verb_admits_only_its_one_argv(wrapper, argv):
     """DP-418: hashing is a read of the node, so it is pinned to one exact
     argv. Anything else would let the key read arbitrary files' digests."""
     assert _verdict(wrapper, argv) == "DENY"
+
+
+def test_the_dp456_egress_shapes_are_covered(emitted):
+    assert ["/usr/local/sbin/derpr-egress", "list"] in emitted
+    assert ["/usr/local/sbin/derpr-egress", "allow", "files.example.org", "30"] in emitted

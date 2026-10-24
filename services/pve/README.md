@@ -1,12 +1,13 @@
 # `services/pve` — the node half of derpr's Proxmox tooling
 
-Three artifacts that live on the **Proxmox node**, not in the derpr container:
+The artifacts that live on the **Proxmox node**, not in the derpr container:
 
 | File | Node path | What it is |
 |---|---|---|
 | `derpr-pve-wrapper` | `/usr/local/bin/derpr-pve-wrapper` | The forced-command allowlist for derpr's SSH key (DP-267). |
 | `derpr-model-install` | `/usr/local/sbin/derpr-model-install` | The one verb behind `install_model` (DP-265). |
 | `derpr-model-tier` | `/usr/local/sbin/derpr-model-tier` | Hot/cold gguf tiering: `list`, `pin`, `unpin`, `promote` (DP-340). |
+| `derpr-egress` | `/usr/local/sbin/derpr-egress` | The one verb behind the stagr web-access tools (DP-456): `allow <domain> <minutes>`, `list`, forwarded into the egress container (`services/egress/`). |
 | `koboldcpp-model.service.in` | `/usr/local/share/derpr/koboldcpp-model.service.in` | Unit template the installer fills in. |
 | `gguf_header.py` | `/usr/local/share/derpr/gguf_header.py` | Reads `n_layer` / `n_kv_head` / `head_dim` / `ssm_layers` out of a downloaded gguf. Deploy it **with** `derpr-model-install`: since DP-360 the installer gates on this script's exit status rather than on a pattern over its output, so an older reader still works (it also exits 0) but an older *installer* silently drops any fragment whose first key is not `n_layer`. |
 
@@ -88,6 +89,10 @@ ssh root@<node> 'mkdir -p /usr/local/share/derpr'
 scp services/pve/derpr-model-tier root@<node>:/usr/local/sbin/derpr-model-tier
 ssh root@<node> 'chmod 755 /usr/local/sbin/derpr-model-tier && bash -n /usr/local/sbin/derpr-model-tier'
 
+# 2c. stagr egress allowlist verb (DP-456).
+scp services/pve/derpr-egress root@<node>:/usr/local/sbin/derpr-egress
+ssh root@<node> 'chmod 755 /usr/local/sbin/derpr-egress && bash -n /usr/local/sbin/derpr-egress'
+
 scp services/pve/koboldcpp-model.service.in root@<node>:/usr/local/share/derpr/
 scp services/pve/gguf_header.py root@<node>:/usr/local/share/derpr/
 ```
@@ -106,7 +111,7 @@ console.
 ### derpr checks the node's copies at startup (DP-418)
 
 Each derpr start hashes the `services/pve/` files baked into its image and asks the
-node for `sha256sum` of the five deployed paths above (the wrapper admits that one
+node for `sha256sum` of the six deployed paths above (the wrapper admits that one
 exact argv and nothing else). Any stale, missing or unverifiable file is posted to
 the debug channel (agents.json `recipients.debug`, or `DISCORD_DEBUG_CHANNEL`). So after a merge that touches this directory, either deploy
 before the container restarts or expect that message, and after deploying, a

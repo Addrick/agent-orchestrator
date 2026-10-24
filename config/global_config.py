@@ -543,6 +543,17 @@ OPENCODE_WORKSPACES_ROOT = os.environ.get("OPENCODE_WORKSPACES_ROOT", "/home/age
 OPENCODE_CALL_TIMEOUT_SECONDS = float(os.environ.get("OPENCODE_CALL_TIMEOUT_SECONDS", "1800"))
 RATE_LIMIT_OPENCODE_RPM = int(os.environ.get("RATE_LIMIT_OPENCODE_RPM", "15"))
 
+# stagr (DP-456) — the setup VM: a second `opencode serve` that derpr only runs
+# shell commands on (no LLM there). Its internet goes through the egress proxy's
+# domain allowlist; codr's sandbox above stays offline. Unset URL = the stagr
+# tools refuse. Same username as the codr server.
+STAGR_SERVER_URL = os.environ.get("STAGR_SERVER_URL", "").rstrip("/")
+STAGR_SERVER_PASSWORD = os.environ.get("STAGR_SERVER_PASSWORD", "")
+# Where stagr_shell runs, and what paths in the stagr tools are relative to.
+STAGR_WORKDIR = os.environ.get("STAGR_WORKDIR", "/home/agent/work").rstrip("/")
+# How much of a command's output the model gets back (the middle is cut).
+STAGR_OUTPUT_CHARS = int(os.environ.get("STAGR_OUTPUT_CHARS", "20000"))
+
 # --- DP-240: MCP bridge — derpr tools for dispatched subagents ----------------
 # A derpr-hosted MCP server (src/tools/mcp_bridge.py) mounted on the kobold
 # engine adapter, letting a *capable* dispatched subagent call ToolManager tools.
