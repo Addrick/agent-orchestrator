@@ -121,9 +121,15 @@ class StagrToolHandler:
             return err
         if not (command or "").strip():
             return _error("command is empty.")
-        seconds = min(max(int(timeout_seconds or DEFAULT_SHELL_SECONDS), 1), MAX_SHELL_SECONDS)
-        # The command runs in its own bash, so an `exit` in it still reports.
-        script = (f"timeout {seconds} bash <<'STAGR_CMD'\n{command.rstrip()}\nSTAGR_CMD\n"
+        try:
+            seconds = DEFAULT_SHELL_SECONDS if timeout_seconds is None else int(timeout_seconds)
+        except (TypeError, ValueError):
+            return _error("timeout_seconds must be a whole number of seconds.")
+        seconds = min(max(seconds, 1), MAX_SHELL_SECONDS)
+        # The command runs in its own bash, so an `exit` in it still reports. It
+        # travels as an argument, not on stdin: a heredoc would be read by any
+        # command in it that reads stdin, swallowing the lines after it.
+        script = (f"timeout {seconds} bash -c {shlex.quote(command.rstrip())} </dev/null\n"
                   f'echo "{_EXIT_MARK}$?"\n')
         try:
             async with self._stagr_session() as http:
@@ -182,16 +188,18 @@ class StagrToolHandler:
         exclude = "--exclude=.git " if exclude_git else ""
         out = await client.run_shell(
             f"[ -d {shlex.quote(folder)} ] && tar -czf {staged} {exclude}-C {shlex.quote(folder)} . "
-            f"&& echo {_OK_MARK}", timeout=_LONG)
+            f'&& echo "{_OK_MARK} $(stat -c %s {staged})"', timeout=_LONG)
         try:
-            if _OK_MARK not in out:
+            packed = re.search(rf"{_OK_MARK} (\d+)", out)
+            if not packed:
                 raise _Refused(f"could not pack {folder}: {out[-500:] or 'no such folder'}")
-            archive = await client.read_file(staged)
+            # Checked on the box, before the archive is pulled into derpr's memory.
+            size = int(packed.group(1))
+            if size > MAX_TRANSFER_BYTES:
+                raise _Refused(f"{folder} is {size} bytes compressed; the limit is {MAX_TRANSFER_BYTES}.")
+            return await client.read_file(staged)
         finally:
             await client.run_shell(f"rm -f -- {staged}")
-        if len(archive) > MAX_TRANSFER_BYTES:
-            raise _Refused(f"{folder} is {len(archive)} bytes compressed; the limit is {MAX_TRANSFER_BYTES}.")
-        return archive
 
     async def _deliver_to_codr(self, path: str, task: str) -> Dict[str, Any]:
         if (err := self._configured()):
@@ -214,6 +222,8 @@ class StagrToolHandler:
             return _error(str(e))
         except LLMCommunicationError as e:
             return _error(f"delivery failed: {e}")
+        except TimeoutError:
+            return _error("delivery failed: a call to stagr or codr's sandbox timed out.")
         return {"status": "ok", "delivered": f"{src} -> codr tasks/{task}", "bytes": len(archive),
                 "history": "fresh repo, one commit (any .git on stagr was not copied)"}
 
@@ -232,6 +242,10 @@ class StagrToolHandler:
             "&& git -c user.name=stagr -c user.email=stagr@derpr commit -qm 'task start (delivered by stagr)' "
             "&& git rev-list --all --count", timeout=_LONG)
         if out.strip().splitlines()[-1:] != ["1"]:
+            # The folder did not exist before (checked above, under the lock),
+            # so a half-made one is ours: remove it, or every retry reads as
+            # "already exists".
+            await codr.run_shell(f"rm -rf -- {target} .stagr-in.tar.gz")
             raise _Refused(f"unpacking in codr's sandbox failed: {out[-500:]}")
 
     async def _retrieve_from_codr(self, task: str) -> Dict[str, Any]:
@@ -254,6 +268,8 @@ class StagrToolHandler:
             return _error(str(e))
         except LLMCommunicationError as e:
             return _error(f"retrieving tasks/{task} failed: {e}")
+        except TimeoutError:
+            return _error(f"retrieving tasks/{task} failed: a call to codr's sandbox or stagr timed out.")
         if _OK_MARK not in out:
             return _error(f"unpacking on stagr failed: {out[-300:]}")
         return {"status": "ok", "retrieved": f"codr tasks/{task} -> stagr {dest}", "bytes": len(archive)}

@@ -246,7 +246,7 @@ class OpencodeClient:
                  base_url: Optional[str] = None) -> None:
         self._http = http
         # codr's sandbox unless told otherwise (stagr, DP-456).
-        self._base = base_url or global_config.OPENCODE_SERVER_URL
+        self._base = global_config.OPENCODE_SERVER_URL if base_url is None else base_url
         self.directory = directory
 
     async def request(self, method: str, path: str, *, json_body: Any = None,

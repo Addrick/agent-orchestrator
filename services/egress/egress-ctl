@@ -29,6 +29,11 @@ max_minutes=1440
 
 die() { echo "egress-ctl: $1" >&2; exit 1; }
 
+# One run at a time: `allow` and the timer's `refresh` both rewrite $granted
+# through $granted.new, and interleaved they lose a grant.
+exec 9>/run/egress-ctl.lock
+flock 9
+
 valid_domain() { [ "${#1}" -le 253 ] && [[ "$1" =~ $domain_re ]]; }
 
 prune() {
@@ -50,7 +55,9 @@ write_filter() {
     rm -f "$filter.new"
   else
     mv "$filter.new" "$filter"
-    systemctl restart tinyproxy
+    # reload = SIGUSR1: tinyproxy 1.11 rereads the filter in both directions
+    # and keeps in-flight connections; a restart would abort stagr's downloads.
+    systemctl reload tinyproxy
   fi
 }
 
