@@ -31,8 +31,11 @@ the two never start a turn at the same moment.
 
 import asyncio
 import base64
+import gzip
+import hashlib
 import json
 import logging
+import shlex
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Set, Tuple
@@ -62,6 +65,11 @@ INJECTED_FIELD = "derpr_injected"
 # reply row is stored. codr's real answer, if any, is a relayed `notify_adam`.
 INJECTED_ACK = "✅"
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# Raw bytes per `write_file` shell call. Base64 twice (the chunk, then the
+# script `run_shell` sends) makes 48 KiB ~87 KB of command, under Linux's
+# 128 KiB per-argument cap (measured on VM200: 120 KB passes, 140 KB is a 500).
+_WRITE_CHUNK = 48 * 1024
+_WRITTEN_MARK = "__DERPR_WRITTEN"
 _POLL_SECONDS = 2.0
 # How far back to page when the latest turn started before the default window.
 _LONG_WINDOW = 2000
@@ -288,6 +296,43 @@ class OpencodeClient:
             str((p.get("state") or {}).get("output") or "")
             for p in (reply or {}).get("parts", []) if p.get("type") == "tool"
         )
+
+    async def write_file(self, path: str, data: bytes, *, directory: Optional[str] = None) -> None:
+        """Write `data` to `path` (relative to `directory`), any size. opencode
+        has no write endpoint and one shell command must stay under Linux's
+        128 KiB argument cap, so the bytes go in `_WRITE_CHUNK` pieces to a
+        side file that replaces `path` only once its sha256 matches."""
+        target, part = shlex.quote(path), shlex.quote(f"{path}.derpr-part")
+        await self.run_shell(f'mkdir -p -- "$(dirname -- {target})" && : > {part}', directory=directory)
+        for i in range(0, len(data), _WRITE_CHUNK):
+            chunk = base64.b64encode(data[i:i + _WRITE_CHUNK]).decode()
+            await self.run_shell(f"echo {chunk} | base64 -d >> {part}", directory=directory)
+        digest = hashlib.sha256(data).hexdigest()
+        out = await self.run_shell(
+            f'[ "$(sha256sum < {part} | cut -c1-64)" = {digest} ] && mv -f -- {part} {target} '
+            f'&& echo {_WRITTEN_MARK}', directory=directory)
+        # A failed command comes back as output, not as an HTTP error.
+        if _WRITTEN_MARK not in out:
+            raise LLMCommunicationError(f"opencode: writing {path} failed: {out[-300:]}")
+
+    async def read_file(self, path: str, *, directory: Optional[str] = None) -> bytes:
+        """`path` (relative to `directory`) as bytes, any size. opencode's file
+        endpoint sends a binary file whole (base64) but strips the trailing
+        newlines off a text file, so a gzip copy is what travels."""
+        staged = f"{path}.derpr-read.gz"
+        out = await self.run_shell(
+            f"gzip -c -- {shlex.quote(path)} > {shlex.quote(staged)} && echo {_WRITTEN_MARK}",
+            directory=directory)
+        try:
+            if _WRITTEN_MARK not in out:
+                raise LLMCommunicationError(f"opencode: reading {path} failed: {out[-300:]}")
+            body = await self.request("GET", "/file/content", params={"path": staged},
+                                      directory=directory) or {}
+            if body.get("encoding") != "base64":
+                raise LLMCommunicationError(f"opencode: {staged} did not come back as binary")
+            return gzip.decompress(base64.b64decode(str(body.get("content") or "")))
+        finally:
+            await self.run_shell(f"rm -f -- {shlex.quote(staged)}", directory=directory)
 
     async def prompt_async(self, session_id: str, body: Dict[str, Any]) -> None:
         """Start a turn, or deliver into the running one, without waiting."""

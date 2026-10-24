@@ -16,7 +16,7 @@ from src.agents.codr_agent import (
 from src.engine.providers import opencode
 from src.generation_events import ResponseType
 from tests import test_opencode_provider as provider_tests
-from tests.test_opencode_provider import ROOT
+from tests.test_opencode_provider import ROOT, real_bash
 
 fake = provider_tests.fake  # the fake `opencode serve` fixture
 
@@ -168,6 +168,24 @@ def test_workspace_files_stop_the_offline_npm_install():
     assert config["provider"]["kcpp-pool"]["options"]["baseURL"] == codr_agent.DEFAULTS["pool_url"]
     assert "model: kcpp-pool/local" in files[".opencode/agent/pool.md"]
     assert "mkdir -p .opencode/tool .opencode/agent .opencode/node_modules" in sync_script(files)
+
+
+async def test_a_seed_of_any_size_arrives_and_keeps_what_codr_changed(fake, tmp_path):
+    """DP-455: a seed bigger than one shell command's argument cap still
+    arrives whole, and files codr already edited are left alone."""
+    from aiohttp import ClientSession
+    seed = {f"pkg/mod{i}.py": "x = 1  # " + "y" * 20_000 + "\n" for i in range(10)}
+    _task(tmp_path, "09-big", seed=seed)
+    (task,) = load_tasks(tmp_path, 3)
+    work = tmp_path / "work"
+    (work / "tasks/09-big/pkg").mkdir(parents=True)
+    (work / "tasks/09-big/pkg/mod0.py").write_text("edited by codr\n")
+    fake.shell_output = real_bash(work)
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        await codr_agent.seed_task(opencode.OpencodeClient(http, f"{ROOT}/codr"), task)
+    assert (work / "tasks/09-big/pkg/mod0.py").read_text() == "edited by codr\n"
+    assert (work / "tasks/09-big/pkg/mod9.py").read_text() == seed["pkg/mod9.py"]
+    assert [p.name for p in work.iterdir()] == ["tasks"]      # staged archive removed
 
 
 # --- ticks ---------------------------------------------------------------------

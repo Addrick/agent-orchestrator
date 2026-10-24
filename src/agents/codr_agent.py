@@ -24,10 +24,11 @@ through opencode's shell endpoint after the turn, so codr cannot edit it.
 """
 
 import asyncio
-import base64
+import io
 import json
 import logging
 import re
+import tarfile
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ REPEAT_LIMIT = 3            # identical tool calls / reasoning steps in a row
 CHECK_TAIL_CHARS = 2500
 _EXIT_MARK = "__DERPR_EXIT="
 _CHANGED_MARK = "__DERPR_CHANGED="
+_SEEDED_MARK = "__DERPR_SEEDED"
 
 DEFAULTS: Dict[str, Any] = {
     "persona": "codr",
@@ -213,16 +215,35 @@ def sync_script(files: Dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def seed_script(task: CodrTask) -> str:
-    """Bash that creates `tasks/<id>/` and writes each seed file that is not
-    there yet, so a later attempt keeps what codr changed."""
+def seed_archive(task: CodrTask) -> Optional[bytes]:
+    """The task's seed files as one tar.gz, or None if it has none."""
+    if not task.seed:
+        return None
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel, data in task.seed:
+            info = tarfile.TarInfo(rel)
+            info.size, info.mode = len(data), 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+async def seed_task(client: OpencodeClient, task: CodrTask) -> None:
+    """Create `tasks/<id>/` and unpack each seed file that is not there yet,
+    so a later attempt keeps what codr changed. The archive goes in through
+    `write_file`, so a seed of any size fits (DP-455)."""
     base = f"tasks/{task.id}"
-    lines = [f"mkdir -p -- '{base}'"]
-    for rel, data in task.seed:
-        path = f"{base}/{rel}"
-        lines += [f"mkdir -p -- \"$(dirname -- '{path}')\"",
-                  f"[ -e '{path}' ] || echo {base64.b64encode(data).decode()} | base64 -d > '{path}'"]
-    return "\n".join(lines) + "\n"
+    archive = seed_archive(task)
+    if archive is None:
+        await client.run_shell(f"mkdir -p -- '{base}'")
+        return
+    staged = f".derpr-seed-{task.id}.tar.gz"
+    await client.write_file(staged, archive)
+    out = await client.run_shell(
+        f"mkdir -p -- '{base}' && tar -xzf '{staged}' -C '{base}' --skip-old-files "
+        f"&& echo {_SEEDED_MARK}; rm -f -- '{staged}'")
+    if _SEEDED_MARK not in out:
+        raise RuntimeError(f"codr: seeding {base} failed: {out[-500:]}")
 
 
 def check_script(task: CodrTask, timeout_s: int) -> str:
@@ -472,7 +493,7 @@ class CodrAgent(Agent):
             if await client.is_busy(sid) or (start is not None and not turn_finished(msgs, start)
                                              and open_auto(msgs[start]) is not None):
                 return
-            await client.run_shell(seed_script(task))
+            await seed_task(client, task)
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
             await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous), meta)
         logger.info("codr agent: started task %s attempt %d", task.id, attempt)

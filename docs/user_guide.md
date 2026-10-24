@@ -684,7 +684,9 @@ going while it waits for your answer. The agent is off by default
   checks do both). Otherwise a planted `hashlib.py` or `unittest.py` could fake a pass.
 - `seed/` (optional): starting files, e.g. a small repo with a bug in it. Before
   each attempt DERPR copies any of them that are missing into the task folder, so
-  what codr changed stays.
+  what codr changed stays. A seed can be any size (DP-455): DERPR packs it into one
+  archive and sends it in pieces, so a whole repo fits. Before DP-455 everything
+  over about 90 KB in total failed to arrive.
 
 The shipped tasks are a test battery that gets harder as it goes: 01-03 are small
 builds and a bug fix, 04 extends codr's own task-03 app (auth and a schema
@@ -765,6 +767,43 @@ Settings, per instance in `agents.json` under `codr`:
   starts no new tasks.
 - `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`
   (default `65536`): the pool provider codr's subagent uses.
+
+#### Preparing codr's work: the setup box and setup agent (planned, DP-455 / DP-456)
+
+codr's sandbox stays offline while it works. Anything codr needs from the
+internet (a repo at a given commit, packages, data) is prepared somewhere else
+and handed in, and codr's finished work is pulled back out. DERPR is the only
+thing that crosses between the two:
+
+- **The setup box** is a second VM, separate from codr's. It can't reach the LAN:
+  not CT100, not Proxmox, not dt21, not anything else at home. Only DERPR can
+  connect to it. Nothing is kept there (no keys, no `.env`, no DERPR data), so
+  anything run there can only hurt the setup box itself.
+- **Its internet goes through an allowlist.** The box has no direct way out; its
+  only route is a proxy outside the box that lets through only approved domains.
+  GitHub and PyPI are allowed by default. Any other domain is refused (and the
+  refusal logged) until the setup agent asks for it with `request_web_access`,
+  naming the domain and why, and you approve it. An approved domain stays open for
+  a limited time, not for good. This matters because the box's traffic leaves
+  through your home connection, and the agent reads untrusted text (READMEs,
+  issue threads) that could try to steer it.
+- **The setup agent** is an ordinary persona that you work with directly, in the
+  portal or Discord, and only you can talk to it. It gets a shell on the setup
+  box, and **its commands there run without approval**: the box is built so that
+  nothing it reaches matters, which is what saves you from reading each command.
+  It can work out what a task needs, fetch it, install it, and dry-run the task's
+  check.
+- **Moving things into codr's box** is a separate tool, and it needs your approval
+  like any other write. It takes a path on the setup box and copies it into a task
+  folder in codr's workspace. The setup agent never gets a shell in codr's box.
+- **Pulling codr's work out**: a task folder that is a git repo comes back as a
+  `git bundle`, which you can clone or diff anywhere.
+- **Seeing what it did**: the portal shows each tool call as a card with the
+  command and its full output. Discord gets a one-line summary per call.
+
+The transfer itself (DP-455) has no size limit: files go in as an archive sent in
+pieces through the sandbox's shell endpoint, and come out compressed through its
+file endpoint, byte for byte.
 
 ## Personas
 
