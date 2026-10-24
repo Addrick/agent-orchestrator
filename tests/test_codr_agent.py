@@ -102,7 +102,7 @@ def _shell(check_passes=True):
     def run(script):
         if "DERPR_EOF_0" in script:
             return "__DERPR_CHANGED=0\n"
-        if "DERPR_CHECK" in script:
+        if "__DERPR_EXIT=" in script:
             return ("PASS\n__DERPR_EXIT=0\n" if check_passes
                     else "FAIL: csvstats.py missing\n__DERPR_EXIT=1\n")
         return ""
@@ -140,6 +140,15 @@ def test_load_tasks_reads_the_attempts_header_and_seed(tmp_path):
     assert (a.id, a.max_attempts, a.seed) == ("01-a", 3, ())
     assert (b.id, b.max_attempts, b.text) == ("02-b", 5, "Fix it.")
     assert b.seed == (("shop/cart.py", b"x = 1\n"),)
+
+
+def test_check_script_keeps_stdin_away_from_the_check(tmp_path):
+    # DP-463: a command that reads stdin must not swallow the rest of the check.
+    (tmp_path / "tasks" / "t").mkdir(parents=True)
+    task = codr_agent.CodrTask(id="t", text="", check="cat\necho after\nexit 3", max_attempts=1)
+    out = real_bash(tmp_path)(codr_agent.check_script(task, 30))
+    assert parse_check(out) == (False, "after\n")
+    assert out.endswith("__DERPR_EXIT=3\n")
 
 
 def test_parse_check():
