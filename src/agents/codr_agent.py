@@ -28,6 +28,7 @@ import io
 import json
 import logging
 import re
+import shlex
 import tarfile
 import time
 from collections import deque
@@ -247,9 +248,12 @@ async def seed_task(client: OpencodeClient, task: CodrTask) -> None:
 
 
 def check_script(task: CodrTask, timeout_s: int) -> str:
+    # The check travels as an argument, not on stdin: fed as a heredoc, any
+    # command in it that reads stdin swallows the lines after it, and the check
+    # exits 0 without having run them (DP-463).
     return (
         f"cd -- 'tasks/{task.id}' 2>/dev/null || {{ echo 'no tasks/{task.id} folder in the workspace'; exit 1; }}\n"
-        f"timeout {int(timeout_s)} bash <<'DERPR_CHECK'\n{task.check.rstrip()}\nDERPR_CHECK\n"
+        f"timeout {int(timeout_s)} bash -c {shlex.quote(task.check.rstrip())} </dev/null\n"
         f'echo "{_EXIT_MARK}$?"\n'
     )
 
