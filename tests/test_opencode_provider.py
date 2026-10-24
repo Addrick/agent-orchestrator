@@ -7,7 +7,10 @@
 import asyncio
 import base64
 import itertools
+import os
 import re
+import shutil
+import subprocess
 
 import pytest
 from aiohttp import web
@@ -37,6 +40,7 @@ class FakeOpencode:
         self.reply_delay = 0.0
         self.scripts = []       # (directory, script) run through /shell
         self.shell_output = ""  # what a non-mkdir script prints
+        self.file_root = None   # local Path that /file/content serves from
         self._ids = itertools.count(1)
 
     def add(self, sid, role, parts, **info):
@@ -65,6 +69,14 @@ class FakeOpencode:
                 {"name": n, "path": n, "absolute": f"{ROOT}/{n}", "type": t, "ignored": False}
                 for n, t in self.dirs.items()
             ])
+        if path == "/file/content":
+            data = (self.file_root / request.query["path"]).read_bytes()
+            try:
+                # Like opencode 1.19: a text file loses its trailing newlines.
+                return web.json_response({"type": "text", "content": data.decode().rstrip("\n")})
+            except UnicodeDecodeError:
+                return web.json_response({"type": "binary", "encoding": "base64",
+                                          "content": base64.b64encode(data).decode()})
         if path == "/session" and request.method == "POST":
             sid = f"ses_{next(self._ids)}"
             self.sessions[sid] = {"id": sid, "directory": directory, "title": body.get("title"),
@@ -131,6 +143,20 @@ class FakeOpencode:
 
     def posts(self):
         return [c for c in self.calls if c[0] == "POST" and c[1].endswith("/message")]
+
+
+def real_bash(cwd):
+    """A `shell_output` that runs each script in a real bash in `cwd`, for the
+    tests whose point is what the script does."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("needs bash")
+
+    def run(script):
+        # On stdin, as `run_shell` sends it (and a Windows command line caps at 32K).
+        done = subprocess.run([bash], input=script, cwd=cwd, capture_output=True, text=True)
+        return done.stdout + done.stderr
+    return run
 
 
 @pytest.fixture
@@ -385,3 +411,44 @@ async def test_run_shell_sends_the_script_base64_encoded(fake):
     shell_call = next(c for c in fake.calls if c[1].endswith("/shell"))
     assert "$" not in shell_call[3]["command"]
     assert not fake.sessions                                   # throwaway session deleted
+
+
+async def test_write_file_sends_any_size_in_pieces_under_the_argument_cap(fake, tmp_path):
+    """One shell command over 128 KiB is an HTTP 500 on the real server, so a
+    big file must arrive in several, and land whole (DP-455)."""
+    from aiohttp import ClientSession
+    fake.shell_output = real_bash(tmp_path)
+    data = os.urandom(300_000)
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        client = opencode.OpencodeClient(http, f"{ROOT}/codr")
+        await client.write_file("sub/dir/big.bin", data)
+    assert (tmp_path / "sub/dir/big.bin").read_bytes() == data
+    assert not (tmp_path / "sub/dir/big.bin.derpr-part").exists()
+    commands = [c[3]["command"] for c in fake.calls if c[1].endswith("/shell")]
+    assert len(commands) > 5 and max(len(c) for c in commands) < 128 * 1024
+
+
+async def test_write_file_raises_when_the_written_file_does_not_match(fake):
+    """The shell reports a failed command as output, so a write that did not
+    land must be caught by the check, not trusted."""
+    from aiohttp import ClientSession
+    fake.shell_output = "sha256sum: No space left on device\n"
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        client = opencode.OpencodeClient(http, f"{ROOT}/codr")
+        with pytest.raises(LLMCommunicationError, match="writing big.bin failed"):
+            await client.write_file("big.bin", b"x" * 10)
+
+
+async def test_read_file_returns_any_file_byte_for_byte(fake, tmp_path):
+    """opencode strips a text file's trailing newlines, so a read that went
+    through its text path would be short."""
+    from aiohttp import ClientSession
+    fake.shell_output, fake.file_root = real_bash(tmp_path), tmp_path
+    binary, text = bytes([0, 255]) + b"bundle", "café\n\n".encode()
+    (tmp_path / "out.bundle").write_bytes(binary)
+    (tmp_path / "notes.md").write_bytes(text)
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        client = opencode.OpencodeClient(http, f"{ROOT}/codr")
+        assert await client.read_file("out.bundle") == binary
+        assert await client.read_file("notes.md") == text
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.md", "out.bundle"]
