@@ -775,7 +775,7 @@ internet (a repo at a given commit, packages, data) is prepared somewhere else
 and handed in, and codr's finished work can be pulled back out. DERPR is the
 only thing that talks to both:
 
-- **The setup box** (`stagr`, a second VM) can't reach the LAN: not CT100, not
+- **The setup box** (`stagr-vm`, a second VM; codr's is `codr-vm`) can't reach the LAN: not CT100, not
   Proxmox, not dt21, not anything else at home. Only DERPR (and dt21, for SSH)
   can connect to it. Nothing is kept there (no keys, no `.env`, no DERPR data),
   so anything run there can only hurt the setup box itself.

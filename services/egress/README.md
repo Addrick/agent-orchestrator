@@ -1,6 +1,6 @@
 # `services/egress` — the stagr setup VM's way out (DP-456)
 
-The setup VM (`stagr`, VM201 on host `derpr`, `10.0.0.76`) has no LAN and no
+The setup VM (`stagr-vm`, VM201 on host `derpr`, `10.0.0.76`) has no LAN and no
 direct internet. Its only route out is tinyproxy in the egress container (CT110 on
 `r9700`, `10.0.0.77:8888`), which admits only allowlisted domains. User-facing
 behaviour: `docs/user_guide.md`, "Preparing codr's work".
