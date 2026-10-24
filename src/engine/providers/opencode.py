@@ -164,9 +164,12 @@ def session_title(persona_name: Optional[str]) -> str:
     return f"{SESSION_TITLE_PREFIX}{persona_name or workspace_slug(persona_name)}"
 
 
-def auth_headers() -> Dict[str, str]:
+def auth_headers(password: Optional[str] = None) -> Dict[str, str]:
+    """Basic auth for an opencode server: codr's sandbox by default, or the one
+    whose password is given (stagr, DP-456)."""
     return {"Authorization": aiohttp.encode_basic_auth(
-        global_config.OPENCODE_SERVER_USERNAME, global_config.OPENCODE_SERVER_PASSWORD)}
+        global_config.OPENCODE_SERVER_USERNAME,
+        global_config.OPENCODE_SERVER_PASSWORD if password is None else password)}
 
 
 def part_meta(part: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,9 +242,11 @@ def _has_key(message: Dict[str, Any], key: str) -> bool:
 class OpencodeClient:
     """The few opencode HTTP calls derpr makes, scoped to one directory."""
 
-    def __init__(self, http: aiohttp.ClientSession, directory: str) -> None:
+    def __init__(self, http: aiohttp.ClientSession, directory: str,
+                 base_url: Optional[str] = None) -> None:
         self._http = http
-        self._base = global_config.OPENCODE_SERVER_URL
+        # codr's sandbox unless told otherwise (stagr, DP-456).
+        self._base = base_url or global_config.OPENCODE_SERVER_URL
         self.directory = directory
 
     async def request(self, method: str, path: str, *, json_body: Any = None,

@@ -1,0 +1,83 @@
+#!/bin/bash
+# egress-ctl — the domain allowlist of the stagr egress proxy (DP-456).
+#
+# Runs INSIDE the egress container (CT110 on r9700), installed at
+# /usr/local/sbin/egress-ctl. The setup VM (stagr, 10.0.0.76) reaches the
+# internet only through tinyproxy here, and tinyproxy admits only the domains
+# in its filter file, which this script writes from two lists:
+#
+#   /etc/egress/default.list   domains always allowed (GitHub, PyPI), one per line
+#   /var/lib/egress/granted    "<domain> <expiry epoch>" lines, one per approval
+#
+# derpr adds a grant through the node verb `derpr-egress allow`, which runs
+# `pct exec 110 -- egress-ctl allow <domain> <minutes>` after a human approved
+# the request. egress-refresh.timer runs `refresh` every minute to drop expired
+# grants. A domain admits itself and its subdomains.
+#
+#   egress-ctl allow <domain> <minutes>   grant (or extend) until now + minutes
+#   egress-ctl list                       defaults, then live grants with expiry
+#   egress-ctl refresh                    prune expired grants, rewrite the filter
+set -euo pipefail
+
+defaults=/etc/egress/default.list
+granted=/var/lib/egress/granted
+filter=/etc/tinyproxy/filter
+# Mirrors the gate in services/pve/derpr-egress; checked again here so this
+# script is safe on its own. The last label starts with a letter: no IP literals.
+domain_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+max_minutes=1440
+
+die() { echo "egress-ctl: $1" >&2; exit 1; }
+
+valid_domain() { [ "${#1}" -le 253 ] && [[ "$1" =~ $domain_re ]]; }
+
+prune() {
+  local now; now=$(date +%s)
+  mkdir -p "$(dirname "$granted")"; touch "$granted"
+  awk -v now="$now" '$2 > now' "$granted" > "$granted.new"
+  mv "$granted.new" "$granted"
+}
+
+write_filter() {
+  # One extended regex per domain: the domain itself or any subdomain of it.
+  { grep -Ev '^[[:space:]]*(#|$)' "$defaults"; awk '{print $1}' "$granted"; } \
+    | sort -u \
+    | while read -r d; do
+        valid_domain "$d" || continue
+        printf '(^|\\.)%s$\n' "${d//./\\.}"
+      done > "$filter.new"
+  if cmp -s "$filter.new" "$filter"; then
+    rm -f "$filter.new"
+  else
+    mv "$filter.new" "$filter"
+    systemctl restart tinyproxy
+  fi
+}
+
+case "${1:-}" in
+  allow)
+    [ "$#" -eq 3 ] || die "usage: egress-ctl allow <domain> <minutes>"
+    d="${2,,}"; m="$3"
+    valid_domain "$d" || die "not a domain name: $2"
+    [[ "$m" =~ ^[0-9]+$ ]] && [ "$m" -ge 1 ] && [ "$m" -le "$max_minutes" ] \
+      || die "minutes must be 1-$max_minutes"
+    prune
+    expiry=$(( $(date +%s) + m * 60 ))
+    awk -v d="$d" '$1 != d' "$granted" > "$granted.new"
+    echo "$d $expiry" >> "$granted.new"
+    mv "$granted.new" "$granted"
+    write_filter
+    echo "allowed $d until $(date -d "@$expiry" '+%Y-%m-%d %H:%M %Z')"
+    ;;
+  list)
+    prune
+    echo "default:"; grep -Ev '^[[:space:]]*(#|$)' "$defaults" | sed 's/^/  /'
+    echo "granted:"
+    while read -r d e; do echo "  $d until $(date -d "@$e" '+%Y-%m-%d %H:%M %Z')"; done < "$granted"
+    ;;
+  refresh)
+    prune
+    write_filter
+    ;;
+  *) die "usage: egress-ctl {allow <domain> <minutes>|list|refresh}" ;;
+esac

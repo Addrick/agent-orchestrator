@@ -33,6 +33,7 @@ NODE_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("derpr-model-tier", "/usr/local/sbin/derpr-model-tier"),
     ("koboldcpp-model.service.in", "/usr/local/share/derpr/koboldcpp-model.service.in"),
     ("gguf_header.py", "/usr/local/share/derpr/gguf_header.py"),
+    ("derpr-egress", "/usr/local/sbin/derpr-egress"),
 )
 
 #: ``COPY . .`` puts the repo at the image root, so the shipped copies sit

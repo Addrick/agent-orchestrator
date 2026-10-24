@@ -1,0 +1,11 @@
+# Domains the stagr setup VM may always reach through the egress proxy
+# (DP-456). Each line admits the domain and its subdomains. Installed at
+# /etc/egress/default.list in CT110; run `egress-ctl refresh` after editing.
+# Anything else needs an approved request_web_access grant.
+github.com
+githubusercontent.com
+pypi.org
+pythonhosted.org
+# Debian packages, so the setup agent can apt install on its own box.
+deb.debian.org
+security.debian.org

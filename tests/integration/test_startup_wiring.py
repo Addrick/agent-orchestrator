@@ -42,7 +42,7 @@ def wired_system():
             prompt="test", enabled_tools=["*"],
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             service_bindings=["zammad", "agents", "fixr", "voice", "proxmox",
-                              "huggingface", "mcp", "proposals"],
+                              "huggingface", "stagr", "mcp", "proposals"],
         ),
     }
 
@@ -75,6 +75,10 @@ def wired_system():
     # HF_TOOLS_ENABLED so the wiring contract holds.
     from src.huggingface import HuggingFaceIntegration
     chat_system.register_service(HuggingFaceIntegration())
+
+    # DP-456 stagr setup-VM tools (behind the "stagr" binding)
+    from src.stagr import StagrIntegration
+    chat_system.register_service(StagrIntegration())
 
     # DP-268 MCP client subsystem (management tools behind the "mcp" binding)
     from src.tools.mcp_client import MCPClientManager

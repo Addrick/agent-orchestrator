@@ -405,6 +405,13 @@ async def main() -> None:
         chat_system=bot, notification_router=notification_router)
     bot.register_service(hf_integration)
 
+    # 7.3c Register the stagr setup-VM tools (DP-456). Registration-only. A shell
+    # on the setup VM (a second opencode server) plus gated transfers into and out
+    # of codr's sandbox and grants on the egress allowlist, the latter over the
+    # same node gate as 7.3. Personas opt in via service_bindings: ["stagr"].
+    from src.stagr import StagrIntegration
+    bot.register_service(StagrIntegration())
+
     # 7.4 Register the MCP client subsystem (DP-268). main.py owns the manager
     # (sessions/lifecycle — voice precedent); the integration only registers
     # the add/remove/list management tools behind the "mcp" binding. Registers

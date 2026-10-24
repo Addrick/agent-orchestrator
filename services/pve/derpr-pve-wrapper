@@ -57,6 +57,9 @@ installer='/usr/local/sbin/derpr-model-install'
 # component ever crosses this boundary.
 tierer='/usr/local/sbin/derpr-model-tier'
 gbase='^[A-Za-z0-9._-]+\.gguf$'
+# DP-456 stagr web access.
+egress='/usr/local/sbin/derpr-egress'
+domain='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 
 allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
 
@@ -64,10 +67,10 @@ case "${a[0]:-}" in
   uptime) [ "$n" -eq 1 ] && allow ;;
 
   # DP-418: derpr's startup drift check hashes the deployed artifacts. One
-  # exact argv -- these five paths, this order (src/proxmox/artifacts.py
+  # exact argv -- these six paths, this order (src/proxmox/artifacts.py
   # NODE_ARTIFACTS) -- so it can read nothing else on the node.
   sha256sum)
-    [ "$cmd" = "sha256sum /usr/local/bin/derpr-pve-wrapper /usr/local/sbin/derpr-model-install /usr/local/sbin/derpr-model-tier /usr/local/share/derpr/koboldcpp-model.service.in /usr/local/share/derpr/gguf_header.py" ] && allow ;;
+    [ "$cmd" = "sha256sum /usr/local/bin/derpr-pve-wrapper /usr/local/sbin/derpr-model-install /usr/local/sbin/derpr-model-tier /usr/local/share/derpr/koboldcpp-model.service.in /usr/local/share/derpr/gguf_header.py /usr/local/sbin/derpr-egress" ] && allow ;;
   reboot) [ "$n" -eq 1 ] && allow ;;
 
   # DP-265: the ONE node-side verb for HuggingFace model provisioning. `run` is
@@ -92,6 +95,14 @@ case "${a[0]:-}" in
     if [ "${a[1]:-}" = promote ] && [ "$n" -eq 4 ] \
        && [[ "${a[2]}" =~ $gbase ]] && [[ "${a[2]}" != *".."* ]] \
        && [[ "${a[3]}" =~ $jobid ]]; then allow; fi
+    ;;
+
+  # DP-456: the stagr egress allowlist. The verb re-checks its arguments and
+  # forwards them into the egress container; `domain` mirrors its gate.
+  "$egress")
+    if [ "${a[1]:-}" = allow ] && [ "$n" -eq 4 ] && [ "${#a[2]}" -le 253 ] \
+       && [[ "${a[2]}" =~ $domain ]] && [[ "${a[3]}" =~ $num ]]; then allow; fi
+    if [ "${a[1]:-}" = list ] && [ "$n" -eq 2 ]; then allow; fi
     ;;
 
   pct|qm)
