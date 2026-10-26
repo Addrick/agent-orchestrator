@@ -160,7 +160,7 @@ async def test_list_web_access_shows_stagrs_switches_and_allowlist(node):
     node.approved["stagr"] = ["files.example.org"]
     result = await _handler(node)._list_web_access()
     assert result["lan"] == "off" and result["wan"] == "on"
-    assert "files.example.org" in result["allowlist"]
+    assert result["allowlist"].splitlines()[-1].strip() == "files.example.org"
     assert {c[1] for c in node.calls} == {"stagr"}
 
 
