@@ -417,8 +417,9 @@ export function InfraPanel() {
                     </tbody>
                   </table>
                   {[...b.lan_connections.map((c) => `LAN ${c}`), ...b.wan_connections.map((c) => `WAN ${c}`)].map(
-                    (c) => (
-                      <div key={c} className="dimrow" style={{ fontSize: 11 }}>
+                    (c, i) => (
+                      // Index key: two tunnels to one host print the same line.
+                      <div key={i} className="dimrow" style={{ fontSize: 11 }}>
                         open: {c}
                       </div>
                     ),

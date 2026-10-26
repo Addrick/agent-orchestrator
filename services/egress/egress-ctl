@@ -46,19 +46,26 @@ filter="$run/$box.filter"
 logfile="/var/log/tinyproxy/$box.log"
 
 # One run per box at a time: `allow` rewrites the approved list through a temp file.
+# Not for `filter`: it is the unit's ExecStartPre, run while `on` holds this
+# lock and waits in `systemctl start`, so taking it there would deadlock.
 mkdir -p "$run"
-exec 9>"$run/$box.lock"
-flock 9
+if [ "${2:-}" != filter ]; then
+  exec 9>"$run/$box.lock"
+  flock 9
+fi
 
 valid_host() { [ "${#1}" -le 253 ] && [[ "$1" =~ $host_re ]]; }
 active() { systemctl is-active --quiet "$unit"; }
+# The default list without comments and blank lines. sed, not grep: grep exits 1
+# on a list with no entries, which pipefail turns into a failed `on` / `list`.
+defaults_list() { sed -E '/^[[:space:]]*(#|$)/d' "$defaults"; }
 
 write_filter() {
   touch "$approved"
   {
     # Defaults: the domain itself or any subdomain of it; "=host" exactly that
     # host. (`if`, not `&&`: a skipped last line must not fail the loop.)
-    grep -Ev '^[[:space:]]*(#|$)' "$defaults" | while read -r d; do
+    defaults_list | while read -r d; do
       if [ "${d:0:1}" = "=" ]; then
         if valid_host "${d:1}"; then printf '^%s$\n' "${d:1}" | sed 's/\./\\./g'; fi
       elif valid_host "$d"; then
@@ -110,7 +117,7 @@ case "${2:-}" in
     ;;
   list)
     [ "$#" -eq 2 ] || usage
-    echo "default:"; grep -Ev '^[[:space:]]*(#|$)' "$defaults" | sed 's/^/  /'
+    echo "default:"; defaults_list | sed 's/^/  /'
     echo "approved:"
     [ -f "$approved" ] && sed 's/^/  /' "$approved"
     true

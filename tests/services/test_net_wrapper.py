@@ -89,6 +89,9 @@ def emitted(monkeypatch) -> List[List[str]]:
         await handler._list_web_access()
         for box in ("codr", "stagr"):
             await handler._set_sandbox_net(box, "lan", "on", confirm=True)
+        # With LAN on, status also asks for the open connections.
+        await handler._sandbox_net_status()
+        for box in ("codr", "stagr"):
             await handler._set_sandbox_net(box, "lan", "off", confirm=True)
         await handler._request_network("lan", "x")
         await check_node_artifacts(net, NET_SERVICES_DIR, NET_NODE_ARTIFACTS)  # type: ignore[arg-type]

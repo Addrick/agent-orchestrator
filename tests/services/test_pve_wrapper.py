@@ -193,9 +193,11 @@ def emitted(monkeypatch) -> List[List[str]]:
         stagr = StagrToolHandler(recorder, NullRunner())  # type: ignore[arg-type]
         await stagr._list_web_access()
         await stagr._request_web_access("files.example.org", "test")
-        await stagr._sandbox_net_status()
         for box in ("codr", "stagr"):
             await stagr._set_sandbox_net(box, "wan", "on", confirm=True)
+        # With WAN on, status also asks for the open tunnels.
+        await stagr._sandbox_net_status()
+        for box in ("codr", "stagr"):
             await stagr._set_sandbox_net(box, "wan", "off", confirm=True)
 
     asyncio.run(drive())

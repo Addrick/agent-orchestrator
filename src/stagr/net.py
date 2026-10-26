@@ -106,8 +106,14 @@ class SandboxNet:
         errors = {k: r.get("message") for k, r in (("lan", lan), ("wan", wan), ("allowlist", allow))
                   if r.get("status") == "error"}
         if detail:
-            lan_c, wan_c, log = await asyncio.gather(
-                self._conns(box, "lan"), self._conns(box, "wan"), self._egress(box, "log"))
+            # A switch read as off has nothing open (both verbs print nothing
+            # then), so skip its SSH round trip; an unreadable one is still asked.
+            async def conns(zone: str) -> Dict[str, Any]:
+                if out[zone] is False:
+                    return {"status": "ok", "connections": []}
+                return await self._conns(box, zone)
+
+            lan_c, wan_c, log = await asyncio.gather(conns("lan"), conns("wan"), self._egress(box, "log"))
             out["lan_connections"] = lan_c.get("connections", [])
             out["wan_connections"] = wan_c.get("connections", [])
             out["log"] = _lines(log) if log.get("status") == "ok" else []
