@@ -24,7 +24,7 @@ every argv derpr emits through it.
   always-on rules: in from dt21/CT100 to opencode, out to the inference servers
   (codr) and to its own egress proxy port on `10.0.0.77` (both). The old
   `agent-internet` group (direct internet) is gone: WAN is the proxy.
-- `nf_conntrack_tcp_loose=0` in `/etc/sysctl.d/90-agent-net.conf`. With `1`, a
+- `nf_conntrack_tcp_loose=0` in `/etc/sysctl.d/90-dp465-conntrack.conf`. With `1`, a
   deleted flow is re-created by its next packet and `off` cuts nothing.
 
 ## Deploying

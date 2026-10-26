@@ -48,7 +48,7 @@ state() { if grep -qxF "$tag" "$fw"; then echo on; else echo off; fi; }
 # outside the group). `cut` deletes them. ESTABLISHED is accepted before any
 # rule, so without this a connection opened while LAN was on would outlive the
 # switch. The delete only stops traffic with nf_conntrack_tcp_loose=0 (set in
-# /etc/sysctl.d/90-agent-net.conf); with 1, the next packet re-creates the entry.
+# /etc/sysctl.d/90-dp465-conntrack.conf); with 1, the next packet re-creates the entry.
 flows() {
   python3 - "$1" "$fw" "$ip" <<'PY'
 import ipaddress, re, subprocess, sys

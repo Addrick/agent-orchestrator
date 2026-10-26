@@ -61,6 +61,8 @@ active() { systemctl is-active --quiet "$unit"; }
 defaults_list() { sed -E '/^[[:space:]]*(#|$)/d' "$defaults"; }
 
 write_filter() {
+  # local: `allow` keeps its host in the global $h and reports it after this.
+  local d h
   touch "$approved"
   {
     # Defaults: the domain itself or any subdomain of it; "=host" exactly that
