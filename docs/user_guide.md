@@ -814,7 +814,9 @@ only thing that talks to both:
     are sure. Confirm, and they are cut on the spot; a running download stops.
     With nothing open, the switch just goes off.
   - **LAN and WAN both on** for one box warns you before the second goes on: the
-    box could then carry anything from home to the internet.
+    box could then carry anything from home to the internet. In the panel the
+    warning is a confirm bar; for the setup agent's `request_network` it is a
+    ⚠️ line in the approval prompt itself, so you see it before you approve.
   - **The log**: every connection the proxy passed (box, host, time) and every
     refusal, in the same panel.
   - The setup agent can **ask** for a switch with `request_network`, giving its

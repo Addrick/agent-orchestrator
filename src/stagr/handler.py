@@ -140,7 +140,7 @@ class StagrToolHandler:
         manager.register("stagr_shell", self._stagr_shell)
         manager.register("list_web_access", self._list_web_access)
         manager.register("request_web_access", self._request_web_access)
-        manager.register("request_network", self._request_network)
+        manager.register("request_network", self._request_network, enricher=self._request_network_warning)
         manager.register("sandbox_net_status", self._sandbox_net_status)
         manager.register("set_sandbox_net", self._set_sandbox_net)
         manager.register("codr_shell", self._codr_shell)
@@ -224,9 +224,16 @@ class StagrToolHandler:
             logger.info("stagr: web access to %s approved (%s)", host or domain, reason)
         return result
 
+    async def _request_network_warning(self, zone: str = "", **_: Any) -> Optional[str]:
+        """The approval prompt's enrichment: the LAN+WAN warning when the other
+        switch is already on, so Adam sees it before he approves."""
+        zone = (zone or "").strip().lower()
+        return await self._net.both_on_warning(STAGR_BOX, zone) if zone in ZONES else None
+
     async def _request_network(self, zone: str, reason: str = "") -> Dict[str, Any]:
         """Runs only once the operator approved it, so the approval is the
-        confirmation: a LAN+WAN warning does not stop it a second time."""
+        confirmation: the prompt carried the LAN+WAN warning (the enricher
+        above), and it does not stop the call a second time."""
         zone = (zone or "").strip().lower()
         if zone not in ZONES:
             return _error("zone must be lan or wan.")

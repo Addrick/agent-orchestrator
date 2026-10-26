@@ -132,6 +132,46 @@ async def test_request_network_turns_stagrs_switch_on_and_only_stagrs(node):
     assert (await _handler(node)._request_network("usb", "x"))["status"] == "error"
 
 
+async def test_request_networks_approval_prompt_warns_when_the_other_switch_is_on(node):
+    """The warning goes in the approval prompt (the tool's enricher), so Adam
+    sees it before he approves rather than never."""
+    handler = _handler(node)
+    assert await handler._request_network_warning(zone="lan", reason="dt21") is None
+    node.on[("stagr", "wan")] = True
+    warning = await handler._request_network_warning(zone="LAN", reason="dt21")
+    assert warning and "both on" in warning and "WAN is already on" in warning
+    assert not node.on.get(("stagr", "lan")), "the warning must change nothing"
+    assert await handler._request_network_warning(zone="usb") is None
+
+
+async def test_request_networks_prompt_warns_when_the_other_switch_cannot_be_read(node):
+    class Down(FakeNode):
+        async def run(self, argv):
+            if argv[0] == EGRESS_VERB:
+                return SSHResult(255, "", "unreachable")
+            return await super().run(argv)
+    down = Down()
+    warning = await StagrToolHandler(down, down)._request_network_warning(zone="lan")  # type: ignore[arg-type]
+    assert warning and "may be on" in warning
+
+
+async def test_concurrent_flips_cannot_both_skip_the_both_on_check(node):
+    """The check and the flip run under one per-box lock, so of two callers
+    turning a box's two switches on at once, the second sees the first's."""
+    import asyncio
+
+    class Slow(FakeNode):
+        async def run(self, argv):
+            await asyncio.sleep(0)
+            return await super().run(argv)
+    slow = Slow()
+    handler = StagrToolHandler(slow, slow)  # type: ignore[arg-type]
+    a, b = await asyncio.gather(handler._set_sandbox_net("stagr", "lan", "on"),
+                                handler._set_sandbox_net("stagr", "wan", "on"))
+    assert sorted([a["status"], b["status"]]) == ["confirm", "ok"]
+    assert sum(bool(slow.on.get(("stagr", z))) for z in ("lan", "wan")) == 1
+
+
 async def test_web_access_needs_wan_on_and_sends_only_a_checked_host(node):
     handler = _handler(node)
     off = await handler._request_web_access("files.example.org", "docs")

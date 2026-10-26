@@ -77,10 +77,18 @@ apply_fw() {
   pve-firewall restart
 }
 
+# One flip at a time per box: two concurrent on/off runs would race the sed on
+# /etc/pve and the firewall reload. Reads take no lock.
+lock() {
+  exec 9>"/run/lock/agent-net-$1.lock"
+  flock -w 30 9 || die "another switch of $1's LAN is still running"
+}
+
 case "$3" in
   status) echo "lan: $(state)" ;;
   conns)  [ "$(state)" = on ] && flows list || true ;;
   on)
+    lock "$1"
     if [ "$(state)" = off ]; then
       sed -i "s/^|$tag\$/$tag/" "$fw"
       apply_fw
@@ -88,13 +96,16 @@ case "$3" in
     echo "lan: on"
     ;;
   off)
+    lock "$1"
     if [ "$(state)" = on ]; then
       sed -i "s/^$tag\$/|$tag/" "$fw"
       apply_fw
     fi
     # Cut whatever is left even if it was already off: a flow can only be
-    # left over from a time it was on.
-    flows cut | sed 's/^/closed /'
+    # left over from a time it was on. The firewall goes off first, even if
+    # the cut will fail (no conntrack): off must fail closed, and the
+    # pre-start hook relies on it. A failed cut then says exactly that.
+    flows cut | sed 's/^/closed /' || die "LAN is off, but cutting its open connections failed"
     echo "lan: off"
     ;;
   *) usage ;;

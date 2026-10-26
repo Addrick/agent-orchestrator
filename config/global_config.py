@@ -747,8 +747,10 @@ PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
 # services/sandbox-net/derpr-net-wrapper, which admits only the LAN switch
 # (`agent-net`) and its drift check. Same user, timeout and PVE_TOOLS_ENABLED
 # switch as the first; neither key reaches the other host.
-PVE_NET_SSH_HOST = os.environ.get("PVE_NET_SSH_HOST", "10.0.0.74")
-PVE_NET_SSH_KEY = os.environ.get("PVE_NET_SSH_KEY", "/run/secrets/pve_derpr_net")
+# `or`, not a get() default: SSHRunner falls back to PVE_SSH_* on an empty
+# value, so `PVE_NET_SSH_HOST=` would send LAN calls to the first host.
+PVE_NET_SSH_HOST = os.environ.get("PVE_NET_SSH_HOST") or "10.0.0.74"
+PVE_NET_SSH_KEY = os.environ.get("PVE_NET_SSH_KEY") or "/run/secrets/pve_derpr_net"
 
 # HuggingFace model provisioning (DP-265). Read-only HF Hub API searches plus a
 # parked `install_model` that hands ONE node-side script the repo/file/name and

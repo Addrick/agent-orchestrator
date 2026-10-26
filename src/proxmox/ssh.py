@@ -43,25 +43,27 @@ _FORBIDDEN = set(";&|`$<>(){}[]!*?~\n\r\"'\\ ")
 #: cap belongs at the transport rather than at each call site.
 MAX_INFLIGHT_SSH = 4
 
-#: The cap is a property of *the node's sshd*, not of one handler, so it is held
-#: here and shared by every handler that talks to the box (proxmox and
+#: The cap is a property of *a node's sshd*, not of one handler, so it is held
+#: here and shared by every handler that talks to that box (proxmox and
 #: huggingface both do). It used to be a per-instance ``asyncio.Semaphore`` on
 #: ``ProxmoxToolHandler``, so even two proxmox handlers would not have shared it.
+#: One cap per host (DP-465 added a second, host ``derpr``): each sshd has its
+#: own MaxStartups, so calls to one must not spend the other's slots.
 #: Keyed by event loop rather than being a single module global:
 #: ``asyncio.Semaphore`` binds to the first loop that awaits it and raises on a
 #: second one, which would make every test after the first fail.
-_INFLIGHT: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+_INFLIGHT: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = (
     weakref.WeakKeyDictionary()
 )
 
 
-def inflight_semaphore() -> asyncio.Semaphore:
-    """The running loop's SSH concurrency gate, created on first use."""
-    loop = asyncio.get_running_loop()
-    sem = _INFLIGHT.get(loop)
+def inflight_semaphore(host: str = "") -> asyncio.Semaphore:
+    """The running loop's SSH concurrency gate for ``host``, created on first use."""
+    per_host = _INFLIGHT.setdefault(asyncio.get_running_loop(), {})
+    sem = per_host.get(host)
     if sem is None:
         sem = asyncio.Semaphore(MAX_INFLIGHT_SSH)
-        _INFLIGHT[loop] = sem
+        per_host[host] = sem
     return sem
 
 
@@ -104,6 +106,10 @@ class SSHRunner:
         self._user = user or global_config.PVE_SSH_USER
         self._key = key_path or global_config.PVE_SSH_KEY
         self._timeout = timeout if timeout is not None else global_config.PVE_SSH_TIMEOUT
+
+    @property
+    def host(self) -> str:
+        return self._host
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
         """Run ``argv`` on the node. Raises SSHError on transport failure/timeout.
@@ -178,7 +184,7 @@ async def run_node_command(
             ),
         }
     try:
-        async with inflight_semaphore():
+        async with inflight_semaphore(getattr(runner, "host", "")):
             res = await runner.run(argv)
     except SSHError as e:
         return {"status": "error", "message": f"ssh failed: {e}"}

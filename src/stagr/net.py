@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import weakref
 from typing import Any, Dict, List, Optional
 
 from src.proxmox.ssh import SSHRunner, run_node_command
@@ -36,8 +37,30 @@ HOST_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0
 _SWITCH_RE = re.compile(r"^(lan|wan): (on|off)$", re.M)
 
 
+# One lock per box, held across a switch's check and its flip, so two callers
+# (the panel and an approved request_network) cannot both read the other switch
+# as off and both turn theirs on. Keyed by event loop like ssh._INFLIGHT.
+_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _box_lock(box: str) -> asyncio.Lock:
+    return _LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(box, asyncio.Lock())
+
+
 def _error(message: str) -> Dict[str, Any]:
     return {"status": "error", "message": message}
+
+
+def _other(zone: str) -> str:
+    return "wan" if zone == "lan" else "lan"
+
+
+def _both_on_message(box: str, zone: str) -> str:
+    return (f"⚠️ {box}'s {_other(zone).upper()} is already on: turning {zone.upper()} on too puts "
+            "LAN and WAN both on, and the box can then carry anything from the home network "
+            "to the internet.")
 
 
 def normalize_host(host: str) -> Optional[str]:
@@ -138,21 +161,32 @@ class SandboxNet:
 
     async def _turn_on_check(self, box: str, zone: str) -> Optional[Dict[str, Any]]:
         """The confirm answer (or error) when going on would put LAN and WAN on together."""
-        other = "wan" if zone == "lan" else "lan"
-        sibling = await self._switch(box, other)
+        sibling = await self._switch(box, _other(zone))
         if sibling.get("status") == "error":
             return sibling
         if not sibling["on"]:
             return None
-        return {"status": "confirm", "box": box, "zone": zone,
-                "message": f"{box}'s {other.upper()} is on: with both on, the box can carry "
-                           "anything from the home network to the internet."}
+        return {"status": "confirm", "box": box, "zone": zone, "message": _both_on_message(box, zone)}
+
+    async def both_on_warning(self, box: str, zone: str) -> Optional[str]:
+        """The LAN+WAN warning if turning ``zone`` on would put both on, for an
+        approval prompt. An unreadable sibling warns too: it may be on."""
+        held = await self._turn_on_check(box, zone)
+        if held is None:
+            return None
+        return held.get("message") if held.get("status") == "confirm" else (
+            f"{box}'s {_other(zone).upper()} could not be read, so it may be on: "
+            f"{held.get('message')}")
 
     async def set_switch(self, box: str, zone: str, on: bool, *, confirm: bool = False) -> Dict[str, Any]:
         if box not in BOXES:
             return _error(f"no such box: {box!r} (one of {', '.join(BOXES)}).")
         if zone not in ZONES:
             return _error(f"no such switch: {zone!r} (lan or wan).")
+        async with _box_lock(box):
+            return await self._set_switch(box, zone, on, confirm)
+
+    async def _set_switch(self, box: str, zone: str, on: bool, confirm: bool) -> Dict[str, Any]:
         current = await self._switch(box, zone)
         if current.get("status") == "error":
             return current
