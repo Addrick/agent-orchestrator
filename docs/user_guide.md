@@ -808,13 +808,16 @@ only thing that talks to both:
   workspace on `codr-vm`, **without approval**, so the setup agent can install
   what a task needs, check the environment, or debug a test that fails offline,
   without a round trip through codr. It is refused while codr is starting or
-  running a turn (any session in codr's workspace busy), and while it runs, codr
+  running a turn (any session in codr's workspace busy), and after a task turn
+  ends until its check has run (the next tick), and while it runs, codr
   starts nothing: the environment changes only between tasks, so a result still
   measures codr. codr's box is offline and can be rebuilt from a backup, so the
   worst a command there can do is cost a restore.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
-  back to any path on the setup box. Both need your approval. **Any `.git` is
+  back to any path on the setup box. Only `copy_from_codr` needs your approval:
+  `codr_shell` can already write any file into codr's box, so a gate on the copy
+  in would be for show. **Any `.git` is
   left behind** unless the call asks to keep it (`keep_git`), so a repo checked
   out before an upstream fix never carries the fix in its history. (Files can
   still give an answer away, such as a changelog entry or the fix's own test; the
@@ -829,7 +832,7 @@ only thing that talks to both:
 
 To give codr a real-repo task: ask stagr to prepare it (clone, check out the
 start commit, download wheels for what the tests need into the folder, run the
-tests the way codr will), approve the `copy_to_codr` into `tasks/<task>/`, and only then add the task's
+tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then add the task's
 `TASK.md` and `check.sh` to `config/codr_tasks/` under the same name. The codr
 agent starts a task as soon as its folder is in the queue, and its seeding never
 replaces files that are already there.
@@ -1500,7 +1503,7 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `list_web_access` | no | The proxy allowlist: defaults and live grants |
 | `request_web_access` | yes | Allow one more domain for 1-1440 minutes |
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
-| `copy_to_codr` | yes | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
+| `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)

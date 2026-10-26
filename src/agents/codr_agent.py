@@ -202,6 +202,20 @@ def validate_mcp(mcp: Any) -> None:
                 raise ValueError(f"{where}: a remote server needs `url`, an http(s) URL")
         elif not (set(entry) == {"enabled"} and isinstance(entry["enabled"], bool)):
             raise ValueError(f"{where}: `type` must be \"local\" or \"remote\" (or the entry only {{\"enabled\": bool}})")
+        _validate_mcp_options(where, entry)
+
+
+def _validate_mcp_options(where: str, entry: Dict[str, Any]) -> None:
+    """The optional fields opencode types; a wrong one fails the whole file too."""
+    if "enabled" in entry and not isinstance(entry["enabled"], bool):
+        raise ValueError(f"{where}: `enabled` must be true or false")
+    timeout = entry.get("timeout")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0):
+        raise ValueError(f"{where}: `timeout` must be a positive whole number of milliseconds")
+    for field in ("environment", "headers"):
+        value = entry.get(field)
+        if value is not None and not (isinstance(value, dict) and all(isinstance(v, str) for v in value.values())):
+            raise ValueError(f"{where}: `{field}` must map names to strings")
 
 
 def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:

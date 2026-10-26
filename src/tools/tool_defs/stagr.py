@@ -6,7 +6,8 @@ boundary, not a review of each command. ``codr_shell`` is ungated for the same
 reason (DP-462): codr's sandbox is offline and restorable, and the handler runs
 it only between codr's turns. Everything that crosses a boundary is
 ``is_write`` and parked for approval: widening the allowlist, and copying files
-into or out of codr's sandbox.
+out of codr's sandbox. ``copy_to_codr`` is not: ``codr_shell`` can already write
+any file there, so a gate on the copy would only be a convention.
 
 ``stagr_shell`` returns whatever the VM fetched from the web, and
 ``codr_shell`` whatever was copied in from there, so both are
@@ -127,13 +128,13 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
-        "is_write": True,
+        "is_write": False,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "copy_to_codr",
             "description": (
-                "Copy a file or folder from stagr into codr's workspace. Needs Adam's approval. "
+                "Copy a file or folder from stagr into codr's workspace. "
                 "Any .git is left behind unless keep_git is true, so no upstream history reaches "
                 "codr. Remove anything else that would give the answer away (a changelog entry, "
                 "a test from the fix) before copying. Never overwrites: refused if dest exists, "

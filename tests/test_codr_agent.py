@@ -189,6 +189,10 @@ def test_workspace_files_stop_the_offline_npm_install():
     ({"a": {"type": "remote", "url": "file:///etc/passwd"}}, "needs `url`"),
     ({"a": {"type": "stdio", "command": ["x"]}}, "`type` must be"),
     ({"a": {"enabled": "no"}}, "`type` must be"),
+    ({"a": {"type": "local", "command": ["x"], "enabled": "yes"}}, "`enabled` must be"),
+    ({"a": {"type": "local", "command": ["x"], "timeout": "5000"}}, "`timeout` must be"),
+    ({"a": {"type": "local", "command": ["x"], "environment": {"K": 1}}}, "`environment` must map"),
+    ({"a": {"type": "remote", "url": "https://h/m", "headers": ["x"]}}, "`headers` must map"),
 ])
 def test_a_malformed_mcp_entry_is_refused(mcp, error):
     with pytest.raises(ValueError, match=error):

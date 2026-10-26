@@ -13,7 +13,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from config import global_config
-from src.engine.providers.opencode import workspace_directory, workspace_lock
+from src.engine.providers.opencode import AUTO_FIELD, session_title, workspace_directory, workspace_lock
 from src.proxmox.ssh import SSHResult
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
@@ -119,6 +119,33 @@ async def test_codr_shell_is_refused_while_a_codr_turn_starts(boxes):
         result = await StagrToolHandler()._codr_shell("touch x")
     assert result["status"] == "error" and "idle" in result["message"]
     assert not (codr_dir / "x").exists()
+
+
+async def test_codr_shell_waits_for_an_ended_task_turn_to_be_checked(boxes):
+    """A task turn that has ended is idle, but its check runs on the agent's
+    next tick: changing the box before then changes what is measured."""
+    stagr, codr, stagr_dir, codr_dir = boxes
+    sid = "ses_task"
+    codr.sessions[sid] = {"id": sid, "directory": workspace_directory("codr")[2],
+                          "title": session_title("codr"), "time": {"created": 1, "updated": 2}}
+    codr.messages[sid] = []
+    start = codr.add(sid, "user", [{"type": "text", "text": "do 01",
+                                    "metadata": {AUTO_FIELD: {"task": "01", "attempt": 1}}}])
+    codr.add(sid, "assistant", [{"type": "text", "text": "done"}],
+             time={"created": 1, "completed": 2}, finish="stop")
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "error" and "not checked" in result["message"]
+    assert not (codr_dir / "x").exists()
+    start["parts"][0]["metadata"][AUTO_FIELD]["result"] = "pass"      # the check ran
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "ok" and (codr_dir / "x").exists()
+
+
+async def test_a_git_folder_is_not_silently_dropped(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    (stagr_dir / "repo" / ".git").mkdir(parents=True)
+    result = await StagrToolHandler()._copy_to_codr("repo/.git", "tools/g")
+    assert result["status"] == "error" and "keep_git" in result["message"]
 
 
 @pytest.mark.skipif(subprocess.run(["git", "--version"], capture_output=True).returncode != 0,
@@ -235,5 +262,5 @@ def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
     assert names == {t["function"]["name"] for t in STAGR_TOOLS} == set(persona["enabled_tools"])
     assert policy.explicit_overrides == [] and policy.validate_composition(exposed) == []
     assert {t["function"]["name"] for t in STAGR_TOOLS if t["is_write"]} == {
-        "request_web_access", "copy_to_codr", "copy_from_codr"}
+        "request_web_access", "copy_from_codr"}
     assert persona["origin_allowlist"] == []

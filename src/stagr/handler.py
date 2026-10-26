@@ -36,7 +36,7 @@ import aiohttp
 
 from config import global_config
 from src.engine.providers.opencode import (
-    OpencodeClient, auth_headers, workspace_directory, workspace_lock,
+    OpencodeClient, auth_headers, open_auto, session_title, workspace_directory, workspace_lock,
 )
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner, run_node_command
@@ -189,7 +189,8 @@ class StagrToolHandler:
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
                 codr = OpencodeClient(http, codr_dir)
                 if not await self._codr_idle(codr):
-                    return _error("codr is working; try again when it is idle.")
+                    return _error("codr is working, or its last task turn is not checked yet; "
+                                  "try again when it is idle.")
                 out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
         except LLMCommunicationError as e:
             return _error(f"codr shell failed: {e}")
@@ -226,16 +227,29 @@ class StagrToolHandler:
 
     @staticmethod
     async def _codr_idle(client: OpencodeClient) -> bool:
+        """Every session in codr's workspace idle, and no task turn of the codr
+        agent still open: a turn that has ended but whose check has not run
+        yet (the next tick runs it) is still under its task."""
         status = await client.request("GET", "/session/status") or {}
-        return all((v or {}).get("type", "idle") == "idle" for v in status.values())
+        if not all((v or {}).get("type", "idle") == "idle" for v in status.values()):
+            return False
+        title = session_title(CODR_PERSONA)
+        for s in await client.request("GET", "/session") or []:
+            if s.get("title") == title and not s.get("parentID"):
+                if any(open_auto(m) is not None for m in await client.turn_messages(str(s["id"]))):
+                    return False
+        return True
 
     @staticmethod
     async def _pack(client: OpencodeClient, path: str, *, keep_git: bool) -> bytes:
         """`path` (a file or folder) on that box as a tar.gz holding it under
         its own name."""
+        parent, name = posixpath.split(path)
+        if name == ".git" and not keep_git:
+            # --exclude=.git would drop the one thing asked for.
+            raise _Refused(f"{path} is a .git folder; set keep_git to copy it.")
         staged = f".stagr-out-{uuid.uuid4().hex[:8]}.tar.gz"
         exclude = "" if keep_git else "--exclude=.git "
-        parent, name = posixpath.split(path)
         out = await client.run_shell(
             f"[ -e {shlex.quote(path)} ] && tar -czf {staged} {exclude}-C {shlex.quote(parent or '.')} "
             f'-- {shlex.quote(name)} && echo "{_OK_MARK} $(stat -c %s {staged})"', timeout=_LONG)
@@ -263,16 +277,21 @@ class StagrToolHandler:
     async def _unpack(client: OpencodeClient, archive: bytes, name: str, dest: str) -> None:
         """Unpack `archive` (which holds `name`) and move it to `dest`, which
         must not exist. It is unpacked beside `dest` first and moved in one
-        rename, so a failure leaves no half copy."""
+        rename, so a failure leaves no half copy. The staged archive (and a
+        partial upload of it) is removed whatever happens."""
         tag = uuid.uuid4().hex[:8]
-        staged, tmp = f".stagr-in-{tag}.tar.gz", f".stagr-in-{tag}"
-        await client.write_file(staged, archive)
         parent = posixpath.dirname(dest)
+        staged = f".stagr-in-{tag}.tar.gz"
+        tmp = shlex.quote(posixpath.join(parent, f".stagr-in-{tag}"))
         mkparent = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
-        out = await client.run_shell(
-            f"mkdir {tmp} && tar -xzf {staged} -C {tmp} && {mkparent}"
-            f"[ ! -e {shlex.quote(dest)} ] && mv -T -- {tmp}/{shlex.quote(name)} {shlex.quote(dest)} "
-            f"&& echo {_OK_MARK}; rm -rf -- {tmp} {staged}", timeout=_LONG)
+        try:
+            await client.write_file(staged, archive)
+            out = await client.run_shell(
+                f"{mkparent}mkdir -- {tmp} && tar -xzf {staged} -C {tmp} && "
+                f"[ ! -e {shlex.quote(dest)} ] && mv -T -- {tmp}/{shlex.quote(name)} {shlex.quote(dest)} "
+                f"&& echo {_OK_MARK}; rm -rf -- {tmp}", timeout=_LONG)
+        finally:
+            await client.run_shell(f"rm -f -- {staged} {staged}.derpr-part")
         if _OK_MARK not in out:
             raise _Refused(f"unpacking to {dest} failed: {out[-500:] or 'it exists now, or the copy was empty'}")
 
@@ -305,7 +324,8 @@ class StagrToolHandler:
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
                 codr = OpencodeClient(http, codr_dir)
                 if not await self._codr_idle(codr):
-                    raise _Refused("codr is working; copy when it is idle.")
+                    raise _Refused("codr is working, or its last task turn is not checked yet; "
+                                   "copy when it is idle.")
                 await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
             return _error(str(e))
