@@ -797,9 +797,13 @@ only thing that talks to both:
   own does not turn its WAN off.) You flip them in the portal's INFRA panel,
   under **SANDBOX NETWORK**, which also shows open connections, each box's WAN
   allowlist and the proxy log.
-  - **LAN on**: the box can reach anything on the home network (`10.0.0.0/24`),
-    any protocol: SMB, SSH, a port scan. Off, it reaches nothing at home except
-    what it always needs (codr's box reaches the inference server).
+  - **LAN on**: the box can reach the dt21 folder (dt21's file sharing, port
+    445), and nothing else at home: no DNS, no router, no other machine. Off, it
+    reaches nothing at home except what it always needs (codr's box reaches the
+    inference server). LAN used to mean the whole home network, but that was a
+    way to the internet past the WAN switch: the router answers DNS lookups for
+    anyone on the network and passes them on, and data can ride out inside
+    lookups (DNS tunneling).
   - **WAN on**: the box can reach the internet, **only through the proxy** in a
     separate container. There is still no direct way out and no DNS. The proxy
     lets through GitHub, PyPI's download hosts and the Debian mirrors, plus the
@@ -814,7 +818,7 @@ only thing that talks to both:
     are sure. Confirm, and they are cut on the spot; a running download stops.
     With nothing open, the switch just goes off.
   - **LAN and WAN both on** for one box warns you before the second goes on: the
-    box could then carry anything from home to the internet. In the panel the
+    box could then carry anything in the dt21 folder to the internet. In the panel the
     warning is a confirm bar; for the setup agent's `request_network` it is a
     ⚠️ line in the approval prompt itself, so you see it before you approve.
   - **The log**: every connection the proxy passed (box, host, time) and every
