@@ -19,7 +19,9 @@ every argv derpr emits through it.
 ## Host state this relies on (Proxmox, not in this repo)
 
 - `/etc/pve/firewall/cluster.fw`: `[group agent-lan]` = `OUT ACCEPT -dest
-  10.0.0.0/24`. IPv4 only, keep it that way: link-local v6 reaches the LAN.
+  10.0.0.69 -p tcp -dport 445` (dt21 SMB only: whole-LAN reached the internet
+  through the router's DNS). IPv4 only, keep it that way: link-local v6 reaches
+  the LAN.
 - Each box's `.fw` has `|GROUP agent-lan # TOGGLE lan` (off), plus its
   always-on rules: in from dt21/CT100 to opencode, out to the inference servers
   (codr) and to its own egress proxy port on `10.0.0.77` (both). The old

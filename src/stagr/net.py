@@ -59,7 +59,7 @@ def _other(zone: str) -> str:
 
 def _both_on_message(box: str, zone: str) -> str:
     return (f"⚠️ {box}'s {_other(zone).upper()} is already on: turning {zone.upper()} on too puts "
-            "LAN and WAN both on, and the box can then carry anything from the home network "
+            "LAN and WAN both on, and the box can then carry anything in the dt21 folder "
             "to the internet.")
 
 

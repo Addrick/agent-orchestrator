@@ -49,7 +49,7 @@ const NODE_CONFIRM =
 type NetAction = Extract<InfraAction, { action: 'set_sandbox_net' }>
 
 const ZONE_HELP = {
-  lan: 'LAN: the home network (10.0.0.0/24), any protocol',
+  lan: 'LAN: the dt21 folder (10.0.0.69, SMB) and nothing else at home',
   wan: 'WAN: the internet through the proxy allowlist, web only',
 }
 
