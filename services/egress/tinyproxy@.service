@@ -1,0 +1,14 @@
+[Unit]
+Description=Egress proxy for the %i sandbox box (DP-465)
+After=network-online.target
+Wants=network-online.target
+
+# Never enabled: `egress-ctl %i on` starts it, `off` stops it, and a container
+# restart leaves it stopped (WAN off, approvals gone).
+[Service]
+Type=simple
+ExecStartPre=/usr/local/sbin/egress-ctl %i filter
+ExecStart=/usr/bin/tinyproxy -d -c /etc/egress/%i.conf
+ExecReload=/bin/kill -USR1 $MAINPID
+ExecStopPost=/bin/rm -f /run/egress/%i.approved /run/egress/%i.filter
+Restart=no

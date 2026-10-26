@@ -1,11 +1,14 @@
-# Domains the stagr setup VM may always reach through the egress proxy
-# (DP-456). Each line admits the domain and its subdomains. Installed at
-# /etc/egress/default.list in CT110; run `egress-ctl refresh` after editing.
-# Anything else needs an approved request_web_access grant.
+# Hosts every sandbox box may reach while its WAN is on (DP-456, DP-465).
+# Installed at /etc/egress/default.list in CT110. A plain line admits the domain
+# and its subdomains; a line starting with `=` admits exactly that host. A box
+# whose WAN is on picks an edit up at its next approval or its next WAN on.
+# Anything else needs an approved host (request_web_access).
 github.com
 githubusercontent.com
-pypi.org
-pythonhosted.org
-# Debian packages, so the setup agent can apt install on its own box.
+codeload.github.com
+# Exact: pypi.org without upload.pypi.org, so a package can't be pushed out.
+=pypi.org
+files.pythonhosted.org
+# Debian packages, so a box can apt install.
 deb.debian.org
 security.debian.org

@@ -1,0 +1,10 @@
+# /etc/logrotate.d/egress in CT110 (DP-465). copytruncate: tinyproxy keeps the
+# log open and egress-ctl reads it for `conns` and `log`.
+/var/log/tinyproxy/codr.log /var/log/tinyproxy/stagr.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

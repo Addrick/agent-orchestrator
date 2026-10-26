@@ -6,6 +6,7 @@ import type {
   InfraGuest,
   InfraModel,
   InfraStatus,
+  SandboxBox,
 } from '../types/contracts'
 
 // DP-439 INFRA panel. Spans the chan+convo+insp grid columns like MemoryPanel.
@@ -44,6 +45,17 @@ function modelConfirm(m: InfraModel): string {
 
 const NODE_CONFIRM =
   'Reboot the whole Proxmox node? Every guest goes down — including the one hosting derpr, so this portal is unreachable until the node is back.'
+
+type NetAction = Extract<InfraAction, { action: 'set_sandbox_net' }>
+
+const ZONE_HELP = {
+  lan: 'LAN: the home network (10.0.0.0/24), any protocol',
+  wan: 'WAN: the internet through the proxy allowlist, web only',
+}
+
+function switchLabel(on: boolean | null): string {
+  return on === null ? '?' : on ? 'on' : 'off'
+}
 
 function SectionError({ message }: { message?: string }) {
   return (
@@ -126,10 +138,60 @@ export function InfraPanel() {
     }
   }
 
+  // DP-465: a switch flips straight away. When the node answers "confirm"
+  // (open connections would be cut, or LAN and WAN would both be on), the
+  // reason goes into the usual confirm bar and Confirm re-sends with confirm.
+  const flipNet = async (action: NetAction) => {
+    setResult(null)
+    setBusy(true)
+    try {
+      const res = await runInfraAction(action)
+      if (res.status === 'confirm') {
+        const conns = Array.isArray(res.connections) ? (res.connections as string[]) : []
+        const listed = conns.map((c) => `\n  ${c}`).join('')
+        setPending({ action: { ...action, confirm: true }, text: `${res.message || 'Are you sure?'}${listed}` })
+      } else {
+        const ok = res.status === 'ok'
+        const closed = Array.isArray(res.closed) ? ` (closed ${(res.closed as string[]).length})` : ''
+        setResult({
+          ok,
+          text: `${action.box} ${action.zone}: ${ok ? action.state + closed : res.message || res.status}`,
+        })
+      }
+    } catch (e) {
+      setResult({ ok: false, text: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setBusy(false)
+      reload.current()
+    }
+  }
+
   const pve = status?.pve
   const gpu = status?.gpu
   const models = status?.models
+  const net = status?.net
   const canAct = operator && !busy && !pending
+
+  const netSwitch = (b: SandboxBox, zone: 'lan' | 'wan') => {
+    const on = b[zone]
+    return (
+      <td title={ZONE_HELP[zone]} style={{ whiteSpace: 'nowrap' }}>
+        <span className="infra-k">{zone.toUpperCase()}</span>
+        <span className={'pill' + (on ? ' infra-on' : '')}>{switchLabel(on)}</span>{' '}
+        {on !== null && (
+          <button
+            className={on ? 'btn deny' : 'btn approve'}
+            disabled={!canAct}
+            onClick={() =>
+              void flipNet({ action: 'set_sandbox_net', box: b.box, zone, state: on ? 'off' : 'on' })
+            }
+          >
+            {on ? 'turn off' : 'turn on'}
+          </button>
+        )}
+      </td>
+    )
+  }
 
   return (
     <div
@@ -168,7 +230,7 @@ export function InfraPanel() {
 
       {pending && (
         <div className="infra-confirm">
-          <div style={{ flex: 1 }}>{pending.text}</div>
+          <div style={{ flex: 1, whiteSpace: 'pre-line' }}>{pending.text}</div>
           <button className="btn deny" onClick={() => void confirm()}>
             Confirm
           </button>
@@ -333,6 +395,57 @@ export function InfraPanel() {
           )}
         </section>
       </div>
+
+      {/* ---- sandbox network (DP-465) ---- */}
+      {net && (
+        <section style={{ marginTop: 18 }}>
+          <div className="infra-h">SANDBOX NETWORK</div>
+          {net.status === 'error' && <SectionError message={net.message} />}
+          {net.status === 'ok' &&
+            net.boxes.map((b, i) =>
+              b.status === 'error' ? (
+                <SectionError key={i} message={b.message} />
+              ) : (
+                <div key={b.box} style={{ marginBottom: 12 }}>
+                  <table className="infra-table">
+                    <tbody>
+                      <tr>
+                        <td style={{ width: 80 }}>{b.box}-vm</td>
+                        {netSwitch(b, 'lan')}
+                        {netSwitch(b, 'wan')}
+                      </tr>
+                    </tbody>
+                  </table>
+                  {[...b.lan_connections.map((c) => `LAN ${c}`), ...b.wan_connections.map((c) => `WAN ${c}`)].map(
+                    (c) => (
+                      <div key={c} className="dimrow" style={{ fontSize: 11 }}>
+                        open: {c}
+                      </div>
+                    ),
+                  )}
+                  {b.errors &&
+                    Object.entries(b.errors).map(([k, v]) => (
+                      <div key={k} className="dimrow" style={{ color: 'var(--danger)', fontSize: 11 }}>
+                        {k}: {v}
+                      </div>
+                    ))}
+                  {b.allowlist && (
+                    <details style={{ fontSize: 11 }}>
+                      <summary>WAN allowlist</summary>
+                      <pre style={{ margin: 0 }}>{b.allowlist}</pre>
+                    </details>
+                  )}
+                  {b.log.length > 0 && (
+                    <details style={{ fontSize: 11 }}>
+                      <summary>proxy log ({b.log.length})</summary>
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{b.log.join('\n')}</pre>
+                    </details>
+                  )}
+                </div>
+              ),
+            )}
+        </section>
+      )}
     </div>
   )
 }

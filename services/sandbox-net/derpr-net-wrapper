@@ -1,0 +1,42 @@
+#!/bin/bash
+# derpr-net-wrapper — forced-command allowlist for derpr's SECOND node key (DP-465).
+#
+# That key reaches host `derpr` (10.0.0.74), where the sandbox boxes and their
+# firewalls live, and may do exactly two things there: flip a box's LAN switch
+# (agent-net) and hash the deployed copies of these two files (the startup
+# drift check). Everything else is refused. The first key and its wrapper
+# (services/pve/derpr-pve-wrapper) stay on r9700; neither key reaches the
+# other host.
+#
+# Installed at /usr/local/bin/derpr-net-wrapper, referenced from the
+# `derpr-net` line in /root/.ssh/authorized_keys on host derpr. See README.md.
+# Like the first wrapper, it is the second half of every tool that uses it:
+# change it in the same commit as src/stagr/net.py, and verify with the
+# container's key.
+
+set -uo pipefail
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+log()  { logger -t derpr-net -- "$1"; }
+deny() { log "DENY: $cmd"; echo "derpr-net: not allowed" >&2; exit 1; }
+
+case "$cmd" in
+  *[\;\&\|\`\$\<\>\(\)\{\}\!\*\?\~\\\'\"]*) deny ;;
+esac
+
+read -ra a <<< "$cmd"
+n=${#a[@]}
+agentnet='/usr/local/sbin/agent-net'
+
+allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
+
+case "${a[0]:-}" in
+  # The drift check: these two paths, this order (src/proxmox/artifacts.py
+  # NET_NODE_ARTIFACTS).
+  sha256sum)
+    [ "$cmd" = "sha256sum /usr/local/bin/derpr-net-wrapper /usr/local/sbin/agent-net" ] && allow ;;
+  "$agentnet")
+    if [ "$n" -eq 4 ] && [[ "${a[1]}" =~ ^(codr|stagr)$ ]] && [ "${a[2]}" = lan ] \
+       && [[ "${a[3]}" =~ ^(on|off|status|conns)$ ]]; then allow; fi
+    ;;
+esac
+deny

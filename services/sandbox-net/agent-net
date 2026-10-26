@@ -1,0 +1,101 @@
+#!/bin/bash
+# agent-net — the LAN switch of each sandbox box (DP-465).
+#
+# Runs on host `derpr` (10.0.0.74), which holds codr-vm (VM200) and stagr-vm
+# (VM201) and their firewall files. Installed at /usr/local/sbin/agent-net.
+# LAN on = the box reaches 10.0.0.0/24, any protocol, through the cluster group
+# `agent-lan`; each box's .fw carries it as `GROUP agent-lan # TOGGLE lan`, and
+# a leading `|` disables it. The box's always-on rules (opencode in, the
+# inference servers or its egress proxy out) are never touched.
+#
+#   agent-net <codr|stagr> lan on|off|status|conns
+#   agent-net <vmid> <phase>   Proxmox hookscript: LAN off before the VM starts
+#
+# derpr reaches this over its second node key, gated by derpr-net-wrapper.
+# WAN is not here: it is the box's proxy instance in CT110 (services/egress/).
+set -euo pipefail
+
+die() { echo "agent-net: $1" >&2; exit 1; }
+usage() { die "usage: agent-net <codr|stagr> lan {on|off|status|conns}"; }
+
+box_of_vmid() { case "$1" in 200) echo codr ;; 201) echo stagr ;; *) echo "" ;; esac; }
+
+# Hookscript form: `qm set <vmid> --hookscript local:snippets/agent-net-hook`,
+# a symlink to this file. Reset to off before every start (fail closed). Never
+# blocks the start: a failure is logged, not raised.
+if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+  b=$(box_of_vmid "$1")
+  if [ -n "$b" ] && [ "${2:-}" = pre-start ]; then
+    "$0" "$b" lan off >/dev/null 2>&1 || logger -t agent-net "pre-start: could not turn $b's LAN off"
+  fi
+  exit 0
+fi
+
+case "${1:-}" in
+  codr)  vmid=200; ip=10.0.0.75 ;;
+  stagr) vmid=201; ip=10.0.0.76 ;;
+  *) usage ;;
+esac
+[ "${2:-}" = lan ] && [ "$#" -eq 3 ] || usage
+fw="/etc/pve/firewall/$vmid.fw"
+tag='GROUP agent-lan # TOGGLE lan'
+grep -qE "^\|?$tag\$" "$fw" || die "$fw has no '$tag' line"
+
+state() { if grep -qxF "$tag" "$fw"; then echo on; else echo off; fi; }
+
+# The box's LAN flows from conntrack: those it opened to 10.0.0.0/24, minus its
+# always-on destinations (any "OUT ACCEPT -dest <ip> -p <proto> -dport <port>"
+# outside the group). `cut` deletes them. ESTABLISHED is accepted before any
+# rule, so without this a connection opened while LAN was on would outlive the
+# switch. The delete only stops traffic with nf_conntrack_tcp_loose=0 (set in
+# /etc/sysctl.d/90-agent-net.conf); with 1, the next packet re-creates the entry.
+flows() {
+  python3 - "$1" "$fw" "$ip" <<'PY'
+import ipaddress, re, subprocess, sys
+mode, fw, vm_ip = sys.argv[1:4]
+lan = ipaddress.ip_network("10.0.0.0/24")
+keep = set(re.findall(r"^OUT ACCEPT -dest (\S+) -p (\w+) -dport (\d+)", open(fw).read(), re.M))
+listed = subprocess.run(["conntrack", "-L", "-s", vm_ip], capture_output=True, text=True).stdout
+for line in listed.splitlines():
+    if " src=" not in line:
+        continue
+    proto = line.split()[0]
+    f = dict(re.findall(r"(\w+)=(\S+)", "src=" + line.split(" src=")[1]))  # original direction first
+    if (f["dst"], proto, f.get("dport")) in keep or ipaddress.ip_address(f["dst"]) not in lan:
+        continue
+    print(proto, f["dst"] + ":" + f.get("dport", "-"))
+    if mode == "cut":
+        cmd = ["conntrack", "-D", "-p", proto, "-s", vm_ip, "-d", f["dst"]]
+        if "dport" in f:
+            cmd += ["--sport", f["sport"], "--dport", f["dport"]]
+        subprocess.run(cmd, capture_output=True)
+PY
+}
+
+apply_fw() {
+  pve-firewall compile >/dev/null
+  pve-firewall restart
+}
+
+case "$3" in
+  status) echo "lan: $(state)" ;;
+  conns)  [ "$(state)" = on ] && flows list || true ;;
+  on)
+    if [ "$(state)" = off ]; then
+      sed -i "s/^|$tag\$/$tag/" "$fw"
+      apply_fw
+    fi
+    echo "lan: on"
+    ;;
+  off)
+    if [ "$(state)" = on ]; then
+      sed -i "s/^$tag\$/|$tag/" "$fw"
+      apply_fw
+    fi
+    # Cut whatever is left even if it was already off: a flow can only be
+    # left over from a time it was on.
+    flows cut | sed 's/^/closed /'
+    echo "lan: off"
+    ;;
+  *) usage ;;
+esac

@@ -1,12 +1,14 @@
 #!/bin/bash
-# derpr-egress — the node-side verb behind the stagr web-access tools (DP-456).
+# derpr-egress — the node-side verb behind each sandbox box's WAN (DP-456, DP-465).
 #
-# The stagr setup VM reaches the internet only through tinyproxy in the egress
-# container, and tinyproxy admits only allowlisted domains. derpr changes that
-# list here, over the same SSH key and wrapper as every other node tool:
+# A box (codr-vm, stagr-vm) reaches the internet only through its own tinyproxy
+# instance in the egress container, which admits only allowlisted hosts. derpr
+# flips that WAN and approves hosts here, over the same SSH key and wrapper as
+# every other node tool:
 #
-#   derpr-egress allow <domain> <minutes>   after a human approved request_web_access
-#   derpr-egress list                       defaults and live grants
+#   derpr-egress <box> on|off|status   the WAN switch
+#   derpr-egress <box> allow <host>    after a human approved request_web_access
+#   derpr-egress <box> list|conns|log  allowlist, live tunnels, recent log
 #
 # Installed at /usr/local/sbin/derpr-egress on the node that hosts the egress
 # container. The container's own egress-ctl (services/egress/) does the work;
@@ -15,22 +17,23 @@ set -euo pipefail
 
 ct="${DERPR_EGRESS_CT:-110}"
 ctl=/usr/local/sbin/egress-ctl
-# Same gate as src/stagr/handler.py and egress-ctl. The last label starts with a
+# Same gate as src/stagr/net.py and egress-ctl. The last label starts with a
 # letter, so no IP literal gets through.
-domain_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+host_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 
 die() { echo "derpr-egress: $1" >&2; exit 1; }
+usage() { die "usage: derpr-egress <codr|stagr> {on|off|status|list|conns|log|allow <host>}"; }
 
-case "${1:-}" in
+case "${1:-}" in codr|stagr) ;; *) usage ;; esac
+case "${2:-}" in
+  on|off|status|list|conns|log)
+    [ "$#" -eq 2 ] || usage
+    exec pct exec "$ct" -- "$ctl" "$1" "$2"
+    ;;
   allow)
-    [ "$#" -eq 3 ] || die "usage: derpr-egress allow <domain> <minutes>"
-    [ "${#2}" -le 253 ] && [[ "$2" =~ $domain_re ]] || die "not a domain name: $2"
-    [[ "$3" =~ ^[0-9]+$ ]] && [ "$3" -ge 1 ] && [ "$3" -le 1440 ] || die "minutes must be 1-1440"
-    exec pct exec "$ct" -- "$ctl" allow "$2" "$3"
+    [ "$#" -eq 3 ] || usage
+    [ "${#3}" -le 253 ] && [[ "$3" =~ $host_re ]] || die "not a host name: $3"
+    exec pct exec "$ct" -- "$ctl" "$1" allow "$3"
     ;;
-  list)
-    [ "$#" -eq 1 ] || die "usage: derpr-egress list"
-    exec pct exec "$ct" -- "$ctl" list
-    ;;
-  *) die "usage: derpr-egress {allow <domain> <minutes>|list}" ;;
+  *) usage ;;
 esac

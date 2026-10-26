@@ -57,8 +57,9 @@ installer='/usr/local/sbin/derpr-model-install'
 # component ever crosses this boundary.
 tierer='/usr/local/sbin/derpr-model-tier'
 gbase='^[A-Za-z0-9._-]+\.gguf$'
-# DP-456 stagr web access.
+# DP-456 stagr web access; DP-465 per-box WAN.
 egress='/usr/local/sbin/derpr-egress'
+box='^(codr|stagr)$'
 domain='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
 
 allow() { log "ALLOW: $cmd"; exec "${a[@]}"; }
@@ -97,12 +98,15 @@ case "${a[0]:-}" in
        && [[ "${a[3]}" =~ $jobid ]]; then allow; fi
     ;;
 
-  # DP-456: the stagr egress allowlist. The verb re-checks its arguments and
-  # forwards them into the egress container; `domain` mirrors its gate.
+  # DP-456/DP-465: each sandbox box's WAN switch and host allowlist. The verb
+  # re-checks its arguments and forwards them into the egress container;
+  # `domain` mirrors its gate.
   "$egress")
-    if [ "${a[1]:-}" = allow ] && [ "$n" -eq 4 ] && [ "${#a[2]}" -le 253 ] \
-       && [[ "${a[2]}" =~ $domain ]] && [[ "${a[3]}" =~ $num ]]; then allow; fi
-    if [ "${a[1]:-}" = list ] && [ "$n" -eq 2 ]; then allow; fi
+    if [[ "${a[1]:-}" =~ $box ]]; then
+      if [[ "${a[2]:-}" =~ ^(on|off|status|list|conns|log)$ ]] && [ "$n" -eq 3 ]; then allow; fi
+      if [ "${a[2]:-}" = allow ] && [ "$n" -eq 4 ] && [ "${#a[3]}" -le 253 ] \
+         && [[ "${a[3]}" =~ $domain ]]; then allow; fi
+    fi
     ;;
 
   pct|qm)

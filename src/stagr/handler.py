@@ -1,14 +1,16 @@
 """The stagr tools (DP-456): a setup agent's hands on the setup VM.
 
 stagr is a second `opencode serve`, used here only for its shell endpoint
-(`OpencodeClient.run_shell`), exactly as the codr agent uses codr's. The VM has
-no LAN and reaches the internet only through the egress proxy's domain
-allowlist, so `stagr_shell` runs unapproved: nothing it can reach is ours.
-What crosses a boundary is gated (``is_write``) instead:
+(`OpencodeClient.run_shell`), exactly as the codr agent uses codr's. The VM's
+LAN and WAN are switches, off by default (DP-465, ``src/stagr/net.py``), and
+its WAN goes only through a proxy allowlist, so `stagr_shell` runs unapproved:
+the network is gated, not the local work. What crosses a boundary is gated
+(``is_write``) instead:
 
-- `request_web_access` adds a domain to the allowlist for a while, through the
-  node verb `derpr-egress` over the shared node gate (`run_node_command`), the
-  same SSH key and wrapper as the proxmox tools;
+- `request_network` turns stagr's LAN or WAN on, and `request_web_access`
+  approves one more host while its WAN is on; both through the node verbs over
+  the shared node gate (`run_node_command`). The operator's portal panel flips
+  any switch of either box directly (`set_sandbox_net`);
 - `copy_to_codr` / `copy_from_codr` copy a file or folder between stagr and
   codr's offline sandbox, to a path that must not exist yet. Any `.git` is left
   behind unless asked for, so upstream history (a later fix, say) never reaches
@@ -25,6 +27,7 @@ tar.gz each way; derpr is the only thing that talks to both boxes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import posixpath
 import re
@@ -39,20 +42,17 @@ from src.engine.providers.opencode import (
     OpencodeClient, auth_headers, open_auto, session_title, workspace_directory, workspace_lock,
 )
 from src.llm_errors import LLMCommunicationError
-from src.proxmox.ssh import SSHRunner, run_node_command
+from src.proxmox.ssh import SSHRunner
+from src.stagr.net import BOXES, ZONES, SandboxNet
 
 if TYPE_CHECKING:
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
 
-EGRESS_VERB = "/usr/local/sbin/derpr-egress"
 CODR_PERSONA = "codr"
-# The same gate as the node verb and egress-ctl. The last label starts with a
-# letter, so no IP literal is accepted.
-DOMAIN_RE = re.compile(r"^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$")
+STAGR_BOX = "stagr"
 PATH_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
-MAX_GRANT_MINUTES = 1440
 MAX_SHELL_SECONDS = 3600
 DEFAULT_SHELL_SECONDS = 600
 # What one copy may carry, compressed. write_file moves ~0.5 MB/s.
@@ -92,6 +92,10 @@ def _rel_path(path: str) -> Optional[str]:
     return path
 
 
+def _onoff(value: Optional[bool]) -> str:
+    return "unknown" if value is None else ("on" if value else "off")
+
+
 def _flag(value: Any) -> bool:
     """A boolean tool argument; models sometimes send it as a string."""
     if isinstance(value, str):
@@ -129,13 +133,16 @@ def _shell_result(out: str, seconds: int) -> Dict[str, Any]:
 
 
 class StagrToolHandler:
-    def __init__(self, runner: SSHRunner | None = None) -> None:
-        self._ssh = runner or SSHRunner()
+    def __init__(self, runner: SSHRunner | None = None, net_runner: SSHRunner | None = None) -> None:
+        self._net = SandboxNet(runner, net_runner)
 
     def register(self, manager: "ToolManager") -> None:
         manager.register("stagr_shell", self._stagr_shell)
         manager.register("list_web_access", self._list_web_access)
         manager.register("request_web_access", self._request_web_access)
+        manager.register("request_network", self._request_network)
+        manager.register("sandbox_net_status", self._sandbox_net_status)
+        manager.register("set_sandbox_net", self._set_sandbox_net)
         manager.register("codr_shell", self._codr_shell)
         manager.register("copy_to_codr", self._copy_to_codr)
         manager.register("copy_from_codr", self._copy_from_codr)
@@ -198,30 +205,47 @@ class StagrToolHandler:
             return _error(f"codr shell gave no answer within {seconds + 60} s.")
         return _shell_result(out, seconds)
 
-    # -- web access ----------------------------------------------------------------
+    # -- network (DP-465) ----------------------------------------------------------
 
     async def _list_web_access(self) -> Dict[str, Any]:
-        result = await run_node_command(self._ssh, [EGRESS_VERB, "list"], exit_label="derpr-egress")
-        if result.get("status") == "error":
-            return result
-        return {"status": "ok", "allowlist": result.get("stdout", "").strip()}
+        """stagr's own view: its two switches and the hosts its WAN lets through."""
+        st = await self._net.status(STAGR_BOX, detail=False)
+        if st.get("status") == "error":
+            return st
+        return {"status": "ok", "lan": _onoff(st["lan"]), "wan": _onoff(st["wan"]),
+                "allowlist": st["allowlist"], **({"errors": st["errors"]} if "errors" in st else {})}
 
-    async def _request_web_access(self, domain: str, minutes: int, reason: str = "") -> Dict[str, Any]:
-        domain = (domain or "").strip().lower().rstrip(".")
-        if len(domain) > 253 or not DOMAIN_RE.match(domain):
-            return _error(f"not a domain name: {domain!r} (no IP addresses, no scheme or path).")
-        try:
-            minutes = int(minutes)
-        except (TypeError, ValueError):
-            return _error("minutes must be a whole number.")
-        if not 1 <= minutes <= MAX_GRANT_MINUTES:
-            return _error(f"minutes must be 1-{MAX_GRANT_MINUTES}.")
-        result = await run_node_command(self._ssh, [EGRESS_VERB, "allow", domain, str(minutes)],
-                                        exit_label="derpr-egress")
-        if result.get("status") == "error":
-            return result
-        logger.info("stagr: web access to %s for %d min granted (%s)", domain, minutes, reason)
-        return {"status": "ok", "granted": result.get("stdout", "").strip()}
+    async def _request_web_access(self, host: str = "", reason: str = "", domain: str = "",
+                                  minutes: Any = None) -> Dict[str, Any]:
+        # `domain` and `minutes` are the DP-456 shape: a call parked before
+        # DP-465 deployed still resolves (minutes is ignored; there is no timer).
+        result = await self._net.allow(STAGR_BOX, host or domain)
+        if result.get("status") == "ok":
+            logger.info("stagr: web access to %s approved (%s)", host or domain, reason)
+        return result
+
+    async def _request_network(self, zone: str, reason: str = "") -> Dict[str, Any]:
+        """Runs only once the operator approved it, so the approval is the
+        confirmation: a LAN+WAN warning does not stop it a second time."""
+        zone = (zone or "").strip().lower()
+        if zone not in ZONES:
+            return _error("zone must be lan or wan.")
+        result = await self._net.set_switch(STAGR_BOX, zone, True, confirm=True)
+        if result.get("status") == "ok":
+            logger.info("stagr: %s turned on (%s)", zone, reason)
+        return result
+
+    async def _sandbox_net_status(self) -> Dict[str, Any]:
+        """Every box, in full: the portal panel's read."""
+        boxes = await asyncio.gather(*(self._net.status(b) for b in BOXES))
+        return {"status": "ok", "boxes": list(boxes)}
+
+    async def _set_sandbox_net(self, box: str, zone: str, state: str, confirm: Any = False) -> Dict[str, Any]:
+        state = (state or "").strip().lower()
+        if state not in ("on", "off"):
+            return _error("state must be on or off.")
+        return await self._net.set_switch((box or "").strip().lower(), (zone or "").strip().lower(),
+                                          state == "on", confirm=_flag(confirm))
 
     # -- transfers -------------------------------------------------------------------
 

@@ -14,7 +14,6 @@ from aiohttp.test_utils import TestServer
 
 from config import global_config
 from src.engine.providers.opencode import AUTO_FIELD, session_title, workspace_directory, workspace_lock
-from src.proxmox.ssh import SSHResult
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
@@ -227,40 +226,20 @@ async def test_a_missing_source_is_reported(boxes):
     assert result["status"] == "error" and "could not pack tasks/nope" in result["message"]
 
 
-class Recorder:
-    def __init__(self):
-        self.calls = []
-
-    async def run(self, argv):
-        self.calls.append(list(argv))
-        return SSHResult(0, "allowed files.example.org until 2026-10-24 12:00 EDT\n", "")
-
-
-async def test_web_access_sends_only_a_checked_domain_to_the_node(monkeypatch):
-    monkeypatch.setattr(global_config, "PVE_TOOLS_ENABLED", True)
-    recorder = Recorder()
-    handler = StagrToolHandler(recorder)  # type: ignore[arg-type]
-    ok = await handler._request_web_access("Files.Example.org.", 30, "docs")
-    assert ok["status"] == "ok"
-    assert recorder.calls == [["/usr/local/sbin/derpr-egress", "allow", "files.example.org", "30"]]
-    for bad in ("10.0.0.70", "https://example.org", "example.org/x", "localhost", "a;b.com"):
-        assert (await handler._request_web_access(bad, 30, "x"))["status"] == "error", bad
-    assert (await handler._request_web_access("example.org", 5000, "x"))["status"] == "error"
-    assert len(recorder.calls) == 1
-
-
 def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
-    """stagr.json exposes exactly the six tools, all in the one `stagr`
+    """stagr.json exposes exactly its seven tools, all in the one `stagr`
     domain, so ToolPolicy has nothing to refuse and the persona is not
-    quarantined at load. The file is public, so the operator sets
-    origin_allowlist on their own instance (as for hypr)."""
+    quarantined at load. The panel's two network tools (DP-465) are not among
+    them: stagr asks for a switch, it never flips one. The file is public, so
+    the operator sets origin_allowlist on their own instance (as for hypr)."""
     persona = json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]
     policy = ToolPolicy(**persona["tool_policy"])
     exposed = policy.filter_tools([t for t in ALL_TOOL_DEFINITIONS
                                    if t.get("service_binding") in (None, *persona["service_bindings"])])
     names = {t["function"]["name"] for t in exposed}
-    assert names == {t["function"]["name"] for t in STAGR_TOOLS} == set(persona["enabled_tools"])
+    panel_only = {"sandbox_net_status", "set_sandbox_net"}
+    assert names == {t["function"]["name"] for t in STAGR_TOOLS} - panel_only == set(persona["enabled_tools"])
     assert policy.explicit_overrides == [] and policy.validate_composition(exposed) == []
     assert {t["function"]["name"] for t in STAGR_TOOLS if t["is_write"]} == {
-        "request_web_access", "copy_from_codr"}
+        "request_web_access", "request_network", "copy_from_codr", "set_sandbox_net"}
     assert persona["origin_allowlist"] == []

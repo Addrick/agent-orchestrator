@@ -1,12 +1,14 @@
 """stagr setup-VM tools (service_binding: stagr, DP-456).
 
-The setup VM has no LAN and reaches the internet only through the egress
-proxy's domain allowlist, so ``stagr_shell`` is a read (ungated): the VM is the
-boundary, not a review of each command. ``codr_shell`` is ungated for the same
+The setup VM's LAN and WAN are switches, off by default, and its WAN goes only
+through a host allowlist (DP-465), so ``stagr_shell`` is a read (ungated): the
+network is gated, not each command. ``codr_shell`` is ungated for the same
 reason (DP-462): codr's sandbox is offline and restorable, and the handler runs
 it only between codr's turns. Everything that crosses a boundary is
-``is_write`` and parked for approval: widening the allowlist, and copying files
-out of codr's sandbox. ``copy_to_codr`` is not: ``codr_shell`` can already write
+``is_write`` and parked for approval: turning a switch on, approving a host,
+and copying files out of codr's sandbox. ``sandbox_net_status`` and
+``set_sandbox_net`` are the portal panel's (the operator's click is the
+approval there); no persona is given them. ``copy_to_codr`` is not: ``codr_shell`` can already write
 any file there, so a gate on the copy would only be a convention.
 
 ``stagr_shell`` returns whatever the VM fetched from the web, and
@@ -40,10 +42,11 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
             "description": (
                 "Run a bash command on stagr, your setup VM (Debian 13, user agent with "
                 "passwordless sudo, git, python3, pip, curl). It starts in /home/agent/work. "
-                "It has no LAN, and its internet goes through a proxy that admits only "
-                "allowlisted domains (GitHub, PyPI, Debian mirrors by default; see "
-                "list_web_access). A refused domain fails with HTTP 403 from the proxy: ask "
-                "for it with request_web_access instead of working around it. Returns the "
+                "Its LAN and WAN are switches, normally off (see list_web_access). With WAN on, "
+                "the internet is web only (HTTP, HTTPS on 443) through a proxy that admits "
+                "allowlisted hosts (GitHub, PyPI, Debian mirrors by default): clone over https, "
+                "never git@. A refused host fails with HTTP 403 from the proxy: ask for it with "
+                "request_web_access instead of working around it. Returns the "
                 "exit code and the output (stdout and stderr together; the middle of very "
                 "long output is cut)."
             ),
@@ -68,8 +71,9 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "list_web_access",
             "description": (
-                "Show which domains stagr may reach: the defaults, then each approved grant "
-                "with when it expires. A domain also admits its subdomains."
+                "Show stagr's two network switches (LAN, WAN: on or off) and the hosts its WAN "
+                "lets through: the defaults (each admits its subdomains; '=' means that host "
+                "only), then the hosts approved since WAN went on."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -82,18 +86,78 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "request_web_access",
             "description": (
-                "Ask Adam to let stagr reach one more domain for a while. Needs his approval. "
-                "Ask for the narrowest domain that works (e.g. files.example.org, not "
-                "example.org) and the shortest time the job needs."
+                "Ask Adam to let stagr reach one more host through the proxy. Needs his "
+                "approval, and stagr's WAN must be on. The approval admits exactly that host "
+                "(not its subdomains) until stagr's WAN goes off."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "domain": {"type": "string", "description": "A bare domain name: no scheme, port or path, no IP address."},
-                    "minutes": {"type": "integer", "description": "How long, 1-1440."},
+                    "host": {"type": "string", "description": "A bare host name: no scheme, port or path, no IP address."},
                     "reason": {"type": "string", "description": "What you need it for, in one sentence."},
                 },
-                "required": ["domain", "minutes", "reason"],
+                "required": ["host", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "service_binding": "stagr",
+        "capabilities": _caps(),
+        "function": {
+            "name": "request_network",
+            "description": (
+                "Ask Adam to turn one of stagr's network switches on. Needs his approval. "
+                "wan: the internet through the proxy allowlist (web only). lan: the home "
+                "network, any protocol (e.g. the shared folder on dt21). Ask only for what the "
+                "job needs; Adam turns it off again."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "zone": {"type": "string", "enum": ["lan", "wan"], "description": "Which switch."},
+                    "reason": {"type": "string", "description": "What you need it for, in one sentence."},
+                },
+                "required": ["zone", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "service_binding": "stagr",
+        "capabilities": _caps(),
+        "function": {
+            "name": "sandbox_net_status",
+            "description": (
+                "Both sandbox boxes (codr, stagr): LAN and WAN switch state, the WAN allowlist, "
+                "open LAN and WAN connections, and the proxy's recent connections and refusals."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "service_binding": "stagr",
+        "capabilities": _caps(),
+        "function": {
+            "name": "set_sandbox_net",
+            "description": (
+                "Turn a sandbox box's LAN or WAN switch on or off. Without confirm, turning off "
+                "with connections open (or on with the other switch already on) changes nothing "
+                "and answers status 'confirm' with what would happen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "box": {"type": "string", "enum": ["codr", "stagr"]},
+                    "zone": {"type": "string", "enum": ["lan", "wan"]},
+                    "state": {"type": "string", "enum": ["on", "off"]},
+                    "confirm": {"type": "boolean", "description": "Go ahead despite the warning. Default false."},
+                },
+                "required": ["box", "zone", "state"],
             },
         },
     },

@@ -85,6 +85,7 @@ class Recorder:
 
     def __init__(self) -> None:
         self.calls: List[List[str]] = []
+        self.wan_on: Dict[str, bool] = {}
 
     async def run(self, argv: Sequence[str]) -> SSHResult:
         a = list(argv)
@@ -130,7 +131,19 @@ class Recorder:
                                 "101        running                 gpu", "")
         if a[:2] == ["qm", "list"]:
             return SSHResult(0, "      VMID NAME    STATUS", "")
+        # DP-465: a WAN switch that remembers, so on and off both get emitted.
+        if a[0] == "/usr/local/sbin/derpr-egress" and a[2] in ("status", "on", "off"):
+            if a[2] != "status":
+                self.wan_on[a[1]] = a[2] == "on"
+            return SSHResult(0, f"wan: {'on' if self.wan_on.get(a[1]) else 'off'}", "")
         return SSHResult(0, "ok", "")
+
+
+class NullRunner:
+    """The second node target, which this wrapper never sees."""
+
+    async def run(self, argv: Sequence[str]) -> SSHResult:
+        return SSHResult(0, "lan: off", "")
 
 
 class StubHF:
@@ -175,10 +188,15 @@ def emitted(monkeypatch) -> List[List[str]]:
         await hf.job_status("newmodel-abc123def456")
         # DP-418: the startup drift check is a node caller too.
         await check_node_artifacts(recorder)  # type: ignore[arg-type]
-        # DP-456: the stagr egress allowlist rides the same gate.
-        stagr = StagrToolHandler(recorder)  # type: ignore[arg-type]
+        # DP-456/DP-465: each box's WAN switch and allowlist ride the same
+        # gate. The LAN half goes to the other host; test_net_wrapper.py.
+        stagr = StagrToolHandler(recorder, NullRunner())  # type: ignore[arg-type]
         await stagr._list_web_access()
-        await stagr._request_web_access("files.example.org", 30, "test")
+        await stagr._request_web_access("files.example.org", "test")
+        await stagr._sandbox_net_status()
+        for box in ("codr", "stagr"):
+            await stagr._set_sandbox_net(box, "wan", "on", confirm=True)
+            await stagr._set_sandbox_net(box, "wan", "off", confirm=True)
 
     asyncio.run(drive())
     assert recorder.calls
@@ -281,14 +299,19 @@ def test_a_cold_target_promotes_and_touches_nothing_else(emitted):
     "pct exec 101 -- cat /sys/class/drm/card1/device/mem_info_vram_total /etc/shadow",
     # A directory listing that is not the DRM one.
     "pct exec 101 -- ls /root",
-    # DP-456 egress verb: IP literals, extra args, other verbs.
-    "/usr/local/sbin/derpr-egress allow 10.0.0.70 30",
-    "/usr/local/sbin/derpr-egress allow example.com",
-    "/usr/local/sbin/derpr-egress allow example.com 30 extra",
-    "/usr/local/sbin/derpr-egress allow example.com -5",
-    "/usr/local/sbin/derpr-egress allow localhost 30",
-    "/usr/local/sbin/derpr-egress revoke example.com",
-    "/usr/local/sbin/derpr-egress list extra",
+    # DP-465 egress verb: unknown boxes, IP literals, extra args, other verbs,
+    # the DP-456 shape, and egress-ctl's systemd-only `filter`.
+    "/usr/local/sbin/derpr-egress allow example.com 30",
+    "/usr/local/sbin/derpr-egress list",
+    "/usr/local/sbin/derpr-egress dt21 on",
+    "/usr/local/sbin/derpr-egress stagr allow 10.0.0.70",
+    "/usr/local/sbin/derpr-egress stagr allow localhost",
+    "/usr/local/sbin/derpr-egress stagr allow example.com extra",
+    "/usr/local/sbin/derpr-egress stagr allow",
+    "/usr/local/sbin/derpr-egress stagr revoke example.com",
+    "/usr/local/sbin/derpr-egress stagr list extra",
+    "/usr/local/sbin/derpr-egress stagr filter",
+    "/usr/local/sbin/agent-net stagr lan on",
 ])
 def test_hostile_shapes_are_refused(wrapper, cmd):
     assert _verdict(wrapper, shlex.split(cmd)) == "DENY"
@@ -340,6 +363,10 @@ def test_the_hash_verb_admits_only_its_one_argv(wrapper, argv):
     assert _verdict(wrapper, argv) == "DENY"
 
 
-def test_the_dp456_egress_shapes_are_covered(emitted):
-    assert ["/usr/local/sbin/derpr-egress", "list"] in emitted
-    assert ["/usr/local/sbin/derpr-egress", "allow", "files.example.org", "30"] in emitted
+def test_the_dp465_egress_shapes_are_covered(emitted):
+    for verb in ("status", "list", "conns", "log"):
+        assert ["/usr/local/sbin/derpr-egress", "stagr", verb] in emitted, verb
+    assert ["/usr/local/sbin/derpr-egress", "stagr", "allow", "files.example.org"] in emitted
+    for box in ("codr", "stagr"):
+        for verb in ("on", "off"):
+            assert ["/usr/local/sbin/derpr-egress", box, verb] in emitted, (box, verb)

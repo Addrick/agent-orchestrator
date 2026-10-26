@@ -1388,8 +1388,9 @@ class KoboldEngineAdapter:
 
         @self.app.get("/api/v1/infra/status")
         async def infra_status() -> Any:
-            """DP-439 INFRA panel reads: pve_status + gpu_status + list_models,
-            each section ok or error on its own. Open like every GET (DP-333)."""
+            """DP-439 INFRA panel reads: pve_status + gpu_status + list_models
+            (+ DP-465 sandbox_net_status), each section ok or error on its own.
+            Open like every GET (DP-333)."""
             sections = await infra_panel.read_status(self._tool_manager)
             return {"enabled": bool(global_config.PVE_TOOLS_ENABLED), **sections}
 
@@ -1408,7 +1409,7 @@ class KoboldEngineAdapter:
             logger.info("INFRA panel action %s %s", action, args)
             result = await infra_panel.run_action(self._tool_manager, action, args)
             await self._audit_control_change(
-                "infra_action", args.get("name") or args.get("vmid") or "node",
+                "infra_action", args.get("name") or args.get("vmid") or args.get("box") or "node",
                 {"action": action, "args": args},
                 {"status": result.get("status"), "target": result.get("target")},
             )
