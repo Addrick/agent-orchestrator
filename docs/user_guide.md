@@ -779,26 +779,50 @@ Settings, per instance in `agents.json` under `codr`:
   the log. Changing it reloads codr's instance on the next idle tick, like any
   other change to the managed files.
 
-#### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456)
+#### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456 / DP-465)
 
 codr's sandbox stays offline while it works. Anything codr needs from the
 internet (a repo at a given commit, packages, data) is prepared somewhere else
 and handed in, and codr's finished work can be pulled back out. DERPR is the
 only thing that talks to both:
 
-- **The setup box** (`stagr-vm`, a second VM; codr's is `codr-vm`) can't reach the LAN: not CT100, not
-  Proxmox, not dt21, not anything else at home. Only DERPR (and dt21, for SSH)
-  can connect to it. Nothing is kept there (no keys, no `.env`, no DERPR data),
-  so anything run there can only hurt the setup box itself.
-- **Its internet goes through an allowlist.** The box has no direct way out and no
-  DNS; its only route is a proxy in a separate container that lets through only
-  allowed domains. GitHub, PyPI and the Debian mirrors are allowed by default (a
-  domain also admits its subdomains). Any other domain is refused with HTTP 403,
-  and the refusal is logged, until the setup agent asks for it with
-  `request_web_access`, naming the domain, how long, and why, and you approve it.
-  A grant lasts at most 24 hours. This matters because the box's traffic leaves
-  through your home connection, and the agent reads untrusted text (READMEs,
-  issue threads) that could try to steer it.
+- **The setup box** (`stagr-vm`, a second VM; codr's is `codr-vm`). Only DERPR
+  (and dt21, for SSH) can always connect to it. Nothing is kept there (no keys,
+  no `.env`, no DERPR data), so anything run there can only hurt the setup box
+  itself, and whatever its network switches let it reach (below).
+- **Network switches (DP-465).** Each box has two, **LAN** and **WAN**, and all
+  four start **off**. They are off again after the box reboots or the proxy
+  restarts, and approved hosts are forgotten too: nothing stays open by accident.
+  You flip them in the portal's network panel.
+  - **LAN on**: the box can reach anything on the home network (`10.0.0.0/24`),
+    any protocol: SMB, SSH, a port scan. Off, it reaches nothing at home except
+    what it always needs (codr's box reaches the inference server).
+  - **WAN on**: the box can reach the internet, **only through the proxy** in a
+    separate container. There is still no direct way out and no DNS. The proxy
+    lets through GitHub, PyPI's download hosts and the Debian mirrors, plus the
+    hosts you approved for that box. Any other host is refused with HTTP 403
+    until the setup agent asks for it with `request_web_access`, naming the host
+    and why, and you approve it. An approval lasts until that box's WAN goes
+    off; there is no timer. This matters because the box's traffic leaves
+    through your home connection, and the agent reads untrusted text (READMEs,
+    issue threads) that could try to steer it.
+  - **Turning a switch off** while the box has connections open through it:
+    the panel lists them (destination, and host name for WAN) and asks if you
+    are sure. Confirm, and they are cut on the spot; a running download stops.
+    With nothing open, the switch just goes off.
+  - **LAN and WAN both on** for one box warns you before the second goes on: the
+    box could then carry anything from home to the internet.
+  - **The log**: every connection the proxy passed (box, host, time) and every
+    refusal, in the same panel.
+  - The setup agent can **ask** for a switch with `request_network`, giving its
+    reason; you get an approval prompt. codr cannot flip its own. **codr's
+    switches stay off for now**: for the foreseeable future only the setup box
+    touches the internet. codr's box works the same way, so opening it later is
+    a setting, not new code.
+- **The dt21 folder.** One read-write folder on dt21 that the setup box mounts
+  while its LAN is on, to read files you put there and to drop files copied out
+  of codr. It is shared under a dedicated Windows account that can reach that
+  folder and nothing else.
 - **The setup agent** is the opt-in persona `stagr`
   (`config/optional_personas/stagr.json`), on `model local` by default. You work
   with it directly. Its `stagr_shell` runs bash on the setup box **without
@@ -1495,13 +1519,14 @@ matches, nothing is posted.
 ### stagr Tools (requires `service_bindings: ["stagr"]`, DP-456)
 
 The setup agent's tools. How they fit together, and why the shell needs no
-approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-setup-agent-dp-455--dp-456).
+approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-setup-agent-dp-455--dp-456--dp-465).
 
 | Tool | Approval | What it does |
 |---|---|---|
 | `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
-| `list_web_access` | no | The proxy allowlist: defaults and live grants |
-| `request_web_access` | yes | Allow one more domain for 1-1440 minutes |
+| `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
+| `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
+| `request_network` | yes | Ask to turn the setup box's LAN or WAN on, with a reason |
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
