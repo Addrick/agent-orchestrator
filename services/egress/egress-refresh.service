@@ -1,6 +1,0 @@
-[Unit]
-Description=Drop expired egress grants and rewrite the tinyproxy filter (DP-456)
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/egress-ctl refresh

@@ -13,6 +13,12 @@ for a human; a panel action *is* the human, authenticated by the operator token
 operator to approve their own click. The audit row the adapter writes for each
 action is what keeps it on the record.
 
+DP-465 adds the sandbox boxes' network switches the same way: the ``stagr``
+tools ``sandbox_net_status`` (read) and ``set_sandbox_net`` (action). A switch
+that would cut live connections, or put a box's LAN and WAN on together,
+answers ``status: "confirm"`` and changes nothing; the client shows why and
+re-sends with ``confirm``.
+
 ``offered`` is the exposure policy for this caller (DP-404): the fixed set
 below, intersected with what is actually registered. A tool outside it is
 refused by ``execute_tool`` itself, so the route cannot be used to reach an
@@ -29,7 +35,7 @@ if TYPE_CHECKING:
 
 #: Reads the status route gathers. Ungated tools — the same ones a persona may
 #: call without a park.
-INFRA_READS: Tuple[str, ...] = ("pve_status", "gpu_status", "list_models")
+INFRA_READS: Tuple[str, ...] = ("pve_status", "gpu_status", "list_models", "sandbox_net_status")
 
 #: Action → the request fields it accepts. Anything else in the body is refused
 #: rather than ignored, so a client bug cannot quietly act on the wrong guest.
@@ -41,6 +47,7 @@ INFRA_ACTIONS: Dict[str, FrozenSet[str]] = {
     "reboot_guest": frozenset({"vmid", "kind", "name"}),
     "set_active_model": frozenset({"name"}),
     "reboot_node": frozenset(),
+    "set_sandbox_net": frozenset({"box", "zone", "state", "confirm"}),
 }
 
 INFRA_TOOLS: FrozenSet[str] = frozenset(INFRA_READS) | frozenset(INFRA_ACTIONS)
@@ -66,13 +73,13 @@ def _unwrap(envelope: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def read_status(tool_manager: "ToolManager") -> Dict[str, Any]:
-    """Run the three reads concurrently; each section succeeds or fails alone."""
+    """Run the reads concurrently; each section succeeds or fails alone."""
     offered = _offered(tool_manager)
     envelopes = await asyncio.gather(*(
         tool_manager.execute_tool(name, offered) for name in INFRA_READS
     ))
-    pve, gpu, models = (_unwrap(e) for e in envelopes)
-    return {"pve": pve, "gpu": gpu, "models": models}
+    pve, gpu, models, net = (_unwrap(e) for e in envelopes)
+    return {"pve": pve, "gpu": gpu, "models": models, "net": net}
 
 
 def validate_action(body: Any) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
@@ -92,14 +99,27 @@ def validate_action(body: Any) -> Tuple[Optional[str], Dict[str, Any], Optional[
         value = body.get(key)
         if value is None:
             continue
+        if key == "confirm" and isinstance(value, bool):
+            args[key] = value
+            continue
         if isinstance(value, bool) or not isinstance(value, (str, int)):
             return None, {}, f"{key} must be a string"
         args[key] = str(value)
-    if action == "set_active_model" and not args.get("name"):
-        return None, {}, "set_active_model requires name"
-    if action.endswith("_guest") and not (args.get("vmid") or args.get("name")):
-        return None, {}, f"{action} requires vmid (with kind) or name"
+    missing = _missing(action, args)
+    if missing:
+        return None, {}, missing
     return action, args, None
+
+
+def _missing(action: str, args: Dict[str, Any]) -> Optional[str]:
+    """What a well-typed body still lacks for its action, or None."""
+    if action == "set_active_model" and not args.get("name"):
+        return "set_active_model requires name"
+    if action.endswith("_guest") and not (args.get("vmid") or args.get("name")):
+        return f"{action} requires vmid (with kind) or name"
+    if action == "set_sandbox_net" and not all(args.get(k) for k in ("box", "zone", "state")):
+        return "set_sandbox_net requires box, zone and state"
+    return None
 
 
 async def run_action(

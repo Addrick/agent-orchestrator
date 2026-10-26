@@ -87,7 +87,9 @@ def test_status_reads_each_section_independently(token_set):
     # One failing read does not sink the other two.
     assert body["models"]["status"] == "error"
     assert "ssh exploded" in body["models"]["message"]
-    assert sorted(n for n, _ in fake.calls) == ["gpu_status", "list_models", "pve_status"]
+    assert sorted(n for n, _ in fake.calls) == [
+        "gpu_status", "list_models", "pve_status", "sandbox_net_status"]
+    assert body["net"]["status"] == "ok"
 
 
 def test_status_reports_enabled_flag(token_set, monkeypatch):
@@ -123,12 +125,28 @@ def test_action_runs_handler_and_audits(token_set):
     assert "stop_guest" in rows[0][1]
 
 
+def test_a_net_switch_passes_confirm_through_and_audits_the_box(token_set):
+    """DP-465: `confirm` is the one boolean the panel sends; it reaches the
+    handler as a bool, and the audit row names the box."""
+    adapter, fake, mm = _make_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/infra/action", headers=AUTH, json={
+            "action": "set_sandbox_net", "box": "stagr", "zone": "wan", "state": "off", "confirm": True})
+    assert r.status_code == 200
+    assert fake.calls == [("set_sandbox_net", {"box": "stagr", "zone": "wan", "state": "off", "confirm": True})]
+    rows = mm._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'infra_action'").fetchall()
+    assert rows and '"persona": "stagr"' in rows[0][0]
+
+
 @pytest.mark.parametrize("body,fragment", [
     ({"action": "web_search", "query": "x"}, "action must be one of"),
     ({"action": "stop_guest", "vmid": "1", "kind": "ct", "argv": "rm"}, "does not accept"),
     ({"action": "set_active_model"}, "requires name"),
     ({"action": "start_guest"}, "requires vmid"),
     ({"action": "set_active_model", "name": ["a"]}, "must be a string"),
+    ({"action": "set_sandbox_net", "box": "codr", "zone": "lan"}, "requires box, zone and state"),
+    ({"action": "set_sandbox_net", "box": "codr", "zone": "lan", "state": True}, "must be a string"),
     (["reboot_node"], "JSON object"),
 ])
 def test_action_rejects_bad_bodies_without_executing(token_set, body, fragment):
@@ -145,4 +163,4 @@ async def test_unregistered_proxmox_is_an_error_not_a_crash():
     """An instance without ProxmoxIntegration registered: every section
     reports an error rather than raising."""
     out = await infra_panel.read_status(ToolManager())
-    assert all(out[k]["status"] == "error" for k in ("pve", "gpu", "models"))
+    assert all(out[k]["status"] == "error" for k in ("pve", "gpu", "models", "net"))

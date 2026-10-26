@@ -194,6 +194,14 @@ def test_the_cap_is_keyed_by_loop_not_a_module_global():
     assert seen[0] is not seen[1]
 
 
+@pytest.mark.asyncio
+async def test_each_host_has_its_own_cap():
+    """Each sshd has its own MaxStartups (DP-465 added host derpr), so a call
+    to one host must not spend another's slots."""
+    assert inflight_semaphore("10.0.0.71") is inflight_semaphore("10.0.0.71")
+    assert inflight_semaphore("10.0.0.71") is not inflight_semaphore("10.0.0.74")
+
+
 # -- no third door -----------------------------------------------------------
 
 def test_no_handler_calls_the_ssh_runner_outside_the_gate():

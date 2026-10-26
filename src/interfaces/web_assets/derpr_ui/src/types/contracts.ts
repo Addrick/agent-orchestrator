@@ -392,17 +392,33 @@ export type InfraPve = { status: 'ok'; uptime?: string; guests: InfraGuest[]; in
 export type InfraGpuStatus = { status: 'ok'; host_vmid?: string; gpus: InfraGpu[]; errors?: string[] } | InfraError
 export type InfraModels = { status: 'ok'; host_vmid?: string; models: InfraModel[]; note?: string } | InfraError
 
+/** DP-465: one sandbox box's network switches. `null` = could not be read. */
+export interface SandboxBox {
+  status: 'ok'
+  box: 'codr' | 'stagr'
+  lan: boolean | null
+  wan: boolean | null
+  allowlist: string | null
+  lan_connections: string[]
+  wan_connections: string[]
+  log: string[]
+  errors?: Record<string, string>
+}
+export type SandboxNet = { status: 'ok'; boxes: (SandboxBox | InfraError)[] } | InfraError
+
 export interface InfraStatus {
   enabled: boolean
   pve: InfraPve
   gpu: InfraGpuStatus
   models: InfraModels
+  net?: SandboxNet
 }
 
 export type InfraAction =
   | { action: 'start_guest' | 'stop_guest' | 'reboot_guest'; vmid: string; kind: 'ct' | 'vm' }
   | { action: 'set_active_model'; name: string }
   | { action: 'reboot_node' }
+  | { action: 'set_sandbox_net'; box: 'codr' | 'stagr'; zone: 'lan' | 'wan'; state: 'on' | 'off'; confirm?: boolean }
 
 /** The handler's own result dict — `status` plus whatever the tool returned. */
 export interface InfraActionResult {

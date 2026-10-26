@@ -18,7 +18,7 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.proxmox.ssh import SSHRunner, run_node_command
 
@@ -40,6 +40,15 @@ NODE_ARTIFACTS: tuple[tuple[str, str], ...] = (
 #: beside ``src/``.
 SERVICES_DIR = Path(__file__).resolve().parents[2] / "services" / "pve"
 
+#: DP-465: the second node target (host ``derpr``, ``PVE_NET_SSH_*``) and its
+#: own wrapper. ⚠️ Pinned the same way, in
+#: ``services/sandbox-net/derpr-net-wrapper``.
+NET_NODE_ARTIFACTS: tuple[tuple[str, str], ...] = (
+    ("derpr-net-wrapper", "/usr/local/bin/derpr-net-wrapper"),
+    ("agent-net", "/usr/local/sbin/agent-net"),
+)
+NET_SERVICES_DIR = SERVICES_DIR.parent / "sandbox-net"
+
 
 @dataclass
 class DriftReport:
@@ -55,7 +64,8 @@ class DriftReport:
         return not (self.stale or self.missing or self.unverifiable)
 
 
-def local_digests(services_dir: Path = SERVICES_DIR) -> Dict[str, str]:
+def local_digests(services_dir: Path = SERVICES_DIR,
+                  artifacts: Sequence[Tuple[str, str]] = NODE_ARTIFACTS) -> Dict[str, str]:
     """sha256 of each shipped artifact, keyed by its node path.
 
     CRLF is folded to LF first. The node copies are deployed from ``git show``
@@ -64,7 +74,7 @@ def local_digests(services_dir: Path = SERVICES_DIR) -> Dict[str, str]:
     correctly -- it would not run there (``bad interpreter: ^M``).
     """
     digests: Dict[str, str] = {}
-    for repo_name, node_path in NODE_ARTIFACTS:
+    for repo_name, node_path in artifacts:
         data = (services_dir / repo_name).read_bytes().replace(b"\r\n", b"\n")
         digests[node_path] = hashlib.sha256(data).hexdigest()
     return digests
@@ -81,13 +91,14 @@ def parse_sha256sum(stdout: str) -> Dict[str, str]:
 
 
 async def check_node_artifacts(
-    runner: SSHRunner, services_dir: Path = SERVICES_DIR
+    runner: SSHRunner, services_dir: Path = SERVICES_DIR,
+    artifacts: Sequence[Tuple[str, str]] = NODE_ARTIFACTS,
 ) -> DriftReport:
     try:
-        expected = local_digests(services_dir)
+        expected = local_digests(services_dir, artifacts)
     except OSError as e:
         return DriftReport(unverifiable=f"image is missing a shipped artifact: {e}")
-    argv = ["sha256sum", *(node_path for _, node_path in NODE_ARTIFACTS)]
+    argv = ["sha256sum", *(node_path for _, node_path in artifacts)]
     res = await run_node_command(runner, argv, exit_label="sha256sum")
     # sha256sum exits 1 when any file is absent but still hashes the rest, so
     # the stdout is read whatever the exit; only an empty one means no answer.
@@ -104,7 +115,7 @@ async def check_node_artifacts(
     return report
 
 
-def format_report(report: DriftReport) -> str:
+def format_report(report: DriftReport, source: str = "services/pve/") -> str:
     lines: List[str] = []
     if report.unverifiable:
         lines.append(
@@ -115,8 +126,8 @@ def format_report(report: DriftReport) -> str:
     lines += [f"- stale: `{p}`" for p in report.stale]
     lines += [f"- missing: `{p}`" for p in report.missing]
     lines.append(
-        "Proxmox/HuggingFace tools may fail until `services/pve/` is redeployed "
-        "to the node (see `services/pve/README.md`)."
+        f"The tools that use it may fail until `{source}` is redeployed "
+        f"to its host (see `{source}README.md`)."
     )
     return "\n".join(lines)
 
@@ -125,6 +136,8 @@ async def report_node_artifact_drift(
     runner: SSHRunner,
     send: Callable[[str, str], Awaitable[bool]],
     services_dir: Path = SERVICES_DIR,
+    artifacts: Sequence[Tuple[str, str]] = NODE_ARTIFACTS,
+    source: str = "services/pve/",
 ) -> DriftReport:
     """Run the check once and hand any drift to ``send(subject, body)``.
 
@@ -132,12 +145,12 @@ async def report_node_artifact_drift(
     drift it exists to report.
     """
     try:
-        report = await check_node_artifacts(runner, services_dir)
+        report = await check_node_artifacts(runner, services_dir, artifacts)
         if report.ok:
-            logger.info("node artifacts match the image (%d files)", len(NODE_ARTIFACTS))
+            logger.info("node artifacts match the image (%d files, %s)", len(artifacts), source)
         else:
-            logger.warning("node artifact drift: %s", report)
-            await send("Node scripts are out of date", format_report(report))
+            logger.warning("node artifact drift (%s): %s", source, report)
+            await send(f"Node scripts are out of date ({source})", format_report(report, source))
         return report
     except Exception:  # noqa: BLE001 -- see docstring
         logger.exception("node artifact drift check failed")

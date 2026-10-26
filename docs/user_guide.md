@@ -791,9 +791,12 @@ only thing that talks to both:
   no `.env`, no DERPR data), so anything run there can only hurt the setup box
   itself, and whatever its network switches let it reach (below).
 - **Network switches (DP-465).** Each box has two, **LAN** and **WAN**, and all
-  four start **off**. They are off again after the box reboots or the proxy
-  restarts, and approved hosts are forgotten too: nothing stays open by accident.
-  You flip them in the portal's network panel.
+  four start **off**. A box's LAN goes off again whenever the box starts, and
+  every WAN goes off, with its approved hosts forgotten, whenever the proxy
+  container restarts: nothing stays open by accident. (A box rebooting on its
+  own does not turn its WAN off.) You flip them in the portal's INFRA panel,
+  under **SANDBOX NETWORK**, which also shows open connections, each box's WAN
+  allowlist and the proxy log.
   - **LAN on**: the box can reach anything on the home network (`10.0.0.0/24`),
     any protocol: SMB, SSH, a port scan. Off, it reaches nothing at home except
     what it always needs (codr's box reaches the inference server).
@@ -811,7 +814,9 @@ only thing that talks to both:
     are sure. Confirm, and they are cut on the spot; a running download stops.
     With nothing open, the switch just goes off.
   - **LAN and WAN both on** for one box warns you before the second goes on: the
-    box could then carry anything from home to the internet.
+    box could then carry anything from home to the internet. In the panel the
+    warning is a confirm bar; for the setup agent's `request_network` it is a
+    ⚠️ line in the approval prompt itself, so you see it before you approve.
   - **The log**: every connection the proxy passed (box, host, time) and every
     refusal, in the same panel.
   - The setup agent can **ask** for a switch with `request_network`, giving its
@@ -819,7 +824,7 @@ only thing that talks to both:
     switches stay off for now**: for the foreseeable future only the setup box
     touches the internet. codr's box works the same way, so opening it later is
     a setting, not new code.
-- **The dt21 folder.** One read-write folder on dt21 that the setup box mounts
+- **The dt21 folder** (not set up yet). One read-write folder on dt21 that the setup box mounts
   while its LAN is on, to read files you put there and to drop files copied out
   of codr. It is shared under a dedicated Windows account that can reach that
   folder and nothing else.
@@ -863,8 +868,11 @@ replaces files that are already there.
 
 **Setting it up.** `STAGR_SERVER_URL` (e.g. `http://10.0.0.76:4096`) and
 `STAGR_SERVER_PASSWORD` (from `/etc/opencode/serve.env` on the setup box) in
-`.env`; the web-access tools also need `PVE_TOOLS_ENABLED` and the `derpr-egress`
-verb on the node (`services/pve/README.md`). Add the persona the same way as
+`.env`; the network tools also need `PVE_TOOLS_ENABLED`, the `derpr-egress`
+verb on the node (`services/pve/README.md`, for WAN), and a second node key for
+host `derpr` with `agent-net` there (`services/sandbox-net/README.md`, for LAN;
+`PVE_NET_SSH_HOST`, default `10.0.0.74`, and `PVE_NET_SSH_KEY`, default
+`/run/secrets/pve_derpr_net`). Add the persona the same way as
 [hypr](#hypr--the-infra-operator-opt-in-not-seeded), and pin it to yourself with
 `set origin_allowlist <guild>/<channel>/<your user id> portal` from that channel.
 Optional: `STAGR_WORKDIR` (default `/home/agent/work`), `STAGR_OUTPUT_CHARS`
@@ -1530,6 +1538,11 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
+
+Two more tools sit behind the same binding for the portal's INFRA panel only,
+and no persona is given them: `sandbox_net_status` (both boxes' switches,
+allowlists, open connections, proxy log) and `set_sandbox_net` (flip any
+switch of either box; the operator's click is the approval).
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 

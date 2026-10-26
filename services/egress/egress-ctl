@@ -1,90 +1,151 @@
 #!/bin/bash
-# egress-ctl — the domain allowlist of the stagr egress proxy (DP-456).
+# egress-ctl — the WAN switch and host allowlist of each sandbox box (DP-465).
 #
 # Runs INSIDE the egress container (CT110 on r9700), installed at
-# /usr/local/sbin/egress-ctl. The setup VM (stagr, 10.0.0.76) reaches the
-# internet only through tinyproxy here, and tinyproxy admits only the domains
-# in its filter file, which this script writes from two lists:
+# /usr/local/sbin/egress-ctl. Each box (codr-vm, stagr-vm) reaches the internet
+# only through its own tinyproxy instance here, `tinyproxy@<box>`, which admits
+# only that box and only the hosts in its filter. The instance IS the switch:
 #
-#   /etc/egress/default.list   domains always allowed (GitHub, PyPI), one per line
-#   /var/lib/egress/granted    "<domain> <expiry epoch>" lines, one per approval
+#   on   start the instance: the box has WAN, through the allowlist
+#   off  stop it: every tunnel it carries dies, and its approved hosts are
+#        forgotten (they live on tmpfs and ExecStopPost removes them)
 #
-# derpr adds a grant through the node verb `derpr-egress allow`, which runs
-# `pct exec 110 -- egress-ctl allow <domain> <minutes>` after a human approved
-# the request. egress-refresh.timer runs `refresh` every minute to drop expired
-# grants. A domain admits itself and its subdomains.
+# The instances are never enabled at boot, so a CT110 restart turns every
+# box's WAN off and forgets every approval (fail closed).
 #
-#   egress-ctl allow <domain> <minutes>   grant (or extend) until now + minutes
-#   egress-ctl list                       defaults, then live grants with expiry
-#   egress-ctl refresh                    prune expired grants, rewrite the filter
+# The filter is written from two lists:
+#   /etc/egress/default.list     always allowed; a line admits the domain and its subdomains, "=host" only that host
+#   /run/egress/<box>.approved   hosts approved while WAN is on; each admits that exact host
+#
+# derpr calls this through the node verb `derpr-egress` on r9700, which runs
+# `pct exec 110 -- egress-ctl <box> …`.
+#
+#   egress-ctl <box> on|off|status
+#   egress-ctl <box> allow <host>   WAN must be on
+#   egress-ctl <box> list           defaults, then approved hosts
+#   egress-ctl <box> conns          live tunnels: "<ip>:<port> <host>"
+#   egress-ctl <box> log            the last connections and refusals
+#   egress-ctl <box> filter         (systemd ExecStartPre) write the filter
 set -euo pipefail
 
 defaults=/etc/egress/default.list
-granted=/var/lib/egress/granted
-filter=/etc/tinyproxy/filter
-# Mirrors the gate in services/pve/derpr-egress; checked again here so this
-# script is safe on its own. The last label starts with a letter: no IP literals.
-domain_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
-max_minutes=1440
+run=/run/egress
+# Mirrors the gate in services/pve/derpr-egress and src/stagr/net.py. The last
+# label starts with a letter: no IP literals.
+host_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$'
+log_lines=40
 
 die() { echo "egress-ctl: $1" >&2; exit 1; }
+usage() { die "usage: egress-ctl <codr|stagr> {on|off|status|allow <host>|list|conns|log}"; }
 
-# One run at a time: `allow` and the timer's `refresh` both rewrite $granted
-# through $granted.new, and interleaved they lose a grant.
-exec 9>/run/egress-ctl.lock
-flock 9
+box="${1:-}"
+case "$box" in codr|stagr) ;; *) usage ;; esac
+unit="tinyproxy@$box"
+approved="$run/$box.approved"
+filter="$run/$box.filter"
+logfile="/var/log/tinyproxy/$box.log"
 
-valid_domain() { [ "${#1}" -le 253 ] && [[ "$1" =~ $domain_re ]]; }
+# One run per box at a time: `allow` rewrites the approved list through a temp file.
+# Not for `filter`: it is the unit's ExecStartPre, run while `on` holds this
+# lock and waits in `systemctl start`, so taking it there would deadlock.
+mkdir -p "$run"
+if [ "${2:-}" != filter ]; then
+  exec 9>"$run/$box.lock"
+  flock 9
+fi
 
-prune() {
-  local now; now=$(date +%s)
-  mkdir -p "$(dirname "$granted")"; touch "$granted"
-  awk -v now="$now" '$2 > now' "$granted" > "$granted.new"
-  mv "$granted.new" "$granted"
-}
+valid_host() { [ "${#1}" -le 253 ] && [[ "$1" =~ $host_re ]]; }
+active() { systemctl is-active --quiet "$unit"; }
+# The default list without comments and blank lines. sed, not grep: grep exits 1
+# on a list with no entries, which pipefail turns into a failed `on` / `list`.
+defaults_list() { sed -E '/^[[:space:]]*(#|$)/d' "$defaults"; }
 
 write_filter() {
-  # One extended regex per domain: the domain itself or any subdomain of it.
-  { grep -Ev '^[[:space:]]*(#|$)' "$defaults"; awk '{print $1}' "$granted"; } \
-    | sort -u \
-    | while read -r d; do
-        valid_domain "$d" || continue
+  # local: `allow` keeps its host in the global $h and reports it after this.
+  local d h
+  touch "$approved"
+  {
+    # Defaults: the domain itself or any subdomain of it; "=host" exactly that
+    # host. (`if`, not `&&`: a skipped last line must not fail the loop.)
+    defaults_list | while read -r d; do
+      if [ "${d:0:1}" = "=" ]; then
+        if valid_host "${d:1}"; then printf '^%s$\n' "${d:1}" | sed 's/\./\\./g'; fi
+      elif valid_host "$d"; then
         printf '(^|\\.)%s$\n' "${d//./\\.}"
-      done > "$filter.new"
-  if cmp -s "$filter.new" "$filter"; then
-    rm -f "$filter.new"
-  else
-    mv "$filter.new" "$filter"
-    # reload = SIGUSR1: tinyproxy 1.11 rereads the filter in both directions
-    # and keeps in-flight connections; a restart would abort stagr's downloads.
-    systemctl reload tinyproxy
-  fi
+      fi
+    done
+    # Approved: exactly that host.
+    while read -r h; do
+      if valid_host "$h"; then printf '^%s$\n' "${h//./\\.}"; fi
+    done < "$approved"
+  } > "$filter.new"
+  chmod 644 "$filter.new"
+  mv "$filter.new" "$filter"
 }
 
-case "${1:-}" in
-  allow)
-    [ "$#" -eq 3 ] || die "usage: egress-ctl allow <domain> <minutes>"
-    d="${2,,}"; m="$3"
-    valid_domain "$d" || die "not a domain name: $2"
-    [[ "$m" =~ ^[0-9]+$ ]] && [ "$m" -ge 1 ] && [ "$m" -le "$max_minutes" ] \
-      || die "minutes must be 1-$max_minutes"
-    prune
-    expiry=$(( $(date +%s) + m * 60 ))
-    awk -v d="$d" '$1 != d' "$granted" > "$granted.new"
-    echo "$d $expiry" >> "$granted.new"
-    mv "$granted.new" "$granted"
+case "${2:-}" in
+  on)
+    [ "$#" -eq 2 ] || usage
+    systemctl start "$unit"
+    echo "wan: on"
+    ;;
+  off)
+    [ "$#" -eq 2 ] || usage
+    systemctl stop "$unit"
+    echo "wan: off"
+    ;;
+  status)
+    [ "$#" -eq 2 ] || usage
+    if active; then echo "wan: on"; else echo "wan: off"; fi
+    ;;
+  filter)
+    [ "$#" -eq 2 ] || usage
     write_filter
-    echo "allowed $d until $(date -d "@$expiry" '+%Y-%m-%d %H:%M %Z')"
+    ;;
+  allow)
+    [ "$#" -eq 3 ] || usage
+    h="${3,,}"
+    valid_host "$h" || die "not a host name: $3"
+    active || die "$box's WAN is off; turn it on first"
+    touch "$approved"
+    if ! grep -qxF "$h" "$approved"; then
+      echo "$h" >> "$approved"
+      write_filter
+      # reload = SIGUSR1: tinyproxy 1.11 rereads the filter in both directions
+      # and keeps in-flight connections.
+      systemctl reload "$unit"
+    fi
+    echo "allowed $h until $box's WAN goes off"
     ;;
   list)
-    prune
-    echo "default:"; grep -Ev '^[[:space:]]*(#|$)' "$defaults" | sed 's/^/  /'
-    echo "granted:"
-    while read -r d e; do echo "  $d until $(date -d "@$e" '+%Y-%m-%d %H:%M %Z')"; done < "$granted"
+    [ "$#" -eq 2 ] || usage
+    echo "default:"; defaults_list | sed 's/^/  /'
+    echo "approved:"
+    [ -f "$approved" ] && sed 's/^/  /' "$approved"
+    true
     ;;
-  refresh)
-    prune
-    write_filter
+  conns)
+    [ "$#" -eq 2 ] || usage
+    active || exit 0
+    pid=$(systemctl show -p MainPID --value "$unit")
+    port=$(awk '$1 == "Port" {print $2}' "/etc/egress/$box.conf")
+    # Each tunnel is two sockets in tinyproxy: one from the box (local port =
+    # the proxy's), one to the destination. The log names the host per
+    # descriptor ("Established connection to host "x" using file descriptor
+    # N."), latest line wins.
+    ss -tnpH state established | awk -v pid="pid=$pid," -v port=":$port" '
+      index($0, pid) && substr($3, length($3) - length(port) + 1) != port {
+        match($0, /fd=[0-9]+/); print $4, substr($0, RSTART + 3, RLENGTH - 3)
+      }' | while read -r peer fd; do
+        host=$(grep -o "host \"[^\"]*\" using file descriptor $fd\." "$logfile" 2>/dev/null \
+               | tail -n 1 | cut -d'"' -f2)
+        echo "$peer ${host:-?}"
+      done
     ;;
-  *) die "usage: egress-ctl {allow <domain> <minutes>|list|refresh}" ;;
+  log)
+    [ "$#" -eq 2 ] || usage
+    [ -f "$logfile" ] || exit 0
+    grep -E 'Established connection to host|refused|Filtered' "$logfile" | tail -n "$log_lines"
+    ;;
+  *) usage ;;
 esac

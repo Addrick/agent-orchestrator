@@ -7,7 +7,7 @@ The artifacts that live on the **Proxmox node**, not in the derpr container:
 | `derpr-pve-wrapper` | `/usr/local/bin/derpr-pve-wrapper` | The forced-command allowlist for derpr's SSH key (DP-267). |
 | `derpr-model-install` | `/usr/local/sbin/derpr-model-install` | The one verb behind `install_model` (DP-265). |
 | `derpr-model-tier` | `/usr/local/sbin/derpr-model-tier` | Hot/cold gguf tiering: `list`, `pin`, `unpin`, `promote` (DP-340). |
-| `derpr-egress` | `/usr/local/sbin/derpr-egress` | The one verb behind the stagr web-access tools (DP-456): `allow <domain> <minutes>`, `list`, forwarded into the egress container (`services/egress/`). |
+| `derpr-egress` | `/usr/local/sbin/derpr-egress` | The one verb behind each sandbox box's WAN (DP-456, DP-465): `<codr\|stagr> on\|off\|status\|list\|conns\|log\|allow <host>`, forwarded into the egress container (`services/egress/`). The LAN half is on host `derpr` behind a second key: `services/sandbox-net/`. |
 | `koboldcpp-model.service.in` | `/usr/local/share/derpr/koboldcpp-model.service.in` | Unit template the installer fills in. |
 | `gguf_header.py` | `/usr/local/share/derpr/gguf_header.py` | Reads `n_layer` / `n_kv_head` / `head_dim` / `ssm_layers` out of a downloaded gguf. Deploy it **with** `derpr-model-install`: since DP-360 the installer gates on this script's exit status rather than on a pattern over its output, so an older reader still works (it also exits 0) but an older *installer* silently drops any fragment whose first key is not `n_layer`. |
 

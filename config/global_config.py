@@ -544,8 +544,8 @@ OPENCODE_CALL_TIMEOUT_SECONDS = float(os.environ.get("OPENCODE_CALL_TIMEOUT_SECO
 RATE_LIMIT_OPENCODE_RPM = int(os.environ.get("RATE_LIMIT_OPENCODE_RPM", "15"))
 
 # stagr (DP-456) — the setup VM: a second `opencode serve` that derpr only runs
-# shell commands on (no LLM there). Its internet goes through the egress proxy's
-# domain allowlist; codr's sandbox above stays offline. Unset URL = the stagr
+# shell commands on (no LLM there). Its LAN and WAN are switches, off by default
+# (DP-465: LAN on host derpr, WAN = its proxy instance in CT110). Unset URL = the stagr
 # tools refuse. Same username as the codr server.
 STAGR_SERVER_URL = os.environ.get("STAGR_SERVER_URL", "").rstrip("/")
 STAGR_SERVER_PASSWORD = os.environ.get("STAGR_SERVER_PASSWORD", "")
@@ -742,10 +742,21 @@ PVE_SSH_KEY = os.environ.get("PVE_SSH_KEY", "/run/secrets/pve_derpr")
 PVE_SSH_TIMEOUT = float(os.environ.get("PVE_SSH_TIMEOUT", "20"))
 PVE_MODEL_HOST_VMID = os.environ.get("PVE_MODEL_HOST_VMID", "101")
 
+# The SECOND node target (DP-465): host `derpr`, where the sandbox boxes (codr-vm,
+# stagr-vm) and their firewalls live. Its own key, gated on that host by
+# services/sandbox-net/derpr-net-wrapper, which admits only the LAN switch
+# (`agent-net`) and its drift check. Same user, timeout and PVE_TOOLS_ENABLED
+# switch as the first; neither key reaches the other host.
+# `or`, not a get() default: SSHRunner falls back to PVE_SSH_* on an empty
+# value, so `PVE_NET_SSH_HOST=` would send LAN calls to the first host.
+PVE_NET_SSH_HOST = os.environ.get("PVE_NET_SSH_HOST") or "10.0.0.74"
+PVE_NET_SSH_KEY = os.environ.get("PVE_NET_SSH_KEY") or "/run/secrets/pve_derpr_net"
+
 # HuggingFace model provisioning (DP-265). Read-only HF Hub API searches plus a
 # parked `install_model` that hands ONE node-side script the repo/file/name and
 # the size+sha256 derpr itself read from HF. Rides the same SSH transport as the
-# proxmox tools (PVE_SSH_*) — there is no second key and no second host.
+# proxmox tools (PVE_SSH_*) — the second key (PVE_NET_SSH_*, DP-465) is for the
+# sandbox network switch only.
 #
 # HF_TOOLS_ENABLED — master switch for hf_search/hf_files/install_model/
 #   install_status. The HuggingFaceIntegration always registers (startup-wiring

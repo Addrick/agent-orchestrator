@@ -160,7 +160,10 @@ def _schedule_node_artifact_check(app: AppManager,
             logger.warning("node artifact drift check disabled: no debug channel "
                            "(set DISCORD_DEBUG_CHANNEL or agents.json recipients.debug)")
         return
-    from src.proxmox.artifacts import report_node_artifact_drift
+    from config import global_config
+    from src.proxmox.artifacts import (
+        NET_NODE_ARTIFACTS, NET_SERVICES_DIR, report_node_artifact_drift,
+    )
     from src.proxmox.ssh import SSHRunner
 
     async def _send_debug(subject: str, body: str) -> bool:
@@ -169,6 +172,18 @@ def _schedule_node_artifact_check(app: AppManager,
 
     app.register_task("node_artifact_check",
                       report_node_artifact_drift(SSHRunner(), _send_debug))
+    # DP-465: the second node target (host derpr) has its own wrapper and key.
+    # A missing key means host derpr is not rolled out yet: say so once rather
+    # than post "out of date" on every start.
+    if not os.path.exists(global_config.PVE_NET_SSH_KEY):
+        logger.info("host derpr artifact check skipped: no key at PVE_NET_SSH_KEY")
+        return
+    net_runner = SSHRunner(host=global_config.PVE_NET_SSH_HOST,
+                           key_path=global_config.PVE_NET_SSH_KEY)
+    app.register_task("net_node_artifact_check",
+                      report_node_artifact_drift(net_runner, _send_debug,
+                                                 NET_SERVICES_DIR, NET_NODE_ARTIFACTS,
+                                                 "services/sandbox-net/"))
 
 
 def _register_interfaces(
