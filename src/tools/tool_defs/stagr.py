@@ -2,11 +2,15 @@
 
 The setup VM has no LAN and reaches the internet only through the egress
 proxy's domain allowlist, so ``stagr_shell`` is a read (ungated): the VM is the
-boundary, not a review of each command. Everything that crosses out of it is
-``is_write`` and parked for approval: widening the allowlist, and moving files
-into or out of codr's offline sandbox.
+boundary, not a review of each command. ``codr_shell`` is ungated for the same
+reason (DP-462): codr's sandbox is offline and restorable, and the handler runs
+it only between codr's turns. Everything that crosses a boundary is
+``is_write`` and parked for approval: widening the allowlist, and copying files
+out of codr's sandbox. ``copy_to_codr`` is not: ``codr_shell`` can already write
+any file there, so a gate on the copy would only be a convention.
 
-``stagr_shell`` returns whatever the VM fetched from the web, so it is
+``stagr_shell`` returns whatever the VM fetched from the web, and
+``codr_shell`` whatever was copied in from there, so both are
 ``produces_untrusted``. Every tool here is in the one ``stagr`` domain, which
 keeps ToolPolicy Rule 2 (untrusted read + foreign network write) closed: the
 writes go to the same boxes the reads come from. Adding a tool from another
@@ -95,26 +99,58 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "type": "function",
-        "is_write": True,
+        "is_write": False,
         "service_binding": "stagr",
-        "capabilities": _caps(),
+        "capabilities": _caps(untrusted=True),
         "function": {
-            "name": "deliver_to_codr",
+            "name": "codr_shell",
             "description": (
-                "Copy a folder from stagr into codr's offline sandbox as tasks/<task>/. Needs "
-                "Adam's approval. Any .git is left behind: the folder arrives as a fresh git "
-                "repo with one commit, so no upstream history reaches codr. Remove anything "
-                "else that would give the answer away (a changelog entry, a test from the fix) "
-                "before delivering. Refused while codr is working, and if tasks/<task> already "
-                "exists there."
+                "Run a bash command in codr's workspace on codr's offline sandbox (Debian 13, "
+                "user agent with passwordless sudo, Python 3.13, git; no internet, no LAN). Use "
+                "it between tasks: install what a task needs from files you copied in (e.g. pip "
+                "install --no-index --find-links wheels ...), check the environment, debug a test "
+                "that fails offline. Refused while codr is working, and codr starts nothing "
+                "while it runs. Returns the exit code and the output (stdout and stderr "
+                "together; the middle of very long output is cut)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Folder on stagr, relative to /home/agent/work."},
-                    "task": {"type": "string", "description": "Task folder name in codr's workspace, e.g. 09-click-issue-2711."},
+                    "command": {"type": "string", "description": "The bash to run. May be several lines."},
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Kill it after this long. Default 600, at most 3600.",
+                    },
                 },
-                "required": ["path", "task"],
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": False,
+        "service_binding": "stagr",
+        "capabilities": _caps(),
+        "function": {
+            "name": "copy_to_codr",
+            "description": (
+                "Copy a file or folder from stagr into codr's workspace. "
+                "Any .git is left behind unless keep_git is true, so no upstream history reaches "
+                "codr. Remove anything else that would give the answer away (a changelog entry, "
+                "a test from the fix) before copying. Never overwrites: refused if dest exists, "
+                "and while codr is working."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "File or folder on stagr, relative to /home/agent/work."},
+                    "dest": {
+                        "type": "string",
+                        "description": "New path in codr's workspace, e.g. tasks/09-click-issue-2711 or tools/mcp-foo.",
+                    },
+                    "keep_git": {"type": "boolean", "description": "Copy .git folders too. Default false."},
+                },
+                "required": ["source", "dest"],
             },
         },
     },
@@ -124,15 +160,20 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
-            "name": "retrieve_from_codr",
+            "name": "copy_from_codr",
             "description": (
-                "Copy codr's tasks/<task>/ folder to stagr as from-codr/<task>/ (replacing any "
-                "earlier copy), e.g. to review or test its work. Needs Adam's approval."
+                "Copy a file or folder from codr's workspace to stagr, e.g. to review or test "
+                "codr's work. Needs Adam's approval. Any .git is left behind unless keep_git is "
+                "true. Never overwrites: refused if dest exists on stagr."
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"task": {"type": "string", "description": "Task folder name in codr's workspace."}},
-                "required": ["task"],
+                "properties": {
+                    "source": {"type": "string", "description": "File or folder in codr's workspace, e.g. tasks/08-cron."},
+                    "dest": {"type": "string", "description": "New path on stagr, relative to /home/agent/work."},
+                    "keep_git": {"type": "boolean", "description": "Copy .git folders too, e.g. to diff codr's commits. Default false."},
+                },
+                "required": ["source", "dest"],
             },
         },
     },

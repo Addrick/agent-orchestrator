@@ -11,7 +11,7 @@ import pytest
 
 from src.agents import codr_agent
 from src.agents.codr_agent import (
-    CodrAgent, detect_loop, load_tasks, parse_check, sync_script, workspace_files,
+    CodrAgent, detect_loop, load_tasks, parse_check, sync_script, validate_mcp, workspace_files,
 )
 from src.engine.providers import opencode
 from src.generation_events import ResponseType
@@ -177,6 +177,48 @@ def test_workspace_files_stop_the_offline_npm_install():
     assert config["provider"]["kcpp-pool"]["options"]["baseURL"] == codr_agent.DEFAULTS["pool_url"]
     assert "model: kcpp-pool/local" in files[".opencode/agent/pool.md"]
     assert "mkdir -p .opencode/tool .opencode/agent .opencode/node_modules" in sync_script(files)
+
+
+@pytest.mark.parametrize("mcp, error", [
+    ([], "must be an object"),
+    ({"a": "x"}, "mcp.a must be an object"),
+    ({"a": {"type": "local"}}, "needs `command`"),
+    ({"a": {"type": "local", "command": []}}, "needs `command`"),
+    ({"a": {"type": "local", "command": ["ok", 3]}}, "needs `command`"),
+    ({"a": {"type": "remote"}}, "needs `url`"),
+    ({"a": {"type": "remote", "url": "file:///etc/passwd"}}, "needs `url`"),
+    ({"a": {"type": "stdio", "command": ["x"]}}, "`type` must be"),
+    ({"a": {"enabled": "no"}}, "`type` must be"),
+    ({"a": {"type": "local", "command": ["x"], "enabled": "yes"}}, "`enabled` must be"),
+    ({"a": {"type": "local", "command": ["x"], "timeout": "5000"}}, "`timeout` must be"),
+    ({"a": {"type": "local", "command": ["x"], "environment": {"K": 1}}}, "`environment` must map"),
+    ({"a": {"type": "remote", "url": "https://h/m", "headers": ["x"]}}, "`headers` must map"),
+])
+def test_a_malformed_mcp_entry_is_refused(mcp, error):
+    with pytest.raises(ValueError, match=error):
+        validate_mcp(mcp)
+
+
+def test_a_valid_mcp_setting_passes():
+    validate_mcp(None)
+    validate_mcp({})
+    validate_mcp({"a": {"type": "local", "command": ["x"]}, "b": {"type": "remote", "url": "https://h/m"},
+                  "c": {"enabled": False}})
+
+
+async def test_an_mcp_change_rewrites_the_config_and_reloads_codr(fake, tmp_path):
+    """The `mcp` block goes through the same changed -> dispose path as every
+    other managed file, against a real workspace on disk."""
+    fake.shell_output = real_bash(tmp_path)
+    agent, _ = _agent(tmp_path, start_tasks=False)
+    await agent.deploy()
+    await agent.deploy()                    # the first sync's reload, while idle
+    fake.calls.clear()
+    agent, _ = _agent(tmp_path, start_tasks=False, mcp={"docs": {"type": "local", "command": ["docs-mcp"]}})
+    await agent.deploy()
+    written = json.loads((tmp_path / ".opencode" / "opencode.json").read_text())
+    assert written["mcp"] == {"docs": {"type": "local", "command": ["docs-mcp"]}}
+    assert [c for c in fake.calls if c[1] == "/instance/dispose"]
 
 
 async def test_a_seed_of_any_size_arrives_and_keeps_what_codr_changed(fake, tmp_path):

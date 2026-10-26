@@ -750,7 +750,9 @@ codr itself stays on its configured model.
 
 **Setup DERPR does in the workspace.** On the agent's first tick it writes
 `.opencode/` into codr's workspace: the `notify_adam` tool, the `pool` subagent
-and its provider. Edits to those files are overwritten on the next start.
+and its provider, plus any `mcp` servers configured below. Edits to those files are
+overwritten on the next start, so an MCP server is added in `agents.json`, not by
+editing `opencode.json` in the workspace.
 
 Settings, per instance in `agents.json` under `codr`:
 - `schedule.interval` (default `30` s): how often the agent checks codr.
@@ -767,6 +769,15 @@ Settings, per instance in `agents.json` under `codr`:
   starts no new tasks.
 - `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`
   (default `65536`): the pool provider codr's subagent uses.
+- `mcp` (default none): MCP servers codr may use, written into the managed
+  `.opencode/opencode.json` as its `mcp` block, in opencode's own format: each
+  name maps to `{"type": "local", "command": ["prog", "arg", ...]}` or
+  `{"type": "remote", "url": "http://..."}`, with opencode's other optional
+  fields (`environment`, `headers`, `enabled`, `timeout`) passed through. codr's
+  box is offline, so a local server must already be installed there (e.g. by
+  stagr). A malformed entry stops the agent from starting, with the reason in
+  the log. Changing it reloads codr's instance on the next idle tick, like any
+  other change to the managed files.
 
 #### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456)
 
@@ -793,17 +804,27 @@ only thing that talks to both:
   with it directly. Its `stagr_shell` runs bash on the setup box **without
   approval**: the box is built so that nothing it reaches matters, which is what
   saves you from reading each command. `list_web_access` shows the allowlist.
-- **Moving things into codr's box**: `deliver_to_codr` copies a folder from the
-  setup box into `tasks/<task>/` in codr's workspace, and needs your approval. Any
-  `.git` is left behind and the folder arrives as a **fresh git repo with one
-  commit**, so a repo checked out before an upstream fix never carries the fix in
-  its history. (Files can still give an answer away, such as a changelog entry or
-  the fix's own test; the setup agent is told to look for those.) It is refused
-  while codr is working and if `tasks/<task>` already exists, so it never
-  overwrites codr's work. The setup agent never gets a shell in codr's box.
-- **Pulling codr's work out**: `retrieve_from_codr` copies codr's `tasks/<task>/`
-  to `from-codr/<task>/` on the setup box (replacing an earlier copy), to review
-  or test it there. Needs your approval.
+- **A shell in codr's box, between tasks**: `codr_shell` runs bash in codr's
+  workspace on `codr-vm`, **without approval**, so the setup agent can install
+  what a task needs, check the environment, or debug a test that fails offline,
+  without a round trip through codr. It is refused while codr is starting or
+  running a turn (any session in codr's workspace busy), and after a task turn
+  ends until its check has run (the next tick), and while it runs, codr
+  starts nothing: the environment changes only between tasks, so a result still
+  measures codr. codr's box is offline and can be rebuilt from a backup, so the
+  worst a command there can do is cost a restore.
+- **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
+  the setup box to any path in codr's workspace, and `copy_from_codr` copies one
+  back to any path on the setup box. Only `copy_from_codr` needs your approval:
+  `codr_shell` can already write any file into codr's box, so a gate on the copy
+  in would be for show. **Any `.git` is
+  left behind** unless the call asks to keep it (`keep_git`), so a repo checked
+  out before an upstream fix never carries the fix in its history. (Files can
+  still give an answer away, such as a changelog entry or the fix's own test; the
+  setup agent is told to look for those.) Neither ever overwrites: the copy is
+  refused if the destination already exists. `copy_to_codr` is also refused
+  while codr is working. To make a task folder a git repo for codr, the setup
+  agent runs `git init` there with `codr_shell`.
 - **Seeing what it did**: the portal shows each tool call as a card with the
   command and its output (the middle of very long output is cut, at
   `STAGR_OUTPUT_CHARS`). Discord shows the persona's replies and the approval
@@ -811,7 +832,7 @@ only thing that talks to both:
 
 To give codr a real-repo task: ask stagr to prepare it (clone, check out the
 start commit, download wheels for what the tests need into the folder, run the
-tests the way codr will), approve the delivery, and only then add the task's
+tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then add the task's
 `TASK.md` and `check.sh` to `config/codr_tasks/` under the same name. The codr
 agent starts a task as soon as its folder is in the queue, and its seeding never
 replaces files that are already there.
@@ -1481,8 +1502,9 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
 | `list_web_access` | no | The proxy allowlist: defaults and live grants |
 | `request_web_access` | yes | Allow one more domain for 1-1440 minutes |
-| `deliver_to_codr` | yes | Copy a setup-box folder into codr's `tasks/<task>/` as a fresh one-commit repo |
-| `retrieve_from_codr` | yes | Copy codr's `tasks/<task>/` to `from-codr/<task>/` on the setup box |
+| `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
+| `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
+| `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 

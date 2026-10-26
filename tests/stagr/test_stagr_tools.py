@@ -13,6 +13,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from config import global_config
+from src.engine.providers.opencode import AUTO_FIELD, session_title, workspace_directory, workspace_lock
 from src.proxmox.ssh import SSHResult
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
@@ -83,55 +84,147 @@ async def test_tools_refuse_when_stagr_is_not_configured(monkeypatch):
     assert result["status"] == "error" and "not configured" in result["message"]
 
 
+def _codr_lock():
+    return workspace_lock(workspace_directory("codr")[2])
+
+
+async def test_codr_shell_runs_in_codr_workspace_and_holds_its_lock(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    seen = []
+    inner = codr.shell_output
+
+    def shell(script):
+        seen.append(_codr_lock().locked())
+        return inner(script)
+
+    codr.shell_output = shell
+    result = await StagrToolHandler()._codr_shell("touch made-here; echo hi; exit 4")
+    assert result["status"] == "ok" and result["exit_code"] == 4 and "hi" in result["output"]
+    assert (codr_dir / "made-here").exists() and not (stagr_dir / "made-here").exists()
+    assert seen == [True]                   # codr starts nothing while it runs
+    assert not _codr_lock().locked()
+
+
+async def test_codr_shell_is_refused_while_codr_works(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    codr.busy.add("ses_1")
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "error" and "idle" in result["message"]
+    assert not (codr_dir / "x").exists()
+
+
+async def test_codr_shell_is_refused_while_a_codr_turn_starts(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    async with _codr_lock():
+        result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "error" and "idle" in result["message"]
+    assert not (codr_dir / "x").exists()
+
+
+async def test_codr_shell_waits_for_an_ended_task_turn_to_be_checked(boxes):
+    """A task turn that has ended is idle, but its check runs on the agent's
+    next tick: changing the box before then changes what is measured."""
+    stagr, codr, stagr_dir, codr_dir = boxes
+    sid = "ses_task"
+    codr.sessions[sid] = {"id": sid, "directory": workspace_directory("codr")[2],
+                          "title": session_title("codr"), "time": {"created": 1, "updated": 2}}
+    codr.messages[sid] = []
+    start = codr.add(sid, "user", [{"type": "text", "text": "do 01",
+                                    "metadata": {AUTO_FIELD: {"task": "01", "attempt": 1}}}])
+    codr.add(sid, "assistant", [{"type": "text", "text": "done"}],
+             time={"created": 1, "completed": 2}, finish="stop")
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "error" and "not checked" in result["message"]
+    assert not (codr_dir / "x").exists()
+    start["parts"][0]["metadata"][AUTO_FIELD]["result"] = "pass"      # the check ran
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "ok" and (codr_dir / "x").exists()
+
+
+async def test_a_git_folder_is_not_silently_dropped(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    (stagr_dir / "repo" / ".git").mkdir(parents=True)
+    result = await StagrToolHandler()._copy_to_codr("repo/.git", "tools/g")
+    assert result["status"] == "error" and "keep_git" in result["message"]
+
+
 @pytest.mark.skipif(subprocess.run(["git", "--version"], capture_output=True).returncode != 0,
                     reason="needs git")
-async def test_delivery_leaves_upstream_history_behind(boxes):
+async def test_a_copy_to_codr_leaves_upstream_history_behind(boxes):
     """A checkout at the pre-fix commit still carries the fix in .git; codr
-    must get the files and a one-commit repo, never that history."""
+    must get the files and none of that history."""
     stagr, codr, stagr_dir, codr_dir = boxes
     _upstream_repo(stagr_dir / "repo")
-    result = await StagrToolHandler()._deliver_to_codr("repo", "09-c1")
+    result = await StagrToolHandler()._copy_to_codr("repo", "tasks/09-c1")
     assert result["status"] == "ok", result
     task = codr_dir / "tasks" / "09-c1"
     assert "a - b" in (task / "lib.py").read_text()
-    assert _git(task, "rev-list", "--all", "--count").strip() == "1"
-    assert "THE FIX" not in _git(task, "log", "--all", "--format=%s")
-    assert [p.name for p in codr_dir.iterdir()] == ["tasks"]    # staged archive removed
+    assert not (task / ".git").exists()
+    assert [p.name for p in codr_dir.iterdir()] == ["tasks"]    # staged files removed
     assert sorted(p.name for p in stagr_dir.iterdir()) == ["repo"]
 
 
-async def test_delivery_never_replaces_an_existing_task_folder(boxes):
+@pytest.mark.skipif(subprocess.run(["git", "--version"], capture_output=True).returncode != 0,
+                    reason="needs git")
+async def test_keep_git_copies_the_history(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    _upstream_repo(stagr_dir / "repo")
+    result = await StagrToolHandler()._copy_to_codr("repo", "tools/repo", keep_git="true")
+    assert result["status"] == "ok" and result["git"] == "kept", result
+    assert "THE FIX" in _git(codr_dir / "tools" / "repo", "log", "--all", "--format=%s")
+
+
+async def test_a_single_file_copies_to_a_new_name(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    (stagr_dir / "wheels").mkdir()
+    (stagr_dir / "wheels" / "a.whl").write_bytes(b"\x00wheel\n\n")
+    result = await StagrToolHandler()._copy_to_codr("wheels/a.whl", "tools/w/b.whl")
+    assert result["status"] == "ok", result
+    assert (codr_dir / "tools" / "w" / "b.whl").read_bytes() == b"\x00wheel\n\n"
+
+
+async def test_a_copy_to_codr_never_replaces_what_is_there(boxes):
     stagr, codr, stagr_dir, codr_dir = boxes
     (stagr_dir / "repo").mkdir()
     (codr_dir / "tasks" / "09-c1").mkdir(parents=True)
     (codr_dir / "tasks" / "09-c1" / "work.py").write_text("codr's work\n")
-    result = await StagrToolHandler()._deliver_to_codr("repo", "09-c1")
+    result = await StagrToolHandler()._copy_to_codr("repo", "tasks/09-c1")
     assert result["status"] == "error" and "already exists" in result["message"]
-    assert (codr_dir / "tasks" / "09-c1" / "work.py").read_text() == "codr's work\n"
+    assert [p.name for p in (codr_dir / "tasks" / "09-c1").iterdir()] == ["work.py"]
 
 
-async def test_delivery_waits_for_codr_to_be_idle(boxes):
+async def test_a_copy_to_codr_waits_for_codr_to_be_idle(boxes):
     stagr, codr, stagr_dir, codr_dir = boxes
     (stagr_dir / "repo").mkdir()
     codr.busy.add("ses_1")
-    result = await StagrToolHandler()._deliver_to_codr("repo", "09-c1")
+    result = await StagrToolHandler()._copy_to_codr("repo", "tasks/09-c1")
     assert result["status"] == "error" and "idle" in result["message"]
     assert not (codr_dir / "tasks").exists()
 
 
-@pytest.mark.parametrize("path", ["../etc", "/etc", "a/../../b", "a b", "$(id)"])
-async def test_delivery_refuses_paths_outside_the_workdir(boxes, path):
-    result = await StagrToolHandler()._deliver_to_codr(path, "09-c1")
-    assert result["status"] == "error" and "relative" in result["message"]
+@pytest.mark.parametrize("path", ["../etc", "/etc", "a/../../b", "a b", "$(id)", ".", ""])
+async def test_copies_refuse_paths_outside_the_workdir(boxes, path):
+    handler = StagrToolHandler()
+    for result in (await handler._copy_to_codr(path, "tasks/x"), await handler._copy_to_codr("repo", path),
+                   await handler._copy_from_codr(path, "x"), await handler._copy_from_codr("tasks/x", path)):
+        assert result["status"] == "error" and "relative" in result["message"], (path, result)
 
 
-async def test_retrieval_copies_a_codr_task_to_stagr(boxes):
+async def test_a_copy_from_codr_lands_on_stagr_and_never_overwrites(boxes):
     stagr, codr, stagr_dir, codr_dir = boxes
     (codr_dir / "tasks" / "08-cron" / "cronlib").mkdir(parents=True)
     (codr_dir / "tasks" / "08-cron" / "cronlib" / "cron.py").write_text("x = 1\n\n")
-    result = await StagrToolHandler()._retrieve_from_codr("08-cron")
+    handler = StagrToolHandler()
+    result = await handler._copy_from_codr("tasks/08-cron", "from-codr/08-cron")
     assert result["status"] == "ok", result
     assert (stagr_dir / "from-codr" / "08-cron" / "cronlib" / "cron.py").read_text() == "x = 1\n\n"
+    again = await handler._copy_from_codr("tasks/08-cron", "from-codr/08-cron")
+    assert again["status"] == "error" and "already exists" in again["message"]
+
+
+async def test_a_missing_source_is_reported(boxes):
+    result = await StagrToolHandler()._copy_from_codr("tasks/nope", "x")
+    assert result["status"] == "error" and "could not pack tasks/nope" in result["message"]
 
 
 class Recorder:
@@ -157,7 +250,7 @@ async def test_web_access_sends_only_a_checked_domain_to_the_node(monkeypatch):
 
 
 def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
-    """stagr.json exposes exactly the five tools, all in the one `stagr`
+    """stagr.json exposes exactly the six tools, all in the one `stagr`
     domain, so ToolPolicy has nothing to refuse and the persona is not
     quarantined at load. The file is public, so the operator sets
     origin_allowlist on their own instance (as for hypr)."""
@@ -169,5 +262,5 @@ def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
     assert names == {t["function"]["name"] for t in STAGR_TOOLS} == set(persona["enabled_tools"])
     assert policy.explicit_overrides == [] and policy.validate_composition(exposed) == []
     assert {t["function"]["name"] for t in STAGR_TOOLS if t["is_write"]} == {
-        "request_web_access", "deliver_to_codr", "retrieve_from_codr"}
+        "request_web_access", "copy_from_codr"}
     assert persona["origin_allowlist"] == []
