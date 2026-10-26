@@ -109,9 +109,9 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
             "name": "request_network",
             "description": (
                 "Ask Adam to turn one of stagr's network switches on. Needs his approval. "
-                "wan: the internet through the proxy allowlist (web only). lan: the home "
-                "network, any protocol (e.g. the shared folder on dt21). Ask only for what the "
-                "job needs; Adam turns it off again."
+                "wan: the internet through the proxy allowlist (web only). lan: the shared folder "
+                "on dt21 (~/work/dt21) and nothing else at home, not even DNS. Ask only for "
+                "what the job needs; Adam turns it off again."
             ),
             "parameters": {
                 "type": "object",
