@@ -824,10 +824,14 @@ only thing that talks to both:
     switches stay off for now**: for the foreseeable future only the setup box
     touches the internet. codr's box works the same way, so opening it later is
     a setting, not new code.
-- **The dt21 folder** (not set up yet). One read-write folder on dt21 that the setup box mounts
-  while its LAN is on, to read files you put there and to drop files copied out
-  of codr. It is shared under a dedicated Windows account that can reach that
-  folder and nothing else.
+- **The dt21 folder.** `C:\stagr-share` on dt21 is the setup box's
+  `~/work/dt21`, read-write, while its LAN is on: put files there for the setup
+  agent, and it drops files copied out of codr there. It is shared (encrypted)
+  under a dedicated Windows account, `stagr-share`, which can reach that folder
+  and is refused on every other share on dt21. **Add a share to dt21 later and
+  re-run `dp465-dt21-share.ps1` as admin**, or the account can read it. With
+  LAN off, touching the folder fails with "Host is down" after about 30
+  seconds; nothing else in the setup box's workdir is affected.
 - **The setup agent** is the opt-in persona `stagr`
   (`config/optional_personas/stagr.json`), on `model local` by default. You work
   with it directly. Its `stagr_shell` runs bash on the setup box **without
