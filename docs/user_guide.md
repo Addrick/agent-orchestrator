@@ -849,7 +849,11 @@ only thing that talks to both:
   ends until its check has run (the next tick), and while it runs, codr
   starts nothing: the environment changes only between tasks, so a result still
   measures codr. codr's box is offline and can be rebuilt from a backup, so the
-  worst a command there can do is cost a restore.
+  worst a command there can do is cost a restore. A message you send codr while
+  a `codr_shell` command or a `copy_to_codr` is running is not queued behind it
+  (a command can run for an hour): codr answers at once with a ⏸ note naming
+  what is running and since when, and the message is dropped — it never reaches
+  codr's history, memory or model. Resend it when the command is done.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
   back to any path on the setup box. Only `copy_from_codr` needs your approval:

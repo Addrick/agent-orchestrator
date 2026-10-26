@@ -38,7 +38,9 @@ import logging
 import shlex
 import time
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional, Set, Tuple
 
 import aiohttp
 from aiolimiter import AsyncLimiter
@@ -151,6 +153,40 @@ def workspace_lock(directory: str) -> asyncio.Lock:
     """One turn starts at a time per workspace, whether the chat path or the
     codr agent starts it."""
     return _workspace_locks.setdefault(directory, asyncio.Lock())
+
+
+@dataclass(frozen=True)
+class WorkspaceHold:
+    """Why a workspace's lock is held for a long, non-turn job (DP-466)."""
+    holder: str
+    started: float
+    max_seconds: Optional[int] = None
+
+    def describe(self) -> str:
+        ran = max(0, round((time.monotonic() - self.started) / 60))
+        limit = f", up to {-(-self.max_seconds // 60)} min" if self.max_seconds else ""
+        return f"{self.holder} has been running for {ran} min{limit}"
+
+
+_workspace_holds: Dict[str, WorkspaceHold] = {}
+
+
+@contextmanager
+def workspace_held(directory: str, holder: str, max_seconds: Optional[int] = None) -> Iterator[None]:
+    """Mark the workspace as held by a long job, for as long as the caller
+    holds its lock. Separate from the lock itself, which also queues
+    back-to-back chats and agent ticks that must keep waiting: only a chat
+    arriving under this mark is refused rather than queued."""
+    _workspace_holds[directory] = WorkspaceHold(holder, time.monotonic(), max_seconds)
+    try:
+        yield
+    finally:
+        _workspace_holds.pop(directory, None)
+
+
+def workspace_hold(persona_name: Optional[str]) -> Optional[WorkspaceHold]:
+    """The long job holding this persona's workspace, if any."""
+    return _workspace_holds.get(workspace_directory(persona_name)[2])
 
 
 def workspace_directory(persona_name: Optional[str]) -> Tuple[str, str, str]:
