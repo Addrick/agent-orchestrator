@@ -39,7 +39,7 @@ import aiohttp
 
 from config import global_config
 from src.engine.providers.opencode import (
-    OpencodeClient, auth_headers, open_auto, session_title, workspace_directory, workspace_lock,
+    OpencodeClient, auth_headers, open_auto, session_title, workspace_directory, workspace_held, workspace_lock,
 )
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
@@ -194,11 +194,12 @@ class StagrToolHandler:
         try:
             # Held for the whole command, so codr starts nothing while it runs.
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                codr = OpencodeClient(http, codr_dir)
-                if not await self._codr_idle(codr):
-                    return _error("codr is working, or its last task turn is not checked yet; "
-                                  "try again when it is idle.")
-                out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+                with workspace_held(codr_dir, "stagr's codr_shell", seconds + 60):
+                    codr = OpencodeClient(http, codr_dir)
+                    if not await self._codr_idle(codr):
+                        return _error("codr is working, or its last task turn is not checked yet; "
+                                      "try again when it is idle.")
+                    out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
         except LLMCommunicationError as e:
             return _error(f"codr shell failed: {e}")
         except TimeoutError:
@@ -353,11 +354,12 @@ class StagrToolHandler:
             async with self._stagr_session() as http:
                 archive = await self._pack(self._stagr(http), src, keep_git=keep)
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                codr = OpencodeClient(http, codr_dir)
-                if not await self._codr_idle(codr):
-                    raise _Refused("codr is working, or its last task turn is not checked yet; "
-                                   "copy when it is idle.")
-                await self._unpack(codr, archive, posixpath.basename(src), dst)
+                with workspace_held(codr_dir, "stagr's copy_to_codr"):
+                    codr = OpencodeClient(http, codr_dir)
+                    if not await self._codr_idle(codr):
+                        raise _Refused("codr is working, or its last task turn is not checked yet; "
+                                       "copy when it is idle.")
+                    await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
             return _error(str(e))
         except LLMCommunicationError as e:

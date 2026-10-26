@@ -20,6 +20,7 @@ from src.request_builder import RequestContext
 from src.utils.model_utils import get_model_prefix
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine, LLMCommunicationError
+from src.engine.providers.opencode import workspace_directory, workspace_held, workspace_hold, workspace_lock
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.clients.service_integration import ServiceIntegration
 
@@ -112,6 +113,52 @@ async def test_quarantined_persona_still_accepts_dev_commands(chat_system_with_m
             "test_persona", "user", "channel", "set tools get_ticket_details")
     assert response == "tools updated"
     text_engine_mock.generate_response.assert_not_called()
+
+
+# --- DP-466: a workspace held by a long stagr job -------------------------
+
+@pytest.mark.asyncio
+async def test_a_message_under_a_stagr_hold_is_refused_and_not_kept(chat_system_with_mocks):
+    """A chat to a workspace stagr holds (codr_shell runs up to an hour) is
+    answered at once and dropped: no model call, no user row."""
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
+    system.turn_persistence.log_user_turn = MagicMock()
+    directory = workspace_directory("test_persona")[2]
+    with workspace_held(directory, "stagr's codr_shell", 3660):
+        response, rtype, assistant_id, user_id = await system.generate_response(
+            "test_persona", "user", "channel", "hello?")
+    assert rtype == ResponseType.DEV_COMMAND
+    assert "stagr's codr_shell has been running for 0 min, up to 61 min" in response
+    assert "resend" in response
+    assert assistant_id is None and user_id is None
+    text_engine_mock.generate_response.assert_not_called()
+    system.turn_persistence.log_user_turn.assert_not_called()
+    assert workspace_hold("test_persona") is None
+
+
+@pytest.mark.asyncio
+async def test_a_held_lock_without_a_stagr_hold_is_not_refused(chat_system_with_mocks):
+    """The lock also queues chat behind chat and codr's own ticks; only the
+    hold mark refuses."""
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
+    lock = workspace_lock(workspace_directory("test_persona")[2])
+    await lock.acquire()
+    try:
+        response, rtype, _, _ = await system.generate_response(
+            "test_persona", "user", "channel", "hello?")
+    finally:
+        lock.release()
+    assert response == "LLM Reply"
+    text_engine_mock.generate_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dev_commands_still_reach_a_held_workspace(chat_system_with_mocks):
+    system, _, text_engine_mock, _, _ = chat_system_with_mocks
+    system.bot_logic.preprocess_message.return_value = {"response": "model: x", "mutated": False}
+    with workspace_held(workspace_directory("test_persona")[2], "stagr's codr_shell"):
+        response, _, _, _ = await system.generate_response("test_persona", "user", "channel", "what model")
+    assert response == "model: x"
 
 
 # --- DP-330: persona origin allowlist gate ---------------------------------

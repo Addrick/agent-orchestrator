@@ -13,7 +13,9 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from config import global_config
-from src.engine.providers.opencode import AUTO_FIELD, session_title, workspace_directory, workspace_lock
+from src.engine.providers.opencode import (
+    AUTO_FIELD, session_title, workspace_directory, workspace_hold, workspace_lock,
+)
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
@@ -93,15 +95,17 @@ async def test_codr_shell_runs_in_codr_workspace_and_holds_its_lock(boxes):
     inner = codr.shell_output
 
     def shell(script):
-        seen.append(_codr_lock().locked())
+        hold = workspace_hold("codr")
+        seen.append((_codr_lock().locked(), hold and hold.holder, hold and hold.max_seconds))
         return inner(script)
 
     codr.shell_output = shell
-    result = await StagrToolHandler()._codr_shell("touch made-here; echo hi; exit 4")
+    result = await StagrToolHandler()._codr_shell("touch made-here; echo hi; exit 4", 120)
     assert result["status"] == "ok" and result["exit_code"] == 4 and "hi" in result["output"]
     assert (codr_dir / "made-here").exists() and not (stagr_dir / "made-here").exists()
-    assert seen == [True]                   # codr starts nothing while it runs
-    assert not _codr_lock().locked()
+    # codr starts nothing while it runs, and a chat to codr is told why (DP-466)
+    assert seen == [(True, "stagr's codr_shell", 180)]
+    assert not _codr_lock().locked() and workspace_hold("codr") is None
 
 
 async def test_codr_shell_is_refused_while_codr_works(boxes):
@@ -110,6 +114,7 @@ async def test_codr_shell_is_refused_while_codr_works(boxes):
     result = await StagrToolHandler()._codr_shell("touch x")
     assert result["status"] == "error" and "idle" in result["message"]
     assert not (codr_dir / "x").exists()
+    assert workspace_hold("codr") is None
 
 
 async def test_codr_shell_is_refused_while_a_codr_turn_starts(boxes):
@@ -180,6 +185,27 @@ async def test_a_single_file_copies_to_a_new_name(boxes):
     result = await StagrToolHandler()._copy_to_codr("wheels/a.whl", "tools/w/b.whl")
     assert result["status"] == "ok", result
     assert (codr_dir / "tools" / "w" / "b.whl").read_bytes() == b"\x00wheel\n\n"
+
+
+async def test_a_copy_to_codr_marks_codr_held_only_while_it_unpacks(boxes):
+    """DP-466: the existence check runs before the lock; the unpack under it
+    carries the mark a chat to codr is refused on."""
+    stagr, codr, stagr_dir, codr_dir = boxes
+    (stagr_dir / "repo").mkdir()
+    (stagr_dir / "repo" / "a.txt").write_text("a\n")
+    holders = []
+    inner = codr.shell_output
+
+    def shell(script):
+        hold = workspace_hold("codr")
+        holders.append(hold and hold.holder)
+        return inner(script)
+
+    codr.shell_output = shell
+    result = await StagrToolHandler()._copy_to_codr("repo", "tasks/09-c1")
+    assert result["status"] == "ok", result
+    assert holders[0] is None and holders[-1] == "stagr's copy_to_codr"
+    assert workspace_hold("codr") is None
 
 
 async def test_a_copy_to_codr_never_replaces_what_is_there(boxes):

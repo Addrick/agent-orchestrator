@@ -32,6 +32,7 @@ from src.generation_events import (
     render_continue_prefix,
 )
 from src.engine.providers.local import supports_assistant_prefill, thinking_controls
+from src.engine.providers.opencode import workspace_hold
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
 from src.persona import Persona
@@ -450,6 +451,18 @@ class ChatSystem:
                     f"composition):\n{detail}\n"
                     "Fix its tools in persona config to enable it."
                 ),
+                response_type=ResponseType.DEV_COMMAND,
+            )
+            return
+
+        # DP-466: a fresh message to a workspace a long stagr job holds (up to
+        # an hour) is refused rather than queued on the lock with no word. It
+        # returns before log_user_turn, so nothing reaches history or memory.
+        # A continuation is exempt: its approved write already ran.
+        if continuation is None and (hold := workspace_hold(persona_name)):
+            yield DoneEvent(
+                text=f"⏸ {persona_name} is busy: {hold.describe()}. "
+                     "Not sent; resend when it's done.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
