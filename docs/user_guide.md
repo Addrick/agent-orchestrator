@@ -1820,11 +1820,31 @@ Security model for discovered tools:
 
 - **Restrictive defaults.** Every discovered tool starts as `is_write: True`
   (parks for approval) with `produces_untrusted/irreversible` set and
-  `sensitivity: "pii"`. The server's own `readOnlyHint`/`destructiveHint`
-  annotations are logged but **never** drive policy — an untrusted party
-  doesn't get to classify its own tools. To relax a tool (e.g. a genuinely
-  read-only sensor query), edit its `tool_overrides` entry in
-  `data/mcp_servers.json` and re-add/restart.
+  `sensitivity: "pii"`. On an ordinary server the server's own
+  `readOnlyHint`/`destructiveHint` annotations are logged but **never** drive
+  policy — an untrusted party doesn't get to classify its own tools. To relax a
+  tool (e.g. a genuinely read-only sensor query), edit its `tool_overrides`
+  entry in `data/mcp_servers.json` and re-add/restart.
+- **Trusted servers (`"trusted": true`).** For a first-party server you run
+  yourself (Hindsight), the annotations *are* the classification: a tool marked
+  `readOnlyHint: true` is a read (runs without approval, not irreversible);
+  every other tool is a write and parks, and is irreversible unless it says
+  `destructiveHint: false`. A tool with no annotations stays at the defaults.
+  Per-tool `tool_overrides` still win over the annotations.
+- **Server-wide capabilities (`"capabilities": {...}`).** Merged into every
+  tool of that server before its per-tool `tool_overrides`, e.g.
+  `{"sensitivity": "internal"}` for a server whose data is your own.
+- **Bound arguments (`"bind_args": {"<arg>": "{PERSONA}"}`).** derpr fills the
+  argument itself from the calling persona, so the model can't choose it: the
+  argument is removed from every tool's schema, any value the model sends is
+  overwritten, and a tool that doesn't take the argument is not registered from
+  that entry at all (it could not be scoped). `{PERSONA}` — the calling
+  persona's name — is the only value accepted. A call with no persona behind it
+  (outside a chat turn) is refused. An approved write runs with the persona of
+  the turn that parked it.
+- `trusted`, `capabilities` and `bind_args` are only set by editing
+  `data/mcp_servers.json`; `add_mcp_server` always creates a plain, untrusted
+  entry, so a model-proposed install can't classify itself.
 - **Never in the wildcard.** `enabled_tools: ["*"]` / `allow: ["*"]` policies
   do NOT include MCP tools. A persona must list each `mcp__<server>__<tool>`
   explicitly in `allow`/`ask` **and** bind `mcp:<server>` in
@@ -1856,60 +1876,83 @@ Disabled by default. Enable with `MCP_ENABLED=true`. Config knobs:
   restrictive defaults, removed tools are unregistered, and every persona is
   re-validated against the new toolset.
 
-#### Hindsight as an MCP server (DP-403)
+#### Hindsight as an MCP server (DP-403, DP-475)
 
 Hindsight serves its full API (reflect, bank config, mental models, directives,
 knowledge base, memory edit) as an MCP server, so a persona gets it through the
-entries above, with no Hindsight-specific tools. Configure it as **two kinds of
-entry**. Each is its own service binding, so each set of tools is granted, hidden
-in the Inspector, or removed as a unit:
+entries above, with no Hindsight-specific tools. There is one Hindsight with a bank
+per persona, and it is configured as **two global tool sets**. Any persona can be
+given either one. Each is its own service binding, so it is granted, hidden in the
+Inspector, or removed as a unit:
 
-| Entry | URL | Reach |
+| Entry | Tool names | Reach |
 |---|---|---|
-| `hindsight-<persona>` | `http://<hindsight>:8888/mcp/<bank>/` | **That one bank.** The URL pins the session bank, and no tool has a `bank_id` argument (36 tools on Hindsight 0.10.0). |
-| `hindsight-admin` | `http://<hindsight>:8888/mcp` | **Any bank.** Every tool but `list_banks` takes an optional `bank_id`, plus `create_bank` / `get_bank_stats`. Operator personas only. |
+| `hindsight` | `mcp__hindsight__<tool>` | **The calling persona's own bank.** `bank_id` is bound to `{PERSONA}`: it is not in any schema, and derpr sets it to the calling persona's name on every call, so a persona can only reach its own bank. `list_banks` takes no bank and is not registered here. |
+| `hindsight-admin` | `mcp__hindsight-admin__<tool>` | **Any bank.** `bank_id` is an ordinary argument the model fills, plus `list_banks`. Operator personas only. |
 
-Server names allow lowercase letters, digits and `-` only (≤ 32 chars), so the
-persona's tools are named e.g. `mcp__hindsight-managr__reflect`.
+Both point at Hindsight's root `/mcp` endpoint and are marked `trusted`, so each tool's
+read/write classification comes from Hindsight's own annotations. Today (Hindsight
+0.10) that makes `recall`, `reflect`, `get_*`, `list_*`, `search_knowledge_base` and
+`get_knowledge_base_tree` reads, which run without approval. Every other tool is a
+write and parks. `delete_*` and `clear_*` are also irreversible.
 
-Recommended policy for a `hindsight-<persona>` entry:
+```json
+{
+  "servers": {
+    "hindsight": {
+      "url": "{HINDSIGHT_URL}/mcp",
+      "trusted": true,
+      "capabilities": {"sensitivity": "internal"},
+      "bind_args": {"bank_id": "{PERSONA}"}
+    },
+    "hindsight-admin": {
+      "url": "{HINDSIGHT_URL}/mcp",
+      "trusted": true,
+      "capabilities": {"sensitivity": "internal"}
+    }
+  }
+}
+```
 
-> ⚠️ **These reads are not scoped to the asker.** A pinned entry sees the whole
-> bank — every user, channel and server the persona has talked to — and ignores
-> the persona's `memory_mode`. Native `recall_memory` scopes by `memory_mode`;
-> MCP `recall`, `reflect`, `list_memories`, `get_memory`, `list_documents` and
-> `get_document` do not, and mental models / knowledge pages are synthesized from
-> the same cross-user memories. Relax the reads below only for a persona whose
-> `memory_mode` is `GLOBAL` or whose users may all see each other's history
-> (e.g. an operator-only persona). Anywhere else, leave them at the default so
-> each call parks for approval.
+`sensitivity: internal` matches `recall_memory` over the same data. Without it every
+tool keeps the default `pii`, and a persona that also has a foreign-domain network
+tool (e.g. `web_search`) fails composition rule 3 and is quarantined as soon as the
+server connects. `produces_untrusted` stays on: bank content came from chat.
 
-- **Read, relaxed in `tool_overrides`** — `"is_write": false` and
-  `"capabilities": {"irreversible": false, "sensitivity": "internal"}`; leave
-  `produces_untrusted` on. `sensitivity: internal` matches `recall_memory` over
-  the same data. Without it the tool keeps the default `pii`, and a persona that
-  also has a foreign-domain network tool (e.g. `web_search`) fails composition
-  rule 3 and is quarantined as soon as the server connects. Tools: `recall`,
-  `reflect`, `get_bank`, `list_documents`, `get_document`, `list_memories`,
-  `get_memory`, `list_mental_models`, `get_mental_model`, `list_directives`,
-  `list_tags`, `list_operations`, `get_operation`, `get_knowledge_base_tree`,
-  `get_knowledge_page`, `search_knowledge_base`.
-- **Write, left at the default (parks for approval):** `update_bank` (the live
-  way to change a bank's missions, recall budgets, etc. — but **not
-  disposition** when the persona sets one: derpr re-applies the persona's
-  `disposition` to the bank at every startup, so change it in the persona),
-  `create_mental_model`, `update_mental_model`, `refresh_mental_model`,
-  `create_directive`, `create_knowledge_folder`, `create_knowledge_page`,
-  `update_knowledge_node`, `update_memory`, `invalidate_memory`,
-  `cancel_operation`. None of these carry derpr's untrusted tagging: approving
-  model-authored text here stores it as trusted, and a directive applies to
-  every later `reflect`. Deny any proposal from a turn that read web pages,
-  tickets or email.
-- **Not on any allowlist:** `delete_bank` (on a pinned entry this deletes the
-  persona's own memory), `clear_memories`, `clear_mental_model`, `delete_*`, and
-  `retain` / `sync_retain`. Chat memory keeps going through `recall_memory` and
-  the automatic turn retains, which add turn scoping, document grouping, date
-  anchors and untrusted tagging that the MCP `retain`/`recall` do not.
+> ⚠️ **Self-scoped means bank-scoped, not user- or channel-scoped.** A bank holds
+> every user, channel and server the persona has talked to. The `hindsight` reads
+> see all of it and ignore the persona's `memory_mode`; native `recall_memory`,
+> `get_memory` and `get_document` are the memory-mode-scoped path. Because the reads
+> no longer park, a `CHANNEL_ISOLATED` persona that has them lets anyone in any of its
+> channels read its other channels' memories. Mental models and knowledge pages are
+> synthesized from the same cross-user memories. This is accepted for now (a single
+> human user, 2026-10-27). **Known limitation:** once there are other users, the set
+> needs at least per-user separation, and maybe per-channel — either by binding
+> Hindsight's tag filter to the turn scope the way `bank_id` is bound, or by making
+> bank-wide reads park for non-`GLOBAL` personas. Watch how models handle memories
+> from outside the current chat before choosing.
+
+What to put on an allowlist:
+
+- **Reads:** `recall`, `reflect`, `get_bank`, `list_documents`, `get_document`,
+  `list_memories`, `get_memory`, `list_mental_models`, `get_mental_model`,
+  `list_directives`, `list_tags`, `list_operations`, `get_operation`,
+  `get_knowledge_base_tree`, `get_knowledge_page`, `search_knowledge_base`.
+- **Writes (park for approval):** `update_bank` (the live way to change a bank's
+  missions, recall budgets, etc. — but **not disposition** when the persona sets
+  one: derpr re-applies the persona's `disposition` to the bank at every startup, so
+  change it in the persona), `create_mental_model`, `update_mental_model`,
+  `refresh_mental_model`, `create_directive`, `create_knowledge_folder`,
+  `create_knowledge_page`, `update_knowledge_node`, `update_memory`,
+  `invalidate_memory`, `cancel_operation`. None of these carry derpr's untrusted
+  tagging: approving model-authored text here stores it as trusted, and a directive
+  applies to every later `reflect`. Deny any proposal from a turn that read web
+  pages, tickets or email.
+- **Not on any allowlist:** `delete_bank` (on the `hindsight` set this deletes the
+  persona's own memory), `clear_memories`, `clear_mental_model`, `delete_*`,
+  `create_bank`, and `retain` / `sync_retain`. Chat memory keeps going through
+  `recall_memory` and the automatic turn retains, which add turn scoping, document
+  grouping, date anchors and untrusted tagging that the MCP `retain`/`recall` do not.
 
 **Every offered tool costs prompt on every turn.** The schemas ride along with each
 request whether or not the model calls them. Measured on Hindsight 0.10 (DP-426):
@@ -1920,30 +1963,8 @@ Four authoring tools account for ≈8.3k of that, at roughly 2k each:
 (≈4.4k). Add a heavy tool to a persona's allowlist when it actually needs one. They
 are all registered already, so this is an allowlist edit, not a config change.
 
-**Check composition before enabling an entry.** At the defaults every Hindsight
-tool is a network *write* in its own domain. A persona that already reads
-untrusted data from another domain therefore trips composition rule 2 and is
-quarantined when the server connects; that was hypr with `hf_search`. Relaxing
-that entry's reads clears it. A persona that reads PII (joy, via Zammad) trips
-rule 3 with any Hindsight entry, relaxed or not.
-
-```json
-{
-  "servers": {
-    "hindsight-managr": {
-      "url": "{HINDSIGHT_URL}/mcp/managr/",
-      "enabled": true,
-      "tool_overrides": {
-        "recall":  {"is_write": false, "capabilities": {"irreversible": false, "sensitivity": "internal"}},
-        "reflect": {"is_write": false, "capabilities": {"irreversible": false, "sensitivity": "internal"}}
-      }
-    }
-  }
-}
-```
-
-The example relaxes two reads; add an entry per read you relax. `tool_overrides`
-keys are Hindsight's raw tool names (`recall`).
+**Check composition before enabling an entry.** A persona that reads PII (joy, via
+Zammad) trips rule 3 with any Hindsight entry.
 
 `{HINDSIGHT_URL}` is filled in from derpr's `HINDSIGHT_URL` setting when the
 server connects, so the Hindsight address is configured in one place and a
@@ -1952,13 +1973,10 @@ may only be followed by a path (`/…`): a url like `{HINDSIGHT_URL}@host` or
 `{HINDSIGHT_URL}.host` that would change the host is rejected, as is an empty or
 non-http(s) `HINDSIGHT_URL`. Any other server url is written out in full.
 
-The bank in the url is the persona's name (derpr's bank id). Hindsight accepts
-any bank name without error, so a typo or a renamed persona silently points the
-entry at an empty bank — check `get_bank` returns the expected bank after adding.
-
-Then give the persona `service_bindings: ["mcp:hindsight-managr"]` and list the
+The bank is the persona's name (derpr's bank id), the same bank `recall_memory`
+reads. Then give the persona `service_bindings: ["mcp:hindsight"]` and list the
 tools it should have in `allow` by their **namespaced** names
-(`mcp__hindsight-managr__recall`, not `recall`). MCP tools are never in `*`, so a
+(`mcp__hindsight__recall`, not `recall`). MCP tools are never in `*`, so a
 raw name matches nothing and the persona is silently offered no Hindsight tools.
 Execution is limited to the offered set (DP-404), so a persona can't call a
 Hindsight tool it wasn't given.
@@ -2035,9 +2053,8 @@ exactly as if it did not exist. The match is recall's — *any* shared tag, unta
 included — so in channel-isolated mode an item from another channel is still in scope
 when it carries this user's or this server's tag. Source facts outside the scope are dropped
 from `source_memories`. Both tools are `produces_untrusted`, like recall. This is what
-separates them from the operator-facing `mcp__hindsight-<persona>__get_memory` /
-`__get_document` (Hindsight's own MCP tools), which see the whole bank regardless of
-memory mode and are for `GLOBAL`/operator personas only.
+separates them from `mcp__hindsight__get_memory` / `__get_document` (Hindsight's own
+MCP tools), which see the whole bank regardless of memory mode.
 
 **Internal tools** (used by agents/system personas, not by user personas):
 

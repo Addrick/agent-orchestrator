@@ -39,6 +39,7 @@ from src.tools.tool_loop import (
     PARK_STATUS_QUARANTINED, awaiting_status, write_call_identity_hash,
 )
 from src.tools.tool_manager import ToolManager, tool_error
+from src.tools.turn_context import TurnContext, turn_scope
 
 logger = logging.getLogger(__name__)
 
@@ -925,10 +926,20 @@ class ConfirmationManager:
         elif decision.approved:
             tool_manager = self._tool_manager_lookup()
             try:
-                decision.result = await tool_manager.execute_tool(
-                    tool_name, self._offered_lookup(park.persona_name),
-                    **(park.write_call.get("arguments") or {}),
-                )
+                # The approval arrives on a later event, outside the turn that
+                # parked the call: re-enter that turn's coordinates so a tool
+                # that reads its scope from the turn (DP-475 MCP bind_args,
+                # ingest_path) runs as the persona that proposed it.
+                with turn_scope(TurnContext(
+                    persona_name=park.persona_name,
+                    user_identifier=park.user_identifier,
+                    channel=park.channel,
+                    server_id=park.server_id,
+                )):
+                    decision.result = await tool_manager.execute_tool(
+                        tool_name, self._offered_lookup(park.persona_name),
+                        **(park.write_call.get("arguments") or {}),
+                    )
                 # `ok` is "did the tool succeed", NOT "did the call return"
                 # and NOT "did the envelope carry an error". Two ways a write
                 # fails without raising, and DP-322 only closed the first:

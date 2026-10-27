@@ -12,10 +12,19 @@ paths downstream.
 Security model:
 - Server-provided annotations (``readOnlyHint``/``destructiveHint``/...) are
   hints from an untrusted party: logged for the operator, NEVER driving
-  policy. Operator config drives everything.
+  policy — unless the operator marks the server ``trusted`` (first-party,
+  DP-475), in which case they classify read vs write and irreversibility.
+  Operator config drives everything.
 - Every discovered tool defaults to the most restrictive metadata
   (``is_write: True``; untrusted, irreversible, network, pii) unless the
-  operator downgrades it via per-tool ``tool_overrides`` in the config file.
+  operator downgrades it: server-wide ``capabilities``, then per-tool
+  ``tool_overrides`` in the config file, which beat the annotations too.
+- ``bind_args`` (DP-475) takes an argument away from the model: it is removed
+  from every schema and filled from the calling turn (``{PERSONA}``) on every
+  call, so one Hindsight entry can serve every persona its own bank. A tool
+  that doesn't take the argument can't be scoped and is not registered.
+- ``trusted``/``capabilities``/``bind_args`` are hand-edited config only;
+  ``add_server`` (model-proposed) always writes a plain untrusted entry.
 - ``service_binding: "mcp:<server>"`` makes each server its own egress
   domain, so composition Rules 2/3 treat one server's read+write as a closed
   loop and re-arm exactly when combined with foreign domains.
@@ -72,9 +81,12 @@ from src.tools.definitions import (
 )
 from src.utils.atomic_json import write_json_atomic
 
+from src.tools.turn_context import get_turn_context
+
 if TYPE_CHECKING:
     from src.persona import Persona
     from src.tools.tool_manager import ToolManager
+    from src.tools.turn_context import TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +157,51 @@ _DEFAULT_TOOL_META: Dict[str, Any] = {
         "sensitivity": "pii",
     },
 }
+
+# ``bind_args`` values: a sentinel resolved from the active turn. Allowlisted
+# for the same reason as ``_URL_BASES``.
+_BIND_SOURCES: Dict[str, Callable[["TurnContext"], str]] = {
+    "{PERSONA}": lambda ctx: ctx.persona_name,
+}
+
+
+def _bind_args(server: str, server_cfg: Dict[str, Any]) -> Dict[str, str]:
+    """The entry's ``bind_args`` (arg name -> sentinel), validated."""
+    binds = server_cfg.get("bind_args") or {}
+    if not isinstance(binds, dict):
+        raise ValueError(f"MCP server '{server}': 'bind_args' must be an object.")
+    for arg, source in binds.items():
+        if source not in _BIND_SOURCES:
+            raise ValueError(
+                f"MCP server '{server}': bind_args['{arg}'] is '{source}'; "
+                "allowed: " + ", ".join(_BIND_SOURCES)
+            )
+    return dict(binds)
+
+
+def _strip_bound(schema: Dict[str, Any], bound: Set[str]) -> Dict[str, Any]:
+    """A copy of ``schema`` with the bound arguments removed."""
+    out = dict(schema)
+    out["properties"] = {
+        k: v for k, v in (schema.get("properties") or {}).items() if k not in bound
+    }
+    if "required" in schema:
+        out["required"] = [r for r in schema["required"] if r not in bound]
+    return out
+
+
+def _annotation_meta(tool: Any) -> Dict[str, Any]:
+    """Metadata a trusted server's annotations imply (MCP spec defaults:
+    ``readOnlyHint`` false, ``destructiveHint`` true). No annotations → {}."""
+    ann = tool.annotations
+    if ann is None:
+        return {}
+    if ann.readOnlyHint:
+        return {"is_write": False, "capabilities": {"irreversible": False}}
+    return {
+        "is_write": True,
+        "capabilities": {"irreversible": ann.destructiveHint is not False},
+    }
 
 
 @asynccontextmanager
@@ -289,6 +346,8 @@ class MCPClientManager:
         self._connections: Dict[str, _ServerConnection] = {}
         # server name -> namespaced tool names registered for it
         self._registered_tools: Dict[str, List[str]] = {}
+        # server name -> bind_args (arg -> sentinel), read by every handler
+        self._server_binds: Dict[str, Dict[str, str]] = {}
         self._lock = asyncio.Lock()
         # Hot reload (phase 3): servers that signalled tools/list_changed,
         # the event that wakes the maintenance loop early, and the loop task.
@@ -663,6 +722,7 @@ class MCPClientManager:
         revalidation. Caller holds ``self._lock``; config is the caller's."""
         conn = self._connections.pop(name, None)
         removed = self._unregister_server_tools(name)
+        self._server_binds.pop(name, None)
         self._revalidate_personas()
         if conn is not None:
             await conn.stop()
@@ -676,6 +736,7 @@ class MCPClientManager:
         Returns ``(raw_tool_name, definition)`` pairs; tools with invalid or
         oversized names are skipped with a warning.
         """
+        binds = _bind_args(name, server_cfg)
         listing = await asyncio.wait_for(
             session.list_tools(), timeout=MCP_CONNECT_TIMEOUT
         )
@@ -688,7 +749,22 @@ class MCPClientManager:
                     "name; skipped."
                 )
                 continue
-            definition = self._translate_tool(name, tool, overrides.get(tool.name))
+            properties = (tool.inputSchema or {}).get("properties") or {}
+            unbindable = [arg for arg in binds if arg not in properties]
+            if unbindable:
+                # It would run outside the scope the entry promises (e.g.
+                # Hindsight's list_banks on a bank-bound entry).
+                logger.info(
+                    f"MCP server '{name}' tool '{tool.name}' takes no "
+                    f"{unbindable} to bind; not registered from this entry."
+                )
+                continue
+            definition = self._translate_tool(
+                name, tool, overrides.get(tool.name),
+                trusted=server_cfg.get("trusted") is True,
+                server_capabilities=server_cfg.get("capabilities") or {},
+                bound=set(binds),
+            )
             namespaced = definition["function"]["name"]
             if not _TOOL_NAME_RE.match(namespaced):
                 # The raw name passed, so this is the mcp__<server>__
@@ -701,6 +777,7 @@ class MCPClientManager:
                 )
                 continue
             defs.append((tool.name, definition))
+        self._server_binds[name] = binds
         return defs
 
     def _register_definitions(
@@ -727,14 +804,22 @@ class MCPClientManager:
         return registered
 
     def _translate_tool(
-        self, server: str, tool: Any, override: Optional[Dict[str, Any]]
+        self,
+        server: str,
+        tool: Any,
+        override: Optional[Dict[str, Any]],
+        trusted: bool = False,
+        server_capabilities: Optional[Dict[str, Any]] = None,
+        bound: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
-        """MCP tool → derpr definition with restrictive defaults + overrides.
+        """MCP tool → derpr definition: restrictive defaults, then (trusted
+        server only) its annotations, then server-wide capabilities, then the
+        per-tool override. Bound arguments are removed from the schema.
 
-        Server annotations are logged only — an untrusted party's opinion of
-        its own tool never drives policy.
+        On an untrusted server annotations are logged only — an untrusted
+        party's opinion of its own tool never drives policy.
         """
-        if tool.annotations is not None:
+        if tool.annotations is not None and not trusted:
             logger.info(
                 f"MCP server '{server}' tool '{tool.name}' annotations "
                 f"(hints only, not policy): {tool.annotations.model_dump(exclude_none=True)}"
@@ -748,9 +833,19 @@ class MCPClientManager:
             description = description[:_DESCRIPTION_MAX_CHARS] + "…"
 
         override = override or {}
+        inferred = _annotation_meta(tool) if trusted else {}
         capabilities = dict(_DEFAULT_TOOL_META["capabilities"])
+        capabilities.update(inferred.get("capabilities") or {})
+        capabilities.update(server_capabilities or {})
         capabilities.update(override.get("capabilities") or {})
-        is_write = override.get("is_write", _DEFAULT_TOOL_META["is_write"])
+        is_write = override.get(
+            "is_write", inferred.get("is_write", _DEFAULT_TOOL_META["is_write"])
+        )
+        parameters = tool.inputSchema or {
+            "type": "object", "properties": {}, "required": [],
+        }
+        if bound:
+            parameters = _strip_bound(parameters, bound)
 
         return {
             "type": "function",
@@ -761,15 +856,32 @@ class MCPClientManager:
             "function": {
                 "name": f"mcp__{server}__{tool.name}",
                 "description": description,
-                "parameters": tool.inputSchema
-                or {"type": "object", "properties": {}, "required": []},
+                "parameters": parameters,
             },
         }
 
     def _make_handler(
         self, server: str, tool_name: str
     ) -> Callable[..., Coroutine[Any, Any, Any]]:
+        # Captured at registration, not looked up per call: a bound tool must
+        # never run unbound because the manager's state moved underneath it.
+        binds = dict(self._server_binds.get(server) or {})
+
         async def handler(**kwargs: Any) -> Any:
+            if binds:
+                ctx = get_turn_context()
+                if ctx is None:
+                    # No persona to scope to: running unbound would let the
+                    # server default (or the model) pick the bank.
+                    raise RuntimeError(
+                        f"MCP tool '{tool_name}' on '{server}' needs an active "
+                        "chat turn to fill its bound arguments; not executed."
+                    )
+                # Overwrite, never default: the text protocol lets a model
+                # send an argument its schema doesn't offer.
+                kwargs.update({
+                    arg: _BIND_SOURCES[source](ctx) for arg, source in binds.items()
+                })
             return await self.call_tool(server, tool_name, kwargs)
         return handler
 
