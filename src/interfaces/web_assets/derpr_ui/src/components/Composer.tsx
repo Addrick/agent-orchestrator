@@ -25,6 +25,10 @@ const AUTOSEND_KEY = 'derpr.voice.autoSend'
 
 // Grow the textarea to fit its content, capped so long drafts scroll.
 const MAX_DRAFT_HEIGHT = 200
+
+// A touch keyboard has no Shift+Enter, so there Enter is a newline and SEND is
+// the button — an accidental Enter mid-thought must not fire the turn.
+const TOUCH = window.matchMedia('(pointer: coarse)').matches
 function autosize(el: HTMLTextAreaElement) {
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, MAX_DRAFT_HEIGHT) + 'px'
@@ -79,7 +83,7 @@ export function Composer({
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !TOUCH) {
       // While streaming, let Enter insert a newline into the draft instead of
       // silently swallowing the keypress (send is gated anyway).
       if (streaming) return
@@ -224,10 +228,14 @@ export function Composer({
         <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>
           {isDev ? 'dev-command → /dev_command' : 'leading / = dev-command'}
         </span>
-        <span className="kbd">Enter</span>
-        <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>send</span>
-        <span className="kbd">⇧Enter</span>
-        <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>newline</span>
+        {!TOUCH && (
+          <>
+            <span className="kbd">Enter</span>
+            <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>send</span>
+            <span className="kbd">⇧Enter</span>
+            <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>newline</span>
+          </>
+        )}
       </div>
       <div className="cbox">
         {/* Stays editable while streaming — drafting the next message during a
