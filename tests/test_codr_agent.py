@@ -396,6 +396,23 @@ async def test_notify_adam_is_relayed_once_and_rate_limited(fake, tmp_path):
     assert not [c for c in fake.calls if c[0] == "PATCH"]
 
 
+async def test_a_long_notify_adam_message_is_posted_and_stored_whole(fake, tmp_path):
+    """DP-485: a message past the action log's cap was cut short in Discord and
+    history; the Discord client splits long posts, so nothing should be cut."""
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    text = "report " + "x" * 3000 + " END"
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": {"message": text}}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    await agent.deploy()
+    assert [b for _, _, b in router.sent] == [f"codr: {text}"]
+    (row,) = agent.chat_system.turn_persistence.committed
+    assert row["final_text"] == text
+
+
 async def test_a_relay_to_a_target_with_no_conversation_is_posted_but_not_stored(fake, tmp_path):
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path)
