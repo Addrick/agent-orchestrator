@@ -493,6 +493,7 @@ Four tools gated behind `service_bindings: ["agents"]`:
 - `Notifier` (ABC): `async send(recipient, subject, body) → bool`
 - `DiscordNotifier`: DM via Discord bot
 - `DiscordChannelNotifier`: posts to a Discord channel (registered as channel `discord_channel` in `main.py`)
+- Both Discord notifiers send through `discord_bot._send_capped` (DP-486): split at `DISCORD_CHAR_LIMIT`, at most `DISCORD_MAX_POSTS` posts. A longer body is not sent; one warning post (size + first 500 chars) goes out instead and `send` returns `False`, so the caller records a failed delivery (codr: relay marked `failed`, counted in the next result line). Chat replies in `on_message` are not capped.
 - `ZammadNotifier`: Internal note on ticket
 - `LogNotifier`: Fallback, logs to stdout
 - `NotificationRouter`: Routes by channel name, falls back to LogNotifier. (Voice's `WebAlarmNotifier` registers the `web` channel — see `src/voice/`.)

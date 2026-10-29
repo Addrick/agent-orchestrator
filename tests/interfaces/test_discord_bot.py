@@ -924,3 +924,25 @@ async def test_chat_turn_from_unlisted_guild_never_reaches_generation(mock_reset
         await client.on_message(message)
 
     chat_system.generate_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_capped_splits_up_to_the_post_limit_and_warns_past_it():
+    """DP-486: a notification is split into Discord posts, but one past
+    DISCORD_MAX_POSTS is not sent; a single warning with its start is."""
+    from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_MAX_POSTS
+    from src.interfaces.discord_bot import _send_capped
+
+    target = AsyncMock()
+    ok = "y" * (DISCORD_CHAR_LIMIT * DISCORD_MAX_POSTS - 50)
+    assert await _send_capped(target, ok) is True
+    assert target.send.await_count == DISCORD_MAX_POSTS
+    assert "".join(c.args[0] for c in target.send.await_args_list) == ok
+
+    target = AsyncMock()
+    big = "START " + "z" * (DISCORD_CHAR_LIMIT * (DISCORD_MAX_POSTS + 1))
+    assert await _send_capped(target, big) is False
+    (call,) = target.send.await_args_list
+    warning = call.args[0]
+    assert "was not sent" in warning and "START" in warning
+    assert len(warning) <= DISCORD_CHAR_LIMIT
