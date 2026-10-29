@@ -739,7 +739,7 @@ When codr is idle, a message is an ordinary chat turn, as before.
 The first time in a task attempt, DERPR stops the turn and starts a new one with a
 nudge naming what repeated and asking codr to change approach. The second time,
 it stops the turn, records the attempt as `aborted`, and posts the reason to the
-channel. Running past `max_turn_seconds` aborts right away, with no nudge: the
+channel. Running past `max_turn_seconds` aborts right away and posts the reason, with no nudge: the
 attempt is out of time.
 
 **More than one model server.** codr can hand subtasks to a `pool` subagent
@@ -762,7 +762,7 @@ Settings, per instance in `agents.json` under `codr`:
 - `persona` (default `codr`): which opencode persona the agent drives.
 - `tasks_dir` (default `config/codr_tasks`).
 - `max_attempts` (default `3`) per task.
-- `max_turn_seconds` (default `7200`), `stall_seconds` (default `900`).
+- `max_turn_seconds` (default `604800`, one week), `stall_seconds` (default `900`).
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but

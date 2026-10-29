@@ -65,7 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "persona": "codr",
     "tasks_dir": "config/codr_tasks",
     "max_attempts": 3,
-    "max_turn_seconds": 7200,
+    "max_turn_seconds": 604800,
     "stall_seconds": 900,
     "check_timeout_seconds": 600,
     "notify_per_hour": 20,
