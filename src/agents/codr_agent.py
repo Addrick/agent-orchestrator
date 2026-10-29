@@ -165,7 +165,7 @@ export default {
     "Send Adam, your operator, a short message in your Discord channel now, without ending your turn. " +
     "Use it for progress worth knowing or a problem he can help with, not for routine status. " +
     "At most %(per_hour)d an hour are delivered. His reply, if any, arrives later as a new message.",
-  args: { message: { type: "string", description: "The message, under 1500 characters." } },
+  args: { message: { type: "string", description: "The message. Keep it short; long ones are split into several Discord posts." } },
   async execute(args) {
     return "Queued for Adam. Keep working.";
   },
@@ -351,7 +351,7 @@ class CodrAgent(Agent):
         try:
             return await self.notification_router.send(
                 channel=target.get("channel", "discord_channel"), recipient=str(target["recipient"]),
-                subject="", body=body[:1900])
+                subject="", body=body)
         except Exception as e:  # noqa: BLE001 — a failed post must not stop the agent
             logger.warning("codr agent: post failed: %s", e)
             return False
@@ -457,8 +457,10 @@ class CodrAgent(Agent):
                     self._dropped += 1
                     logger.info("codr agent: notify_adam rate limit hit; dropped: %s", text[:200])
                     continue
-                if await self._post(f"codr: {text[:1500]}"):
-                    await self._commit_reply(text[:1500])
+                # Whole, here and in `_post`: the Discord client splits long
+                # posts (DP-485). Only the action-log copy is capped, to fit its row.
+                if await self._post(f"codr: {text}"):
+                    await self._commit_reply(text)
                 else:
                     self.memory_manager.update_agent_action_outcome(row, "failed")
                     self._undelivered += 1

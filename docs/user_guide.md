@@ -721,7 +721,7 @@ the next attempt starts.
 
 **codr can message you.** codr has a `notify_adam` tool in every turn. While the
 agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
-one tick. It is meant for progress worth knowing and for problems you can help
+one tick, whole: a message too long for one Discord post is split across several. It is meant for progress worth knowing and for problems you can help
 with, and the task prompt tells codr to use it to report when it finishes a task:
 its final reply is not posted. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
 dropped and logged, and the next task result says how many were dropped.
