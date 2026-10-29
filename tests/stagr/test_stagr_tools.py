@@ -16,6 +16,7 @@ from config import global_config
 from src.engine.providers.opencode import (
     AUTO_FIELD, session_title, workspace_directory, workspace_hold, workspace_lock,
 )
+from src.agents.codr_agent import load_tasks
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
@@ -253,7 +254,7 @@ async def test_a_missing_source_is_reported(boxes):
 
 
 def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
-    """stagr.json exposes exactly its seven tools, all in the one `stagr`
+    """stagr.json exposes exactly its eight tools, all in the one `stagr`
     domain, so ToolPolicy has nothing to refuse and the persona is not
     quarantined at load. The panel's two network tools (DP-465) are not among
     them: stagr asks for a switch, it never flips one. The file is public, so
@@ -267,5 +268,69 @@ def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
     assert names == {t["function"]["name"] for t in STAGR_TOOLS} - panel_only == set(persona["enabled_tools"])
     assert policy.explicit_overrides == [] and policy.validate_composition(exposed) == []
     assert {t["function"]["name"] for t in STAGR_TOOLS if t["is_write"]} == {
-        "request_web_access", "request_network", "copy_from_codr", "set_sandbox_net"}
+        "request_web_access", "request_network", "copy_from_codr", "set_sandbox_net", "queue_codr_task"}
     assert persona["origin_allowlist"] == []
+
+
+# --- DP-481: the codr task queue, and no codr started behind DERPR's back -----
+
+
+@pytest.mark.parametrize("command", [
+    "opencode run --attach http://127.0.0.1:4096 --dir tasks/x 'Work the task'",
+    "cd tasks/x && ~/.opencode/bin/opencode run hi",
+    "nohup opencode serve &",
+    "opencode",
+])
+async def test_codr_shell_refuses_to_run_opencode(boxes, command):
+    _, codr, _, _ = boxes
+    result = await StagrToolHandler()._codr_shell(command)
+    assert result["status"] == "error" and "queue_codr_task" in result["message"]
+    assert codr.scripts == []
+
+
+async def test_codr_shell_still_reads_opencode_files(boxes):
+    _, _, _, codr_dir = boxes
+    (codr_dir / ".opencode").mkdir()
+    (codr_dir / ".opencode" / "opencode.json").write_text("{}")
+    result = await StagrToolHandler()._codr_shell("cat .opencode/opencode.json")
+    assert result["status"] == "ok" and result["output"].strip() == "{}"
+
+
+@pytest.fixture
+def queue(monkeypatch, tmp_path):
+    folder = tmp_path / "codr_tasks"
+    monkeypatch.setattr(global_config, "CODR_TASKS_DIR", folder)
+    return folder
+
+
+async def test_a_queued_task_is_one_the_codr_agent_starts(queue):
+    result = await StagrToolHandler()._queue_codr_task(
+        "09-click", "# Fix the bug\nIn tasks/09-click.", "python3 -I -m unittest\n", max_attempts=1)
+    assert result["status"] == "ok"
+    [task] = load_tasks(queue, default_attempts=3)
+    assert (task.id, task.text, task.check, task.max_attempts) == (
+        "09-click", "# Fix the bug\nIn tasks/09-click.", "python3 -I -m unittest\n", 1)
+    assert [p.name for p in queue.iterdir()] == ["09-click"]  # no staging folder left
+
+
+async def test_queueing_never_replaces_a_task(queue):
+    handler = StagrToolHandler()
+    assert (await handler._queue_codr_task("t", "first", "true"))["status"] == "ok"
+    result = await handler._queue_codr_task("t", "second", "false")
+    assert result["status"] == "error" and "new name" in result["message"]
+    assert (queue / "t" / "TASK.md").read_text() == "first\n"
+
+
+@pytest.mark.parametrize("name", ["", ".hidden", "-x", "../out", "a/b", "a b"])
+async def test_queueing_refuses_a_bad_name(queue, name):
+    result = await StagrToolHandler()._queue_codr_task(name, "task", "true")
+    assert result["status"] == "error"
+    assert not queue.exists() or list(queue.iterdir()) == []
+
+
+def test_load_tasks_skips_a_half_staged_task(tmp_path):
+    staged = tmp_path / ".queue-1234"
+    staged.mkdir()
+    (staged / "TASK.md").write_text("x")
+    (staged / "check.sh").write_text("true")
+    assert load_tasks(tmp_path, default_attempts=3) == []

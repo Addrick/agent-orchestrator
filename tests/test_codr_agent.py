@@ -23,6 +23,12 @@ fake = provider_tests.fake  # the fake `opencode serve` fixture
 AUTO = opencode.AUTO_FIELD
 
 
+@pytest.fixture(autouse=True)
+def _queue(monkeypatch, tmp_path):
+    """Each test's task queue is its own tmp_path."""
+    monkeypatch.setattr(codr_agent.global_config, "CODR_TASKS_DIR", tmp_path)
+
+
 class FakeMemory:
     """The agent-action-log calls the agent makes."""
 
@@ -93,7 +99,7 @@ def _agent(tmp_path, **cfg):
                            turn_persistence=Persistence())
     router = Router()
     agent = CodrAgent(chat, router, {
-        "tasks_dir": str(tmp_path), "_recipients": {},
+        "_recipients": {},
         "notification_target": {"channel": "discord_channel", "recipient": "123"}, **cfg})
     return agent, router
 

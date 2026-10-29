@@ -316,7 +316,10 @@ def test_codr_agent_built_from_the_shipped_config():
     assert agent.cfg["pool_url"] == "http://10.0.0.70:5002/v1"
     assert agent.persona_name == "codr" and agent.directory.endswith("/codr")
     assert "_recipients" not in agent.cfg
-    assert {t.id for t in agent._tasks()} >= {"01-csvstats", "02-seeded-bug", "03-notes-api"}
+    # The queue is the instance's (DP-481); the shipped battery still loads as tasks.
+    from src.agents.codr_agent import load_tasks
+    battery = {t.id for t in load_tasks(global_config.CONFIG_DIR / "codr_tasks", 3)}
+    assert battery >= {"01-csvstats", "02-seeded-bug", "03-notes-api"}
 
 
 def test_codr_agent_with_an_empty_config_block_uses_the_defaults(tmp_path):

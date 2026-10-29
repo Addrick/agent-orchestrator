@@ -6,7 +6,8 @@ network is gated, not each command. ``codr_shell`` is ungated for the same
 reason (DP-462): codr's sandbox is offline and restorable, and the handler runs
 it only between codr's turns. Everything that crosses a boundary is
 ``is_write`` and parked for approval: turning a switch on, approving a host,
-and copying files out of codr's sandbox. ``sandbox_net_status`` and
+copying files out of codr's sandbox, and queueing a codr task
+(``queue_codr_task``: the approval is where the operator sees the hidden check). ``sandbox_net_status`` and
 ``set_sandbox_net`` are the portal panel's (the operator's click is the
 approval there); no persona is given them. ``copy_to_codr`` is not: ``codr_shell`` can already write
 any file there, so a gate on the copy would only be a convention.
@@ -173,7 +174,8 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
                 "user agent with passwordless sudo, Python 3.13, git; no internet, no LAN). Use "
                 "it between tasks: install what a task needs from files you copied in (e.g. pip "
                 "install --no-index --find-links wheels ...), check the environment, debug a test "
-                "that fails offline. Refused while codr is working, and codr starts nothing "
+                "that fails offline. Never run opencode here: start codr's work with queue_codr_task. "
+                "Refused while codr is working, and codr starts nothing "
                 "while it runs. Returns the exit code and the output (stdout and stderr "
                 "together; the middle of very long output is cut)."
             ),
@@ -238,6 +240,32 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
                     "keep_git": {"type": "boolean", "description": "Copy .git folders too, e.g. to diff codr's commits. Default false."},
                 },
                 "required": ["source", "dest"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "is_write": True,
+        "service_binding": "stagr",
+        "capabilities": _caps(),
+        "function": {
+            "name": "queue_codr_task",
+            "description": (
+                "Put a task in codr's queue. Needs Adam's approval. DERPR starts it when codr is "
+                "idle, in tasks/<name>/ of codr's workspace: copy the task's files there with "
+                "copy_to_codr first, under the same name. task_md is what codr reads; check_sh "
+                "is the hidden pass/fail check (exit 0 = pass), run in tasks/<name>/ after codr "
+                "says it is done. codr never sees it. Refused if a task of that name is queued."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The task's name, e.g. 09-click-issue-2711. Same as its folder in tasks/."},
+                    "task_md": {"type": "string", "description": "The task for codr, in markdown."},
+                    "check_sh": {"type": "string", "description": "The bash check. Exit code 0 means pass."},
+                    "max_attempts": {"type": "integer", "description": "Attempts before it counts as failed. Default 3."},
+                },
+                "required": ["name", "task_md", "check_sh"],
             },
         },
     },
