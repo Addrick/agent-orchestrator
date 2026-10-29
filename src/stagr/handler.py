@@ -14,12 +14,17 @@ the network is gated, not the local work. What crosses a boundary is gated
 - `copy_to_codr` / `copy_from_codr` copy a file or folder between stagr and
   codr's offline sandbox, to a path that must not exist yet. Any `.git` is left
   behind unless asked for, so upstream history (a later fix, say) never reaches
-  codr by accident.
+  codr by accident;
+- `queue_codr_task` writes a task's TASK.md and check.sh into the codr task
+  queue (`global_config.CODR_TASKS_DIR`, DP-481), staged in a dot-folder the
+  agent skips and renamed into place, so a tick never sees half a task.
 
 `codr_shell` runs unapproved too, in codr's workspace (DP-462): codr-vm is
 offline and is restored from a backup if a command wrecks it. It holds codr's
 workspace lock and runs only while every session there is idle, so the
-environment changes between tasks, never under one.
+environment changes between tasks, never under one. It refuses a command that
+runs `opencode` (DP-481): that starts a codr session the codr agent never
+watches (no loop guard, time limit or check), held open only by this call.
 
 Files move with `OpencodeClient.write_file` / `read_file` (DP-455), as one
 tar.gz each way; derpr is the only thing that talks to both boxes.
@@ -32,6 +37,7 @@ import logging
 import posixpath
 import re
 import shlex
+import shutil
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
@@ -60,6 +66,10 @@ MAX_TRANSFER_BYTES = 200 * 1024 * 1024
 _EXIT_MARK = "__STAGR_EXIT="
 _OK_MARK = "__STAGR_OK"
 _LONG = aiohttp.ClientTimeout(total=600)
+# `opencode` as a command (`opencode run`, `~/.opencode/bin/opencode`), not
+# `.opencode/` or `opencode.json`.
+_OPENCODE_CMD = re.compile(r"(?:^|[^\w.-])opencode(?=\s|$|[;&|)])")
+TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class _Refused(Exception):
@@ -146,6 +156,7 @@ class StagrToolHandler:
         manager.register("codr_shell", self._codr_shell)
         manager.register("copy_to_codr", self._copy_to_codr)
         manager.register("copy_from_codr", self._copy_from_codr)
+        manager.register("queue_codr_task", self._queue_codr_task)
 
     # -- clients ---------------------------------------------------------------
 
@@ -183,6 +194,10 @@ class StagrToolHandler:
         return _shell_result(out, seconds)
 
     async def _codr_shell(self, command: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+        if _OPENCODE_CMD.search(command or ""):
+            return _error("codr_shell does not run opencode: a codr started that way is not watched "
+                          "by DERPR (no loop guard, time limit or check) and dies when DERPR restarts. "
+                          "Queue the task with queue_codr_task instead.")
         prepared = _shell_script(command, timeout_seconds)
         if isinstance(prepared, dict):
             return prepared
@@ -396,3 +411,46 @@ class StagrToolHandler:
             return _error("copy from codr failed: a call to codr's sandbox or stagr timed out.")
         return {"status": "ok", "copied": f"codr {src} -> stagr {dst}", "bytes": len(archive),
                 "git": "kept" if keep else "any .git was left behind"}
+
+    # -- the codr task queue (DP-481) ------------------------------------------------
+
+    @staticmethod
+    def _task_text(task_md: str, check_sh: str, max_attempts: Any) -> Union[str, Dict[str, Any]]:
+        """TASK.md's content, with the `max_attempts:` first line if given; or the error."""
+        if not (task_md or "").strip() or not (check_sh or "").strip():
+            return _error("task_md and check_sh must both be non-empty.")
+        text = task_md.strip() + "\n"
+        if max_attempts is None:
+            return text
+        try:
+            attempts = int(max_attempts)
+        except (TypeError, ValueError):
+            return _error("max_attempts must be a whole number.")
+        return f"max_attempts: {attempts}\n{text}" if attempts >= 1 else _error("max_attempts must be at least 1.")
+
+    async def _queue_codr_task(self, name: str, task_md: str, check_sh: str,
+                               max_attempts: Any = None) -> Dict[str, Any]:
+        """Runs only once the operator approved it: the prompt shows both files."""
+        name = (name or "").strip()
+        if not TASK_NAME_RE.match(name):
+            return _error(f"name must be letters, digits, '.', '_' or '-', not starting with '.' or '-': {name!r}")
+        text = self._task_text(task_md, check_sh, max_attempts)
+        if isinstance(text, dict):
+            return text
+        queue = global_config.CODR_TASKS_DIR
+        dest = queue / name
+        staged = queue / f".queue-{uuid.uuid4().hex[:8]}"
+        try:
+            if dest.exists():
+                return _error(f"a task named {name} is already queued; a new name is a new task.")
+            staged.mkdir(parents=True)
+            (staged / "TASK.md").write_text(text, encoding="utf-8")
+            (staged / "check.sh").write_text(check_sh.rstrip() + "\n", encoding="utf-8")
+            staged.rename(dest)
+        except OSError as e:
+            return _error(f"could not queue {name}: {e}")
+        finally:
+            shutil.rmtree(staged, ignore_errors=True)
+        logger.info("stagr: queued codr task %s", name)
+        return {"status": "ok", "queued": name,
+                "note": f"codr starts it when it is idle; its files should be in tasks/{name}/ in codr's workspace."}

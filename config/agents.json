@@ -61,7 +61,6 @@
             "schedule": {"interval": 30},
             "auto_start": false,
             "notification_target": {"channel": "discord_channel", "recipient": "1562589289332609075"},
-            "tasks_dir": "config/codr_tasks",
             "max_attempts": 3,
             "max_turn_seconds": 604800,
             "stall_seconds": 900,

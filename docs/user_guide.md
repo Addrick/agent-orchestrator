@@ -672,7 +672,11 @@ going while it waits for your answer. The agent is off by default
 (`auto_start: false` in `agents.json`); start it with `manage_agent` or set
 `auto_start`.
 
-**The task queue.** Each task is a folder under `config/codr_tasks/<task>/`:
+**The task queue.** Each task is a folder under `data/codr_tasks/<task>/` (DP-481:
+in the instance's data folder, `/data/codr_tasks/` in the container, so adding or
+removing a task needs no deploy). The setup agent adds tasks with
+`queue_codr_task`, which waits for your approval; you can also create the folder
+by hand:
 
 - `TASK.md`: what to build, written for codr. An optional first line
   `max_attempts: N` overrides the default.
@@ -688,7 +692,8 @@ going while it waits for your answer. The agent is off by default
   archive and sends it in pieces, so a whole repo fits. Before DP-455 everything
   over about 90 KB in total failed to arrive.
 
-The shipped tasks are a test battery that gets harder as it goes: 01-03 are small
+The shipped tasks in `config/codr_tasks/` are a test battery, not the queue: to
+run one, copy its folder into `data/codr_tasks/`. They get harder as they go: 01-03 are small
 builds and a bug fix, 04 extends codr's own task-03 app (auth and a schema
 migration), 05 has a deliberately ambiguous spec, 06 is a long build (a static site
 generator), 07 asks for a package the sandbox doesn't have, and 08 is a library
@@ -708,7 +713,11 @@ workspace, and the instruction to keep an attempts log at
 
 Every attempt is recorded in the agent action log (task, attempt, outcome, run
 time, and codr's final reply). Results stay there, so a restart or deploy resumes the queue where it was.
-To rerun a task, rename its folder: a new name is a new task.
+To rerun a task, rename its folder: a new name is a new task. To take a task out
+of the queue, delete its folder; if it is running, also abort codr's turn (opencode
+web UI, or `POST /session/<id>/abort`), and the next tick records the attempt as
+`aborted`. In that order: aborting first only ends the turn, so the check runs and
+the next attempt starts.
 
 **codr can message you.** codr has a `notify_adam` tool in every turn. While the
 agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
@@ -760,7 +769,6 @@ Settings, per instance in `agents.json` under `codr`:
   `{"channel": "discord_channel", "recipient": "<channel id>"}`. Unset = nothing
   is posted (logged instead).
 - `persona` (default `codr`): which opencode persona the agent drives.
-- `tasks_dir` (default `config/codr_tasks`).
 - `max_attempts` (default `3`) per task.
 - `max_turn_seconds` (default `604800`, one week), `stall_seconds` (default `900`).
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
@@ -854,6 +862,15 @@ only thing that talks to both:
   (a command can run for an hour): codr answers at once with a ⏸ note naming
   what is running and since when, and the message is dropped — it never reaches
   codr's history, memory or model. Resend it when the command is done.
+  `codr_shell` refuses a command that runs `opencode` itself (DP-481): a codr
+  started that way is a session DERPR doesn't watch, with no loop guard, time
+  limit or check, and it dies when DERPR restarts. Tasks go through the queue.
+- **Queueing a task**: `queue_codr_task` puts a task's `TASK.md` and `check.sh`
+  into the queue under a new name, after your approval; the approval prompt shows
+  both, so you see the check codr is graded on. An optional `max_attempts` becomes
+  the `TASK.md` first line. It is refused if a task of that name is already queued
+  (a new name is a new task). The agent starts it on its next tick when codr is
+  idle.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
   back to any path on the setup box. Only `copy_from_codr` needs your approval:
@@ -873,8 +890,8 @@ only thing that talks to both:
 
 To give codr a real-repo task: ask stagr to prepare it (clone, check out the
 start commit, download wheels for what the tests need into the folder, run the
-tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then add the task's
-`TASK.md` and `check.sh` to `config/codr_tasks/` under the same name. The codr
+tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then queue the task's
+`TASK.md` and `check.sh` under the same name with `queue_codr_task`. The codr
 agent starts a task as soon as its folder is in the queue, and its seeding never
 replaces files that are already there.
 

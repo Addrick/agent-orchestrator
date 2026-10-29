@@ -38,6 +38,7 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
+from config import global_config
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
@@ -50,7 +51,6 @@ from src.engine.providers.opencode import (
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 NOTIFY_TOOL = "notify_adam"
 RELAY_ACTION = "notify_relay"
 ATTEMPT_ACTION = "task_attempt"
@@ -63,7 +63,6 @@ _SEEDED_MARK = "__DERPR_SEEDED"
 
 DEFAULTS: Dict[str, Any] = {
     "persona": "codr",
-    "tasks_dir": "config/codr_tasks",
     "max_attempts": 3,
     "max_turn_seconds": 604800,
     "stall_seconds": 900,
@@ -89,9 +88,11 @@ def load_tasks(tasks_dir: Path, default_attempts: int) -> List[CodrTask]:
     """Every `<tasks_dir>/<id>/` holding both TASK.md and check.sh, oldest
     (by name) first. An optional `max_attempts: N` first line in TASK.md
     overrides the default and is not shown to codr. Files under `seed/` are
-    the task's starting files."""
+    the task's starting files. Dot-folders are skipped: `queue_codr_task`
+    stages a task in one before it renames it into place."""
     tasks = []
-    for folder in sorted(p for p in tasks_dir.iterdir() if p.is_dir()) if tasks_dir.is_dir() else []:
+    for folder in sorted(p for p in tasks_dir.iterdir()
+                         if p.is_dir() and not p.name.startswith(".")) if tasks_dir.is_dir() else []:
         task_md, check = folder / "TASK.md", folder / "check.sh"
         if not (task_md.is_file() and check.is_file()):
             continue
@@ -335,9 +336,7 @@ class CodrAgent(Agent):
     # -- plumbing
 
     def _tasks(self) -> List[CodrTask]:
-        tasks_dir = Path(self.cfg["tasks_dir"])
-        return load_tasks(tasks_dir if tasks_dir.is_absolute() else REPO_ROOT / tasks_dir,
-                          int(self.cfg["max_attempts"]))
+        return load_tasks(global_config.CODR_TASKS_DIR, int(self.cfg["max_attempts"]))
 
     def _attempts(self, task_id: str) -> List[Dict[str, Any]]:
         """Recorded attempts of `task_id`, oldest first."""

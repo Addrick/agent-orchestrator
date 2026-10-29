@@ -57,6 +57,9 @@ SYSTEM_PERSONA_FILE = CONFIG_DIR / 'system_personas.json'
 # once from the shipped config, so a dev box never inherits prod's daily runs.
 AGENTS_SAVE_FILE = DATA_DIR / "agents.json"
 DEFAULT_AGENTS_FILE = CONFIG_DIR / "agents.json"
+# The codr task queue (DP-481): per instance, so a task is queued or removed
+# without a deploy. config/codr_tasks/ ships the test battery, not the queue.
+CODR_TASKS_DIR = DATA_DIR / "codr_tasks"
 
 # Application Logging
 CHAT_LOG_LOCATION = LOGS_DIR
