@@ -195,7 +195,7 @@ recorded anywhere as deliberate. Same `unreviewed` row in the capability map.
 | trigger | outbound call | concurrency cap | error shape | gate |
 |---|---|---|---|---|
 | pve tool (`proxmox/handler.py:234`) | `SSHRunner.run` | `Semaphore(_MAX_INFLIGHT_SSH=4)` | `{"status": "error", ...}` | `PVE_TOOLS_ENABLED`, checked **inside `_run`** |
-| ⚠️ HF tool (`huggingface/handler.py:219`) | `SSHRunner.run` — same class | **none** | same dict shape | `HF_TOOLS_ENABLED`, checked **per tool at each call site**, not in `_run` |
+| HF tool (`huggingface/handler.py:247`) | `run_node_command` — the same door (DP-348, D1 below) | shared `Semaphore(_MAX_INFLIGHT_SSH=4)` | same dict shape | `PVE_TOOLS_ENABLED` in the door, plus `HF_TOOLS_ENABLED` per tool |
 | LLM provider | provider SDK / `httpx` per provider; local = `AsyncOpenAI` via `openai.stream_chat_completions` (DP-417) | per-provider | provider exceptions | API key (local: none) |
 | Hindsight | `httpx.AsyncClient` | — | `HindsightAPIError` | health probe |
 | kcpp adapter | `httpx.AsyncClient` | — | `httpx.RequestError` | — |

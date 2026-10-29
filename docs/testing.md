@@ -100,6 +100,9 @@ Where each runs (DP-452) — the suite runs **twice** per merged PR, not on ever
 | Where | What |
 |---|---|
 | `.githooks/pre-push` | `ci_check.py --no-tests` — flake8, missing-deps, mypy, import-linter, in seconds. Skipped entirely when the push touches only `docs/`, `.agents/`, `readme.md` or `CLAUDE.md` |
+| `.githooks/pre-commit` | regenerates the `.agents/AGENTS.md` mirror from `CLAUDE.md` |
+| `.githooks/post-checkout` | seeds `.env` / `.env.test` and an isolated venv into a new worktree |
+| `.githooks/post-merge`, `post-rewrite` | rebuild the portal bundle (`derpr_ui/dist/`, gitignored) when a pull or rebase brings in web UI changes (DP-436); fails open |
 | PR CI | all five; a newer push to the PR cancels the superseded run |
 | Push to `master` | all five **in parallel** with the image build, which pushes only `:<sha>`. A `promote` job retags it `:latest` once both pass, then `deploy` runs. Master runs queue, never cancel |
 

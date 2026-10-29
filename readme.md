@@ -138,6 +138,9 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `LOCAL_LLM_PRESETS` | JSON list of `{"label", "url", "progress_url"?}` offered as quick picks by that switch (default in `config/global_config.py`) |
 | `ZAMMAD_URL`, `ZAMMAD_API_KEY` | Enables ZammadClient + Zammad agents |
 | `GMAIL_CREDENTIALS_FILE`, `GMAIL_TOKEN_FILE`, `GMAIL_PROJECT_ID`, `GMAIL_PUBSUB_TOPIC`, `GMAIL_PUBSUB_SUBSCRIPTION_ID` | Gmail PoC interface |
+| `LOCAL_BACKEND_FILE` | Where the portal's local-model backend choice is saved (default `<DATA_DIR>/local_backend.json`) |
+| `STAGR_SERVER_URL`, `STAGR_SERVER_PASSWORD` | Enables the stagr setup-box tools (VM201's opencode server) |
+| `PVE_NET_SSH_HOST`, `PVE_NET_SSH_KEY` | Node and key the sandbox LAN/WAN switches use (default the `derpr` host `10.0.0.74`) |
 | `DATA_DIR` | Where all mutable state lives (default `./data`; the container sets `/data`, outside the app tree) |
 | `MEMORY_DATABASE_FILE` | SQLite path (default `<DATA_DIR>/user_memory.db`) |
 | `KOBOLD_DEFAULT_PERSONA` | Persona served when the portal opens with no selection |
