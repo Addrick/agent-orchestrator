@@ -215,3 +215,26 @@ async def test_executor_revalidates_agent_call_args(runner_and_calls):
     assert ok is False
     assert "failed re-validation" in message
     assert calls == []
+
+
+async def test_bound_tools_are_never_exposed_over_the_bridge():
+    """DP-475: a bind_args tool fills its scope from the calling persona's
+    turn; a bridge call has none, so exposing it could only produce calls that
+    fail — the gated ones after an operator approved them."""
+    bound = {
+        "type": "function", "is_write": False, "bind_args": {"bank_id": "{PERSONA}"},
+        "function": {"name": "mcp__hindsight__recall", "description": "d", "parameters": {}},
+    }
+    manager = _FakeToolManager([TOOL_DEF, bound])
+
+    async def _handler(**_kwargs):
+        return "ok"
+
+    manager.register("restart_thing", _handler)
+    manager.register("mcp__hindsight__recall", _handler)
+    policy = ToolPolicy(default="deny", allow=["restart_thing", "mcp__hindsight__*"])
+    runner = AgentCallRunner(lambda: manager, lambda: policy)
+
+    assert runner.exposed_tool_names() == frozenset({"restart_thing"})
+    out = await runner.execute_ungated("mcp__hindsight__recall", {"query": "q"})
+    assert "not exposed" in out["error"]

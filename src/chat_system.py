@@ -217,6 +217,7 @@ class ChatSystem:
         # post-init rebinds of `self.tool_manager` stay visible to resumes.
         self.confirmations: ConfirmationManager = ConfirmationManager(
             lambda: self.tool_manager, memory_manager, self._offered_tool_names,
+            persona_lookup=lambda name: self.personas.get(name),
         )
         # persona_lookup is a closure over self (not a dict reference) so
         # tests/admin paths that rebind `self.personas` stay visible.

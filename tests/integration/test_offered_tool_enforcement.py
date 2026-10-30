@@ -88,3 +88,41 @@ async def test_registered_tool_outside_the_persona_allowlist_does_not_run(mocked
     _script(chat_system, _call("get_agent_status", agent_id="a"), _text("ok"))
     await _turn(chat_system)
     assert ran == [{"agent_id": "a"}]
+
+
+@pytest.mark.asyncio
+async def test_write_naming_another_bank_is_refused_before_it_parks(
+        mocked_chat_system, monkeypatch):
+    """DP-475: a bound tool's own scope is fixed, so a write that names
+    another bank is answered with a refusal and never parked — an approval
+    card reading bank_id='managr' must not exist for a call that could only
+    run in the caller's own bank."""
+    from src.tools import definitions
+    from src.tools.definitions import ALL_TOOL_DEFINITIONS, ToolDefinitionRegistry
+
+    monkeypatch.setattr(
+        definitions, "_REGISTRY", ToolDefinitionRegistry(ALL_TOOL_DEFINITIONS))
+    name = "mcp__hindsight__delete_mental_model"
+    definitions.register_tool_definition({
+        "type": "function", "dynamic": True, "is_write": True,
+        "service_binding": "mcp:hindsight",
+        "capabilities": {"produces_untrusted": True, "irreversible": True,
+                         "locality": "network", "sensitivity": "pii"},
+        "bind_args": {"bank_id": "{PERSONA}"},
+        "function": {"name": name, "description": "d", "parameters": {
+            "type": "object", "properties": {"mental_model_id": {"type": "string"}},
+        }},
+    })
+    chat_system, _ = mocked_chat_system
+    persona = chat_system.personas["test_persona"]
+    persona.set_enabled_tools([name])
+    ran = _recording(chat_system, name)
+    offer_tools(chat_system, "test_persona", name)
+
+    _script(chat_system,
+            _call(name, mental_model_id="x", bank_id="managr"), _text("ok"))
+    events = await _turn(chat_system)
+    assert ran == []
+    assert chat_system.confirmations.pending == {}
+    assert any("fixed to 'test_persona'" in (getattr(ev, "error", None) or "")
+               for ev in events)

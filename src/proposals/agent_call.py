@@ -48,8 +48,16 @@ class AgentCallRunner:
         a registered handler for, and what the bridge ToolPolicy allows. Used by
         the MCP server for ``tools/list`` and by ``run`` for the re-check, so
         listing and execution cannot disagree about what is exposed.
+
+        A tool with ``bind_args`` (DP-475) is never exposed, whatever the
+        policy says: its bound arguments are filled from the calling persona's
+        turn, and a bridge call has no persona — it could only ever fail, and
+        only after an operator had approved it.
         """
-        registered = self._tool_manager_lookup().get_tool_definitions()
+        registered = [
+            d for d in self._tool_manager_lookup().get_tool_definitions()
+            if not d.get("bind_args")
+        ]
         return self._policy_lookup().filter_tools(registered)
 
     def exposed_tool_names(self) -> FrozenSet[str]:

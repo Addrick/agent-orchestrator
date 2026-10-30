@@ -663,6 +663,33 @@ async def test_approved_write_runs_inside_the_parking_turns_scope(mem_manager):
     assert get_turn_context() is None  # restored after execution
 
 
+async def test_approved_write_runs_under_the_parking_personas_memory_mode(mem_manager):
+    """The live turn sets memory_mode from the persona; the re-entered one
+    must too, or a GLOBAL persona's approved call recalls CHANNEL_ISOLATED."""
+    from src.persona import MemoryMode
+    from src.tools.tool_manager import ToolManager
+    from src.tools.turn_context import get_turn_context
+
+    seen = {}
+
+    async def scoped(**_kwargs):
+        seen["mode"] = get_turn_context().memory_mode
+        return {"ok": True}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", scoped)
+    persona = MagicMock()
+    persona.get_memory_mode.return_value = MemoryMode.GLOBAL
+    mgr = ConfirmationManager(
+        lambda: tool_manager, mem_manager, _offered,
+        persona_lookup=lambda name: persona if name == "derpr" else None,
+    )
+    parked = _park(token="m", user="alice", persona="derpr")
+    mgr.park(parked)
+    await mgr.apply(Decision(park=parked, approved=True))
+    assert seen["mode"] is MemoryMode.GLOBAL
+
+
 # ---- DP-319: durability ---------------------------------------------------
 #
 # The property under test throughout this section is the one DP-297 could not

@@ -1836,12 +1836,17 @@ Security model for discovered tools:
   `{"sensitivity": "internal"}` for a server whose data is your own.
 - **Bound arguments (`"bind_args": {"<arg>": "{PERSONA}"}`).** derpr fills the
   argument itself from the calling persona, so the model can't choose it: the
-  argument is removed from every tool's schema, any value the model sends is
-  overwritten, and a tool that doesn't take the argument is not registered from
-  that entry at all (it could not be scoped). `{PERSONA}` — the calling
-  persona's name — is the only value accepted. A call with no persona behind it
-  (outside a chat turn) is refused. An approved write runs with the persona of
-  the turn that parked it.
+  argument is removed from every tool's schema, the tool's description says it
+  is fixed, and a tool that doesn't take the argument is not registered from
+  that entry at all (it could not be scoped). A call that sends a *different*
+  value anyway (e.g. another bank) is refused with an error and never reaches
+  the approval prompt; sending the persona's own value is harmless. `{PERSONA}`
+  — the calling persona's name — is the only value accepted; any other value is
+  logged once as a config error and the server is skipped (no connection
+  attempts) until the entry is fixed. A call with no persona behind it (outside
+  a chat turn) is refused, so bound tools are never exposed over the MCP bridge.
+  An approved write runs with the persona — and memory mode — of the turn that
+  parked it.
 - `trusted`, `capabilities` and `bind_args` are only set by editing
   `data/mcp_servers.json`; `add_mcp_server` always creates a plain, untrusted
   entry, so a model-proposed install can't classify itself.

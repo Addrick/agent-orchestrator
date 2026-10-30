@@ -970,8 +970,43 @@ async def test_bound_argument_leaves_the_schema_and_unbindable_tools_are_dropped
     await manager.aclose()
 
 
-async def test_bound_argument_is_filled_from_the_turn_and_overrides_the_model(
+async def test_bound_tool_carries_its_binds_and_says_so_in_its_description(
         tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[_mcp_tool(
+        "recall", description="bank_id: Use for cross-bank operations.",
+        schema=_BANK_SCHEMA)])
+    manager, _ = await _bound_manager(tmp_path, fake_transport, session)
+    definition = definitions.get_tool_definition("mcp__hindsight__recall")
+    assert definition["bind_args"] == {"bank_id": "{PERSONA}"}
+    assert "bank_id is fixed to the calling persona" in (
+        definition["function"]["description"])
+    await manager.aclose()
+
+
+async def test_bound_argument_is_filled_from_the_turn(
+        tmp_path, fresh_registry, fake_transport):
+    from src.tools.turn_context import TurnContext, turn_scope
+    session = FakeSession(tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    manager, tool_manager = await _bound_manager(tmp_path, fake_transport, session)
+    name = "mcp__hindsight__recall"
+
+    with turn_scope(TurnContext(persona_name="derpr", user_identifier="u",
+                                channel="c", server_id=None)):
+        assert await tool_manager.execute_tool(name, {name}, query="q") == {"result": "ok"}
+        # Naming its own bank is harmless and runs.
+        await tool_manager.execute_tool(name, {name}, query="r", bank_id="derpr")
+    assert session.calls == [
+        ("recall", {"query": "q", "bank_id": "derpr"}),
+        ("recall", {"query": "r", "bank_id": "derpr"}),
+    ]
+    await manager.aclose()
+
+
+async def test_conflicting_bound_argument_is_refused_not_overwritten(
+        tmp_path, fresh_registry, fake_transport):
+    """Overwriting would run a call other than the one the model believes it
+    made and an approver was shown — recall(bank_id='arbitr') answering with
+    derpr's memories, or an approved delete in arbitr landing in derpr."""
     from src.tools.turn_context import TurnContext, turn_scope
     session = FakeSession(tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
     manager, tool_manager = await _bound_manager(tmp_path, fake_transport, session)
@@ -981,8 +1016,8 @@ async def test_bound_argument_is_filled_from_the_turn_and_overrides_the_model(
                                 channel="c", server_id=None)):
         # The text protocol lets a model send an argument its schema hides.
         out = await tool_manager.execute_tool(name, {name}, query="q", bank_id="arbitr")
-    assert out == {"result": "ok"}
-    assert session.calls == [("recall", {"query": "q", "bank_id": "derpr"})]
+    assert "fixed to 'derpr'" in out["error"]
+    assert session.calls == []
     await manager.aclose()
 
 
@@ -1006,6 +1041,30 @@ async def test_unknown_bind_source_is_rejected(
     manager, _ = _make_manager(tmp_path)
     await manager.start()  # logged + skipped, like any failed server
     assert definitions.get_tool_definition("mcp__hindsight__recall") is None
+    await manager.aclose()
+
+
+async def test_malformed_entry_never_opens_a_session(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    """A config typo is reported, not retried: no connect at startup and none
+    on any maintenance pass after it."""
+    opened = []
+    real = mcp_client._open_session
+
+    def counting(url, message_handler=None):
+        opened.append(url)
+        return real(url, message_handler)
+
+    monkeypatch.setattr(mcp_client, "_open_session", counting)
+    fake_transport["http://hs/mcp"] = FakeSession(
+        tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    _write_config(tmp_path, {"hindsight": {
+        "url": "http://hs/mcp", "bind_args": {"bank_id": "{persona}"}}})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    await manager._maintain()
+    await manager._maintain()
+    assert opened == []
     await manager.aclose()
 
 

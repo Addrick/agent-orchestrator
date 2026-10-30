@@ -19,7 +19,7 @@ from __future__ import annotations
 import contextlib
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional
 
 from src.persona import MemoryMode
 
@@ -74,3 +74,42 @@ def turn_scope(ctx: Optional[TurnContext]) -> Iterator[None]:
         yield
     finally:
         _turn_context.set(prev)
+
+
+# ``bind_args`` sentinels (DP-475): an argument a tool entry takes away from
+# the model and fills from the active turn instead. Allowlisted — a config
+# value outside this map is rejected at load, never passed through literally.
+BIND_SOURCES: Dict[str, Callable[[TurnContext], str]] = {
+    "{PERSONA}": lambda ctx: ctx.persona_name,
+}
+
+
+def resolve_binds(binds: Mapping[str, str], ctx: TurnContext) -> Dict[str, str]:
+    """``bind_args`` (arg -> sentinel) resolved against ``ctx``."""
+    return {arg: BIND_SOURCES[source](ctx) for arg, source in binds.items()}
+
+
+def bind_conflict(
+    tool_name: str, binds: Mapping[str, str], args: Mapping[str, Any],
+    ctx: Optional[TurnContext],
+) -> Optional[str]:
+    """Why a call to a bound tool must be refused, or None if it may run.
+
+    A bound argument the model supplied with a different value is refused,
+    never overwritten: overwriting runs an action other than the one the model
+    believes it took and the approver was shown (an approval card reading
+    ``bank_id='managr'`` for a delete that lands in the caller's own bank)."""
+    if not binds:
+        return None
+    if ctx is None:
+        return (
+            f"tool '{tool_name}' needs an active chat turn to fill its bound "
+            f"argument(s) {sorted(binds)}; not executed"
+        )
+    for arg, value in resolve_binds(binds, ctx).items():
+        if arg in args and args[arg] != value:
+            return (
+                f"tool '{tool_name}': '{arg}' is fixed to '{value}' for this "
+                f"persona and cannot be set to {args[arg]!r}; omit it"
+            )
+    return None
