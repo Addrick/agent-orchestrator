@@ -39,6 +39,7 @@ from src.tools.definitions import (
     get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
+from src.tools.turn_context import bind_conflict, get_turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,26 @@ def _normalize_call_identity(call: Dict[str, Any]) -> None:
     if not isinstance(call.get("name"), str):
         logger.warning("Tool call with non-string name %r; treating as unnamed", call.get("name"))
         call["name"] = ""
+
+
+def _bind_refusal(name: str, args: Dict[str, Any]) -> Optional[str]:
+    """Why a call that sets one of its tool's bound arguments (DP-475) to a
+    value other than the bound one is refused, or None. Checked before the
+    write/read split so such a call is answered with the refusal and never
+    parked: the approval card shows the call's own arguments, and approving
+    one that names another bank must not run anything."""
+    binds = (get_tool_definition(name) or {}).get("bind_args") or {}
+    return bind_conflict(name, binds, args, get_turn_context())
+
+
+def _refusal(
+    name: str, args: Dict[str, Any], offered: AbstractSet[str],
+) -> Optional[Dict[str, Any]]:
+    """The error a call is answered with instead of running, or None."""
+    if name not in offered:
+        return unoffered_error(name)
+    bind = _bind_refusal(name, args)
+    return {"error": bind} if bind is not None else None
 
 
 def _admitted_calls(
@@ -1066,7 +1087,10 @@ class ToolLoop:
             yield _StepBoundaryEvent(
                 history=conversation_history, start=history_start,
             )
-            write_calls = [c for c in admitted if is_write_tool(c["name"])]
+            write_calls = [
+                c for c in admitted if is_write_tool(c["name"])
+                and _bind_refusal(c["name"], c.get("arguments") or {}) is None
+            ]
             read_calls = [c for c in admitted if not is_write_tool(c["name"])]
 
             # Refused calls ride in the executed batch so their error results
@@ -1522,8 +1546,9 @@ class ToolLoop:
             )
 
         async def _run_one(name: str, args: Dict[str, Any]) -> Any:
-            if name not in offered:
-                return unoffered_error(name)
+            refused = _refusal(name, args, offered)
+            if refused is not None:
+                return refused
             try:
                 return await self.tool_manager.execute_tool(name, offered, **args)
             except Exception as e:

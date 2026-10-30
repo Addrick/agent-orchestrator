@@ -629,6 +629,67 @@ async def test_an_uninvokable_call_is_recorded_as_failed(
     assert ran == [], f"{why}: the handler must never have run"
     assert decision.ok is False
     assert decision.status == "approved_but_failed"
+
+
+# ---- DP-475: an approved write runs as the turn that parked it ------------
+
+async def test_approved_write_runs_inside_the_parking_turns_scope(mem_manager):
+    """The approval is a later event with no turn context of its own. A tool
+    that reads its scope from the turn (an MCP `bind_args` entry fills the
+    Hindsight bank from it) must see the persona that proposed the call, or a
+    bound write could never execute."""
+    from src.tools.tool_manager import ToolManager
+    from src.tools.turn_context import get_turn_context
+
+    seen = {}
+
+    async def scoped(**_kwargs):
+        seen["ctx"] = get_turn_context()
+        return {"ok": True}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", scoped)
+    mgr = ConfirmationManager(lambda: tool_manager, mem_manager, _offered)
+
+    parked = _park(token="s", user="alice", persona="derpr")
+    parked.channel, parked.server_id = "chan-9", "srv-1"
+    mgr.park(parked)
+    assert get_turn_context() is None
+    await mgr.apply(Decision(park=parked, approved=True))
+
+    ctx = seen["ctx"]
+    assert (ctx.persona_name, ctx.user_identifier, ctx.channel, ctx.server_id) == (
+        "derpr", "alice", "chan-9", "srv-1")
+    assert get_turn_context() is None  # restored after execution
+
+
+async def test_approved_write_runs_under_the_parking_personas_memory_mode(mem_manager):
+    """The live turn sets memory_mode from the persona; the re-entered one
+    must too, or a GLOBAL persona's approved call recalls CHANNEL_ISOLATED."""
+    from src.persona import MemoryMode
+    from src.tools.tool_manager import ToolManager
+    from src.tools.turn_context import get_turn_context
+
+    seen = {}
+
+    async def scoped(**_kwargs):
+        seen["mode"] = get_turn_context().memory_mode
+        return {"ok": True}
+
+    tool_manager = ToolManager()
+    tool_manager.register("update_ticket", scoped)
+    persona = MagicMock()
+    persona.get_memory_mode.return_value = MemoryMode.GLOBAL
+    mgr = ConfirmationManager(
+        lambda: tool_manager, mem_manager, _offered,
+        persona_lookup=lambda name: persona if name == "derpr" else None,
+    )
+    parked = _park(token="m", user="alice", persona="derpr")
+    mgr.park(parked)
+    await mgr.apply(Decision(park=parked, approved=True))
+    assert seen["mode"] is MemoryMode.GLOBAL
+
+
 # ---- DP-319: durability ---------------------------------------------------
 #
 # The property under test throughout this section is the one DP-297 could not

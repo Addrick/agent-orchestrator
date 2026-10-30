@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import AbstractSet, Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, AbstractSet, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config.global_config import (
     PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION,
@@ -39,6 +39,11 @@ from src.tools.tool_loop import (
     PARK_STATUS_QUARANTINED, awaiting_status, write_call_identity_hash,
 )
 from src.tools.tool_manager import ToolManager, tool_error
+from src.persona import MemoryMode
+from src.tools.turn_context import TurnContext, turn_scope
+
+if TYPE_CHECKING:
+    from src.persona import Persona
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +294,9 @@ class ConfirmationManager:
 
     def __init__(self, tool_manager_lookup: Callable[[], ToolManager],
                  memory_manager: MemoryManager,
-                 offered_lookup: Callable[[str], AbstractSet[str]]) -> None:
+                 offered_lookup: Callable[[str], AbstractSet[str]],
+                 persona_lookup: Optional[Callable[[str], Optional["Persona"]]] = None,
+                 ) -> None:
         # A lookup closure (mirrors RequestBuilder.persona_lookup) rather than
         # a bound reference: ToolLoop reads chat_system.tool_manager per call,
         # so a post-init swap must be visible here too or approved writes
@@ -300,6 +307,9 @@ class ConfirmationManager:
         # the turn that parked it, so a binding or allowlist narrowed while the
         # park waited (or a durable row restored after a restart) cannot run.
         self._offered_lookup = offered_lookup
+        # Resolves the parking persona at execution time, for the turn
+        # coordinates an approved call re-enters (its memory_mode).
+        self._persona_lookup = persona_lookup or (lambda _name: None)
         self.memory_manager = memory_manager
         self.pending: Dict[str, ParkedWrite] = {}
         # Insertion-ordered token list per conversation — drives the portal's
@@ -925,10 +935,28 @@ class ConfirmationManager:
         elif decision.approved:
             tool_manager = self._tool_manager_lookup()
             try:
-                decision.result = await tool_manager.execute_tool(
-                    tool_name, self._offered_lookup(park.persona_name),
-                    **(park.write_call.get("arguments") or {}),
-                )
+                # The approval arrives on a later event, outside the turn that
+                # parked the call: re-enter that turn's coordinates so a tool
+                # that reads its scope from the turn (DP-475 MCP bind_args,
+                # ingest_path) runs as the persona that proposed it.
+                # memory_mode as the live turn sets it (chat_system,
+                # request_builder): defaulting it would run a GLOBAL/PERSONAL
+                # persona's approved call under CHANNEL_ISOLATED scope.
+                persona = self._persona_lookup(park.persona_name)
+                with turn_scope(TurnContext(
+                    persona_name=park.persona_name,
+                    user_identifier=park.user_identifier,
+                    channel=park.channel,
+                    server_id=park.server_id,
+                    memory_mode=(
+                        persona.get_memory_mode() if persona is not None
+                        else MemoryMode.CHANNEL_ISOLATED
+                    ),
+                )):
+                    decision.result = await tool_manager.execute_tool(
+                        tool_name, self._offered_lookup(park.persona_name),
+                        **(park.write_call.get("arguments") or {}),
+                    )
                 # `ok` is "did the tool succeed", NOT "did the call return"
                 # and NOT "did the envelope carry an error". Two ways a write
                 # fails without raising, and DP-322 only closed the first:

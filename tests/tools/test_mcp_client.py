@@ -865,3 +865,217 @@ async def test_wildcard_persona_unaffected_by_server_install(
     assert wildcard.is_security_blocked() == before
     assert list(wildcard.get_security_block_reasons() or []) == reasons_before
     await manager.aclose()
+
+
+# --- DP-475: trusted annotations, server capabilities, bound arguments --------
+
+def _ann(**kw):
+    return mcp_types.ToolAnnotations(**kw)
+
+
+def _write_config(tmp_path, servers):
+    (tmp_path / "mcp_servers.json").write_text(json.dumps({"servers": servers}))
+
+
+async def test_trusted_server_classifies_from_annotations(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://hs/mcp"] = FakeSession(tools=[
+        _mcp_tool("recall", annotations=_ann(readOnlyHint=True)),
+        _mcp_tool("update_bank", annotations=_ann(readOnlyHint=False, destructiveHint=False)),
+        _mcp_tool("delete_bank", annotations=_ann(readOnlyHint=False, destructiveHint=True)),
+        # MCP spec default: destructiveHint is true when unset on a non-read.
+        _mcp_tool("cancel", annotations=_ann(readOnlyHint=False)),
+        _mcp_tool("bare"),
+    ])
+    _write_config(tmp_path, {"hs": {"url": "http://hs/mcp", "trusted": True}})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+
+    def meta(tool):
+        d = definitions.get_tool_definition(f"mcp__hs__{tool}")
+        return d["is_write"], d["capabilities"]["irreversible"]
+
+    assert meta("recall") == (False, False)
+    assert meta("update_bank") == (True, False)
+    assert meta("delete_bank") == (True, True)
+    assert meta("cancel") == (True, True)
+    assert meta("bare") == (True, True)  # no annotations: restrictive defaults
+    # Annotations never touch the trust/sensitivity axes.
+    caps = definitions.get_tool_definition("mcp__hs__recall")["capabilities"]
+    assert caps["produces_untrusted"] is True and caps["sensitivity"] == "pii"
+    await manager.aclose()
+
+
+async def test_untrusted_server_ignores_annotations(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://srv/mcp"] = FakeSession(tools=[
+        _mcp_tool("recall", annotations=_ann(readOnlyHint=True)),
+    ])
+    _write_config(tmp_path, {"srv": {"url": "http://srv/mcp"}})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    assert definitions.is_write_tool("mcp__srv__recall") is True
+    await manager.aclose()
+
+
+async def test_layering_server_capabilities_then_tool_override(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://hs/mcp"] = FakeSession(tools=[
+        _mcp_tool("recall", annotations=_ann(readOnlyHint=True)),
+        _mcp_tool("reflect", annotations=_ann(readOnlyHint=True)),
+    ])
+    _write_config(tmp_path, {"hs": {
+        "url": "http://hs/mcp", "trusted": True,
+        "capabilities": {"sensitivity": "internal"},
+        "tool_overrides": {"reflect": {
+            "is_write": True, "capabilities": {"sensitivity": "pii"}}},
+    }})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    recall = definitions.get_tool_definition("mcp__hs__recall")
+    reflect = definitions.get_tool_definition("mcp__hs__reflect")
+    assert (recall["is_write"], recall["capabilities"]["sensitivity"]) == (False, "internal")
+    # The operator's per-tool word beats both the annotation and the server default.
+    assert (reflect["is_write"], reflect["capabilities"]["sensitivity"]) == (True, "pii")
+    await manager.aclose()
+
+
+_BANK_SCHEMA = {
+    "type": "object",
+    "properties": {"query": {"type": "string"}, "bank_id": {"type": "string"}},
+    "required": ["query", "bank_id"],
+}
+
+
+async def _bound_manager(tmp_path, fake_transport, session):
+    fake_transport["http://hs/mcp"] = session
+    _write_config(tmp_path, {"hindsight": {
+        "url": "http://hs/mcp", "bind_args": {"bank_id": "{PERSONA}"}}})
+    manager, tool_manager = _make_manager(tmp_path)
+    await manager.start()
+    return manager, tool_manager
+
+
+async def test_bound_argument_leaves_the_schema_and_unbindable_tools_are_dropped(
+        tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[
+        _mcp_tool("recall", schema=_BANK_SCHEMA),
+        _mcp_tool("list_banks"),  # no bank_id: it could not be scoped
+    ])
+    manager, _ = await _bound_manager(tmp_path, fake_transport, session)
+    params = definitions.get_tool_definition("mcp__hindsight__recall")["function"]["parameters"]
+    assert "bank_id" not in params["properties"]
+    assert params["required"] == ["query"]
+    assert definitions.get_tool_definition("mcp__hindsight__list_banks") is None
+    await manager.aclose()
+
+
+async def test_bound_tool_carries_its_binds_and_says_so_in_its_description(
+        tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[_mcp_tool(
+        "recall", description="bank_id: Use for cross-bank operations.",
+        schema=_BANK_SCHEMA)])
+    manager, _ = await _bound_manager(tmp_path, fake_transport, session)
+    definition = definitions.get_tool_definition("mcp__hindsight__recall")
+    assert definition["bind_args"] == {"bank_id": "{PERSONA}"}
+    assert "bank_id is fixed to the calling persona" in (
+        definition["function"]["description"])
+    await manager.aclose()
+
+
+async def test_bound_argument_is_filled_from_the_turn(
+        tmp_path, fresh_registry, fake_transport):
+    from src.tools.turn_context import TurnContext, turn_scope
+    session = FakeSession(tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    manager, tool_manager = await _bound_manager(tmp_path, fake_transport, session)
+    name = "mcp__hindsight__recall"
+
+    with turn_scope(TurnContext(persona_name="derpr", user_identifier="u",
+                                channel="c", server_id=None)):
+        assert await tool_manager.execute_tool(name, {name}, query="q") == {"result": "ok"}
+        # Naming its own bank is harmless and runs.
+        await tool_manager.execute_tool(name, {name}, query="r", bank_id="derpr")
+    assert session.calls == [
+        ("recall", {"query": "q", "bank_id": "derpr"}),
+        ("recall", {"query": "r", "bank_id": "derpr"}),
+    ]
+    await manager.aclose()
+
+
+async def test_conflicting_bound_argument_is_refused_not_overwritten(
+        tmp_path, fresh_registry, fake_transport):
+    """Overwriting would run a call other than the one the model believes it
+    made and an approver was shown — recall(bank_id='arbitr') answering with
+    derpr's memories, or an approved delete in arbitr landing in derpr."""
+    from src.tools.turn_context import TurnContext, turn_scope
+    session = FakeSession(tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    manager, tool_manager = await _bound_manager(tmp_path, fake_transport, session)
+    name = "mcp__hindsight__recall"
+
+    with turn_scope(TurnContext(persona_name="derpr", user_identifier="u",
+                                channel="c", server_id=None)):
+        # The text protocol lets a model send an argument its schema hides.
+        out = await tool_manager.execute_tool(name, {name}, query="q", bank_id="arbitr")
+    assert "fixed to 'derpr'" in out["error"]
+    assert session.calls == []
+    await manager.aclose()
+
+
+async def test_bound_tool_refuses_outside_a_turn(
+        tmp_path, fresh_registry, fake_transport):
+    session = FakeSession(tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    manager, tool_manager = await _bound_manager(tmp_path, fake_transport, session)
+    name = "mcp__hindsight__recall"
+    out = await tool_manager.execute_tool(name, {name}, query="q", bank_id="arbitr")
+    assert "active chat turn" in out["error"]
+    assert session.calls == []
+    await manager.aclose()
+
+
+async def test_unknown_bind_source_is_rejected(
+        tmp_path, fresh_registry, fake_transport):
+    fake_transport["http://hs/mcp"] = FakeSession(
+        tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    _write_config(tmp_path, {"hindsight": {
+        "url": "http://hs/mcp", "bind_args": {"bank_id": "{USER_INPUT}"}}})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()  # logged + skipped, like any failed server
+    assert definitions.get_tool_definition("mcp__hindsight__recall") is None
+    await manager.aclose()
+
+
+async def test_malformed_entry_never_opens_a_session(
+        tmp_path, fresh_registry, fake_transport, monkeypatch):
+    """A config typo is reported, not retried: no connect at startup and none
+    on any maintenance pass after it."""
+    opened = []
+    real = mcp_client._open_session
+
+    def counting(url, message_handler=None):
+        opened.append(url)
+        return real(url, message_handler)
+
+    monkeypatch.setattr(mcp_client, "_open_session", counting)
+    fake_transport["http://hs/mcp"] = FakeSession(
+        tools=[_mcp_tool("recall", schema=_BANK_SCHEMA)])
+    _write_config(tmp_path, {"hindsight": {
+        "url": "http://hs/mcp", "bind_args": {"bank_id": "{persona}"}}})
+    manager, _ = _make_manager(tmp_path)
+    await manager.start()
+    await manager._maintain()
+    await manager._maintain()
+    assert opened == []
+    await manager.aclose()
+
+
+async def test_add_server_writes_a_plain_untrusted_entry(
+        tmp_path, fresh_registry, fake_transport):
+    # A model-proposed install must not be able to classify itself.
+    fake_transport["http://srv/mcp"] = FakeSession(
+        tools=[_mcp_tool("recall", annotations=_ann(readOnlyHint=True))])
+    manager, _ = _make_manager(tmp_path)
+    await manager.add_server("srv", "http://srv/mcp")
+    entry = json.loads((tmp_path / "mcp_servers.json").read_text())["servers"]["srv"]
+    assert not {"trusted", "capabilities", "bind_args"} & set(entry)
+    assert definitions.is_write_tool("mcp__srv__recall") is True
+    await manager.aclose()
