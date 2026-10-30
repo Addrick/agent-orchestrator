@@ -44,6 +44,7 @@ import type {
   InfraStatus,
   InfraAction,
   InfraActionResult,
+  TurnRunInfo,
 } from '../types/contracts'
 
 // Same-origin in production (served under /derpr by the adapter); the dev
@@ -265,6 +266,28 @@ export function getTranscript(
       )).chunks,
     () => MOCK_TRANSCRIPT.map((c) => ({ ...c })),
   )
+}
+
+// ---- running turns (DP-487) ------------------------------------------
+// A turn outlives its connection; these find the one running in a view (to
+// re-attach after sleep or reload) and stop it (the stop button).
+export async function getActiveTurn(persona: string, channel: string): Promise<TurnRunInfo | null> {
+  const qs = new URLSearchParams({ channel })
+  const r = await fetch(`${BASE}/api/v1/session/${encodeURIComponent(persona)}/active_turn?${qs}`, {
+    headers: { Accept: 'application/json' },
+  })
+  if (!r.ok) throw new Error(`active_turn → ${r.status}`)
+  return ((await r.json()) as { run: TurnRunInfo | null }).run
+}
+
+export async function cancelTurn(runId: string): Promise<boolean> {
+  const r = await fetch(`${BASE}/v1/chat/cancel`, {
+    method: 'POST',
+    headers: withAuth({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ run_id: runId }),
+  })
+  if (!r.ok) throw new Error(`cancel → ${r.status}`)
+  return ((await r.json()) as { stopped: boolean }).stopped
 }
 
 // ---- ltm -------------------------------------------------------------

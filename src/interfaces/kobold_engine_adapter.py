@@ -32,7 +32,7 @@ from typing import (
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -47,6 +47,7 @@ from src.chat_system import (
 )
 from src.interfaces import infra_panel
 from src.interfaces.transcript import build_transcript
+from src.interfaces.turn_runs import ReplayGone, TurnRuns
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
 from src.memory.lite_save import (
     NotALiteSave, export_time_from_filename, parse_lite_save,
@@ -284,6 +285,9 @@ class KoboldEngineAdapter:
     DATA_PLANE_POST_PATHS = frozenset({
         "/chat/completions",
         "/v1/chat/completions",
+        # DP-487: the stop button. Chat is data plane, so stopping it is too —
+        # an anonymous portal that can start a turn must be able to end it.
+        "/v1/chat/cancel",
         # Voice STT uploads (DP-238) mount on this same app via
         # register_voice_web — dictation is data plane like generation; the
         # SPA mic and the /voice PTT page send no operator token.
@@ -333,23 +337,31 @@ class KoboldEngineAdapter:
         # page cannot read any response, including the open GET reads.
 
         self._http = httpx.AsyncClient(timeout=None)
+        # DP-487: portal turns run as tasks that outlive their connection.
+        self._turn_runs = TurnRuns()
         self._setup_routes()
         self._setup_portal()
         self._setup_mcp_bridge()
 
     @contextlib.asynccontextmanager
     async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
-        """App lifespan — owns the MCP bridge session manager's task group.
+        """App lifespan — owns the MCP bridge session manager's task group,
+        and on exit stops every running portal turn (DP-487).
 
         The bridge's StreamableHTTPSessionManager creates its task group in
         run(); handle_request fails outright without it, so this must wrap the
         serving lifetime rather than being started lazily per request.
         """
-        if self._mcp_bridge is None:
-            yield
-            return
-        async with self._mcp_bridge.lifespan():
-            yield
+        try:
+            if self._mcp_bridge is None:
+                yield
+            else:
+                async with self._mcp_bridge.lifespan():
+                    yield
+        finally:
+            # DP-487: a running turn no longer dies with its connection, so it
+            # must be stopped (and saved) here or it dies unsaved with the loop.
+            await self._turn_runs.shutdown()
 
     def _setup_mcp_bridge(self) -> None:
         """Mount the DP-240 bridge as a raw ASGI sub-app.
@@ -1038,7 +1050,8 @@ class KoboldEngineAdapter:
             same wire protocol as /v1/chat/completions — so any further
             proposal surfaces as another `derpr-confirm` frame.
 
-            Body: {"approved": bool, "token": "<token from the frame>"}.
+            Body: {"approved": bool, "token": "<token from the frame>",
+                   "channel": "<optional, default web_ui>"}.
 
             DP-297 made `token` REQUIRED. It used to be an optional staleness
             check because a persona had at most one parked write, so (user,
@@ -1059,37 +1072,88 @@ class KoboldEngineAdapter:
                                       "pending action is being resolved"},
                 )
 
-            async def relay() -> AsyncIterator[bytes]:
-                # `aclosing` is load-bearing here, not hygiene. The generator
-                # holds the per-conversation lock across the entire
-                # continuation turn, and this loop returns on client
-                # disconnect. Without an explicit close the generator stays
-                # suspended at its yield, so the lock is released only whenever
-                # the asyncgen finalizer eventually runs — and any concurrent
-                # approve/deny for the same (user, persona), including
-                # Discord's reaction handler, blocks for that indeterminate
-                # window with its park already out of `pending`.
-                async with contextlib.aclosing(self._stream_resolve_park(
+            # DP-487: the continuation runs as a turn like any other, so it
+            # outlives the connection too. The park is keyed (user, persona);
+            # `channel` only files the run where the portal will look for it.
+            channel = body.get("channel") or "web_ui"
+            turn_key = (name, "portal", channel, None)
+            running = self._turn_runs.active(turn_key)
+            if running is not None:
+                return self._turn_running_response(running)
+            client_run_id = body.get("derpr_run_id")
+            if self._turn_runs.cancelled_before_start(client_run_id):
+                return self._stopped_before_start_response()
+
+            def events() -> AsyncIterator[GenerationEvent]:
+                # The generator holds the per-conversation lock across the
+                # whole continuation; the run closes it with `aclosing`, so a
+                # stop releases the lock at once rather than whenever the
+                # asyncgen finalizer runs (a concurrent approve/deny, Discord's
+                # reaction handler included, would block until then).
+                return self._stream_resolve_park(
                     user_identifier="portal",
                     persona_name=name,
                     token=token,
                     approved=approved,
-                )) as agen:
-                    async for ev in agen:
-                        if await request.is_disconnected():
-                            return
-                        for _label, frame in self._event_to_sse(ev):
-                            yield frame
+                )
 
-            return StreamingResponse(
-                relay(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                    "Connection": "keep-alive",
-                },
+            def to_frames(ev: GenerationEvent) -> List[bytes]:
+                return [frame for _label, frame in self._event_to_sse(ev)]
+
+            run = self._turn_runs.start(
+                turn_key, "confirm", events, to_frames,
+                error_frames=self._error_frames,
+                run_id=client_run_id,
             )
+            return self._sse_response(self._follow_sse(run, 0))
+
+        @self.app.post("/v1/chat/cancel")
+        async def cancel_turn(request: Request) -> Any:
+            """Stop a running portal turn (DP-487) — the stop button.
+
+            Dropping the stream used to be the stop; now a turn outlives its
+            connection, so stopping is explicit. Returns once the engine has
+            saved the stopped turn, so a re-sync right after shows it.
+            Body: {"run_id": "<the request's derpr_run_id, or the derpr-run
+            frame's>"}. A stop for a run that has not started yet is
+            remembered, and that turn is refused when it arrives.
+            """
+            body = await request.json()
+            run_id = body.get("run_id") if isinstance(body, dict) else None
+            if not isinstance(run_id, str) or not run_id:
+                return JSONResponse(status_code=400, content={"error": "run_id is required"})
+            stopped = await self._turn_runs.cancel(run_id)
+            return {"stopped": stopped}
+
+        @self.app.get("/api/v1/session/{persona}/active_turn")
+        async def active_turn(
+            persona: str,
+            channel: str = "web_ui",
+            user_identifier: str = "portal",
+            server_id: Optional[str] = None,
+        ) -> Any:
+            """The turn running in this conversation, if any (DP-487) — what a
+            portal coming back from sleep or a reload re-attaches to."""
+            run = self._turn_runs.active((persona, user_identifier, channel, server_id or None))
+            return {"run": run.info() if run is not None else None}
+
+        @self.app.get("/api/v1/turns/{run_id}/events")
+        async def turn_events(run_id: str, start: int = Query(0, alias="from")) -> Any:
+            """Replay a turn's stream from frame `from`, then follow it live
+            (DP-487). 404 for an unknown or purged run; 410 when `from` is
+            older than the run's replay window."""
+            run = self._turn_runs.get(run_id)
+            if run is None:
+                return JSONResponse(status_code=404, content={"error": "no such turn"})
+            start = max(start, 0)
+            if start < run.base:
+                return JSONResponse(status_code=410, content={
+                    "error": {"code": "replay_gone",
+                              "message": "This reply is too long to pick up mid-way; "
+                                         "it will appear when it finishes."},
+                    "derpr_run": run.info(),
+                })
+            return self._sse_response(self._follow_sse(run, start))
 
         @self.app.get("/api/v1/session/{persona}/transcript")
         async def session_transcript(
@@ -1608,6 +1672,16 @@ class KoboldEngineAdapter:
                     row_id=row_id if isinstance(row_id, int) and not isinstance(row_id, bool) else None,
                 )
 
+            # DP-487: one running turn per conversation. Checked before the
+            # stale-view guard, which would also refuse (the running turn has
+            # saved its user row) but with an answer the portal cannot act on:
+            # this one carries the run to re-attach to.
+            turn_key = (persona_name, user_identifier, channel, server_id)
+            running = self._turn_runs.active(turn_key) if persona_name else None
+            if running is not None:
+                return self._turn_running_response(running)
+            client_run_id = data.get("derpr_run_id")
+
             # DP-447 stale-view guard: the portal says which message its screen
             # ends on. History is rebuilt from the DB, so a stale screen would
             # not corrupt the prompt — but a send, retry or continue would act
@@ -1726,71 +1800,78 @@ class KoboldEngineAdapter:
                 except Exception:
                     pass
 
-            async def relay() -> AsyncIterator[bytes]:
-                # Same rationale as relay_stream: cancellation is the real
-                # disconnect signal; poll at most once per second.
-                last_dc_check = time.monotonic()
+            def events() -> AsyncIterator[GenerationEvent]:
+                # In the Engine Adapter, we DISCARD the client-side message array
+                # (msgs_in) to ensure the engine's DB is the source of truth for
+                # history. This prevents the 'hollow history' issue where the
+                # UI might be empty but the DB has rich context.
+                return self._stream_response(
+                    persona_name=persona_name,
+                    user_identifier=user_identifier,
+                    channel=channel,
+                    server_id=server_id,
+                    message=user_text,
+                    is_retry=is_retry,
+                    continue_turn=continue_turn,
+                    local_inference_config=local_inference_config,
+                    client_messages=None,  # Explicitly None to force DB history rebuild
+                    origin=origin,
+                )
+
+            def to_frames(ev: GenerationEvent) -> List[bytes]:
+                # Rich diagnostic dump for DoneEvent (dump-only, not a
+                # wire frame) — preserved alongside the shared transcoder.
+                if dump_fh is not None and isinstance(ev, DoneEvent):
+                    _dump_write(
+                        "DoneEvent",
+                        json.dumps({
+                            "assistant_id": ev.assistant_id,
+                            "user_interaction_id": ev.user_interaction_id,
+                            "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
+                            "final_text_len": len(ev.text or ""),
+                            "final_text_preview": (ev.text or "")[:500],
+                        }, ensure_ascii=False).encode("utf-8"),
+                    )
+                out = []
+                for label, frame in self._event_to_sse(ev):
+                    _dump_write(label, frame)
+                    out.append(frame)
+                return out
+
+            def on_finish(outcome: str) -> None:
+                if dump_fh is None:
+                    return
+                if outcome == "cancelled":
+                    _dump_write("CANCELLED", b"stopped / asyncio.CancelledError")
                 try:
-                    # Pass through the request to the central ChatSystem.
-                    # In the Engine Adapter, we DISCARD the client-side message array
-                    # (msgs_in) to ensure the engine's DB is the source of truth for
-                    # history. This prevents the 'hollow history' issue where the
-                    # UI might be empty but the DB has rich context.
-                    async for ev in self._stream_response(
-                        persona_name=persona_name,
-                        user_identifier=user_identifier,
-                        channel=channel,
-                        server_id=server_id,
-                        message=user_text,
-                        is_retry=is_retry,
-                        continue_turn=continue_turn,
-                        local_inference_config=local_inference_config,
-                        client_messages=None,  # Explicitly None to force DB history rebuild
-                        origin=origin,
-                    ):
+                    dump_fh.write("\n=== END ===\n")
+                    dump_fh.close()
+                except Exception:
+                    pass
 
-                        now = time.monotonic()
-                        if now - last_dc_check >= 1.0:
-                            last_dc_check = now
-                            if await request.is_disconnected():
-                                return
-                        # Rich diagnostic dump for DoneEvent (dump-only, not a
-                        # wire frame) — preserved alongside the shared transcoder.
-                        if dump_fh is not None and isinstance(ev, DoneEvent):
-                            _dump_write(
-                                "DoneEvent",
-                                json.dumps({
-                                    "assistant_id": ev.assistant_id,
-                                    "user_interaction_id": ev.user_interaction_id,
-                                    "response_type": getattr(ev.response_type, "name", str(ev.response_type)),
-                                    "final_text_len": len(ev.text or ""),
-                                    "final_text_preview": (ev.text or "")[:500],
-                                }, ensure_ascii=False).encode("utf-8"),
-                            )
-                        for label, frame in self._event_to_sse(ev):
-                            _dump_write(label, frame)
-                            yield frame
-                except asyncio.CancelledError:
-                    # Engine kernel flushes the partial assistant row on cancel.
-                    _dump_write("CANCELLED", b"client disconnected / asyncio.CancelledError")
-                    raise
-                finally:
-                    if dump_fh is not None:
-                        try:
-                            dump_fh.write("\n=== END ===\n")
-                            dump_fh.close()
-                        except Exception:
-                            pass
+            # DP-487: re-checked here, with no await before start(): the
+            # stale-view guard above awaits a thread, and a second send or a
+            # stop landing in that window must still be seen.
+            running = self._turn_runs.active(turn_key) if persona_name else None
+            if running is not None:
+                on_finish("refused")
+                return self._turn_running_response(running)
+            if self._turn_runs.cancelled_before_start(client_run_id):
+                on_finish("refused")
+                return self._stopped_before_start_response()
 
-            return StreamingResponse(
-                relay(),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "X-Accel-Buffering": "no",
-                    "Connection": "keep-alive",
-                },
+            # DP-487: the turn runs as its own task; this response is only its
+            # first follower, so a disconnect no longer ends the turn. The
+            # engine saves a stopped turn when the task is cancelled (POST
+            # /v1/chat/cancel), exactly as it used to on disconnect.
+            run = self._turn_runs.start(
+                turn_key, "chat", events, to_frames,
+                error_frames=self._error_frames,
+                continue_id=continue_turn.row_id if continue_turn else None,
+                on_finish=on_finish,
+                run_id=client_run_id,
             )
+            return self._sse_response(self._follow_sse(run, 0))
 
         # ---------- DP-292 memory import panel ----------
         # Operator inventory + ingest for Hindsight banks. Reads are open
@@ -1976,6 +2057,54 @@ class KoboldEngineAdapter:
             return await self._run_backend(
                 handler.ingest_root(bank_id, root, glob, force)
             )
+
+    @staticmethod
+    def _sse_response(body: AsyncIterator[bytes]) -> StreamingResponse:
+        return StreamingResponse(
+            body,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
+    @classmethod
+    def _error_frames(cls, message: str) -> List[bytes]:
+        return [frame for _label, frame in cls._event_to_sse(ErrorEvent(message=message))]
+
+    @classmethod
+    async def _follow_sse(cls, run: Any, start: int) -> AsyncIterator[bytes]:
+        """One follower of a turn run (DP-487). A disconnect cancels only
+        this generator; the run keeps going."""
+        try:
+            async for frame in run.follow(start):
+                yield frame
+        except ReplayGone:
+            # Fell behind the replay window — end this follower cleanly; the
+            # finished reply is in the transcript.
+            for frame in cls._error_frames(
+                "Lost the live stream of this reply; it will appear when it finishes."
+            ):
+                yield frame
+
+    @staticmethod
+    def _stopped_before_start_response() -> JSONResponse:
+        """409 for a turn whose stop arrived first (DP-487). Nothing ran and
+        nothing was written."""
+        return JSONResponse(status_code=409, content={
+            "error": {"code": "stopped", "message": "Stopped before it started."},
+        })
+
+    def _turn_running_response(self, run: Any) -> JSONResponse:
+        """409 for a send into a conversation that already has a running turn
+        (DP-487): carries the run so the portal attaches instead."""
+        return JSONResponse(status_code=409, content={
+            "error": {"code": "turn_running",
+                      "message": "A reply is still being written in this conversation."},
+            "derpr_run": run.info(),
+        })
 
     @staticmethod
     def _event_to_sse(ev: GenerationEvent) -> List[Tuple[str, bytes]]:

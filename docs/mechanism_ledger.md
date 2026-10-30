@@ -121,6 +121,13 @@ The DP-345 family. A tool call whose real answer arrives after its turn ended.
 | `CodrAgent` tick finds codr idle with an open task (DP-449) | the opencode session on the sandbox: `derpr_auto` metadata on the turn's user part (task, attempt, nudges, start, `result`); outcomes in `Agent_Actions` (`task_attempt`) | `result` patched onto the user part **before** the action is logged and posted; each `notify_adam` call's part id logged as a `notify_relay` row before it is posted (never written onto the assistant part — opencode sends that metadata to the model) | the next `CodrAgent` tick (watch → finish) | `start_tasks`; `workspace_lock`; loop guard (abort / nudge once) |
 | ⚠️ fixr agent emits an event (`self_edit/integration.py:307`) | **none** — nothing durable | **none** — in-process only | `_wake_fixr` → `ChatSystem.generate_response` (a *new* turn, not a continuation) | none |
 
+**DP-487 is not a row here, and not a deferral.** A portal turn that outlives its
+*connection* (`interfaces/turn_runs.TurnRuns`) shares none of the columns: no durable
+store (an in-process frame buffer, gone on restart by design), no claim, and no
+resumer turn — the same turn keeps running and a client re-attaches to its stream.
+Its nearest shape is family B's in-process task-in-a-dict (`TimerService`), keyed by
+run id, with one running run per conversation key as its idempotency.
+
 **The codr row is `by design`, not a fifth deferral (DP-449).** Its shape differs on the
 columns that matter: no derpr turn is waiting (nothing to continue through `_stream_settle`),
 and the durable store already exists on the remote server, so a `Parked_Writes` row would be a
