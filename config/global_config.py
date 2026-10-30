@@ -91,6 +91,9 @@ UPDATE_MODELS_ON_STARTUP = True
 # =============================================================================
 DISCORD_CHAR_LIMIT = 2000
 DISCORD_STATUS_LIMIT = 128
+# Most posts one notification (send_dm / send_to_channel) may split into. A longer
+# one is not sent; a single warning with its start is posted instead (DP-486).
+DISCORD_MAX_POSTS = 5
 
 # Tool budget for one turn. Counts TOOL CALLS EXECUTED, not LLM round trips.
 #

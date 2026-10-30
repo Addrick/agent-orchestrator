@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, Optional, List, Set, Tuple
 
 from config.global_config import DISCORD_CHAR_LIMIT, DISCORD_STATUS_LIMIT, DISCORD_DEBUG_CHANNEL, \
-    AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, OPERATOR_ALLOWLIST
+    DISCORD_MAX_POSTS, AMBIENT_LOGGING_CHANNELS, GLOBAL_HISTORY_MESSAGES, OPERATOR_ALLOWLIST
 from src.origin import Origin, is_discord_operator, parse_operator_allowlist
 from src.utils.message_utils import split_string_by_limit
 from src.personas.store import save_personas_to_file
@@ -41,6 +41,24 @@ class ReconnectLogHandler(logging.Handler):
             logger.info("Discord client is attempting to reconnect.")
 
 
+async def _send_capped(target: Any, content: str) -> bool:
+    """Send a notification split into Discord-sized posts, at most
+    `DISCORD_MAX_POSTS` of them (DP-486). A longer one would flood the channel
+    and run into Discord's rate limit, so it is not sent: one warning post with
+    its size and start goes out instead, and the send reports failure."""
+    chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
+    if len(chunks) > DISCORD_MAX_POSTS:
+        logger.warning("Discord notification of %d chars (%d posts) not sent; limit is %d posts",
+                       len(content), len(chunks), DISCORD_MAX_POSTS)
+        await target.send(
+            f"⚠️ A message of {len(content):,} characters ({len(chunks)} posts) was not sent: "
+            f"the limit is {DISCORD_MAX_POSTS} posts. It began:\n>>> {content[:500]}")
+        return False
+    for chunk in chunks:
+        await target.send(chunk)
+    return True
+
+
 class CustomDiscordBot(discord.Client):
     def __init__(self, chat_system: 'ChatSystem', *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -59,10 +77,7 @@ class CustomDiscordBot(discord.Client):
                 logger.error(f"Could not find user {user_id} in cache or API.")
                 return False
 
-            chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
-            for chunk in chunks:
-                await user.send(chunk)
-            return True
+            return await _send_capped(user, content)
         except Exception as e:
             logger.error(f"Failed to send DM to {user_id}: {e}")
             return False
@@ -75,10 +90,7 @@ class CustomDiscordBot(discord.Client):
             
             channel = await self.fetch_channel(channel_id)
             if isinstance(channel, discord.abc.Messageable):
-                chunks = split_string_by_limit(content, DISCORD_CHAR_LIMIT)
-                for chunk in chunks:
-                    await channel.send(chunk)
-                return True
+                return await _send_capped(channel, content)
             else:
                 logger.error(f"Channel {channel_id} is not messageable.")
                 return False
