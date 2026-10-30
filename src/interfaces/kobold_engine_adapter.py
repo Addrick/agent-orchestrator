@@ -1145,6 +1145,7 @@ class KoboldEngineAdapter:
             run = self._turn_runs.get(run_id)
             if run is None:
                 return JSONResponse(status_code=404, content={"error": "no such turn"})
+            start = max(start, 0)
             if start < run.base:
                 return JSONResponse(status_code=410, content={
                     "error": {"code": "replay_gone",
@@ -1152,7 +1153,7 @@ class KoboldEngineAdapter:
                                          "it will appear when it finishes."},
                     "derpr_run": run.info(),
                 })
-            return self._sse_response(self._follow_sse(run, max(start, 0)))
+            return self._sse_response(self._follow_sse(run, start))
 
         @self.app.get("/api/v1/session/{persona}/transcript")
         async def session_transcript(
@@ -1680,8 +1681,6 @@ class KoboldEngineAdapter:
             if running is not None:
                 return self._turn_running_response(running)
             client_run_id = data.get("derpr_run_id")
-            if self._turn_runs.cancelled_before_start(client_run_id):
-                return self._stopped_before_start_response()
 
             # DP-447 stale-view guard: the portal says which message its screen
             # ends on. History is rebuilt from the DB, so a stale screen would
@@ -1849,6 +1848,17 @@ class KoboldEngineAdapter:
                     dump_fh.close()
                 except Exception:
                     pass
+
+            # DP-487: re-checked here, with no await before start(): the
+            # stale-view guard above awaits a thread, and a second send or a
+            # stop landing in that window must still be seen.
+            running = self._turn_runs.active(turn_key) if persona_name else None
+            if running is not None:
+                on_finish("refused")
+                return self._turn_running_response(running)
+            if self._turn_runs.cancelled_before_start(client_run_id):
+                on_finish("refused")
+                return self._stopped_before_start_response()
 
             # DP-487: the turn runs as its own task; this response is only its
             # first follower, so a disconnect no longer ends the turn. The

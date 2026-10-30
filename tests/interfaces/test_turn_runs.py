@@ -162,6 +162,26 @@ async def test_shutdown_cancels_every_running_turn():
     assert cancelled == ["x", "x"]
 
 
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
+async def test_a_run_stopped_before_its_first_step_still_ends(stop):
+    # Cancelling a task before it first runs never enters its coroutine, so
+    # _drive's finally (which marks the run finished) never runs. Unsealed,
+    # followers hang and active() refuses every later send in the conversation.
+    async def events():
+        yield "a"
+
+    runs = TurnRuns()
+    run = runs.start(KEY, "chat", events, _frames, error_frames=_errors)
+    if stop == "cancel":
+        assert await runs.cancel(run.run_id) is True
+    else:
+        await runs.shutdown()
+    assert run.done
+    assert runs.active(KEY) is None
+    frames = await asyncio.wait_for(_collect(run.follow(0)), 1.0)
+    assert frames[-1] == DONE_FRAME
+
+
 # ---------------------------------------------------------------------------
 # The adapter, under real uvicorn
 # ---------------------------------------------------------------------------

@@ -261,7 +261,16 @@ class TurnRuns:
             # shield: a cancel request that itself disconnects must not
             # abandon the wait half-way — the task is already cancelled.
             await asyncio.wait_for(asyncio.shield(run.task), CANCEL_WAIT_S)
+        await self._seal_unstarted(run)
         return True
+
+    async def _seal_unstarted(self, run: TurnRun) -> None:
+        """A task cancelled before its first step never enters `_drive`, so
+        nothing marks its run finished: followers would wait forever and
+        `active(key)` would refuse every later send in that conversation."""
+        if run.task is not None and run.task.done() and not run.done:
+            await run.append([DONE_FRAME], self._max_run_bytes)
+            await run.finish()
 
     async def shutdown(self) -> None:
         """Cancel every running turn; each saves what it had."""
@@ -270,3 +279,5 @@ class TurnRuns:
             t.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        for run in list(self._runs.values()):
+            await self._seal_unstarted(run)

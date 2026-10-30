@@ -191,6 +191,10 @@ export function usePortalStore() {
   const resumeRef = useRef<(p: string, ch: string, mode: ResumeMode) => Promise<void>>(
     async () => {},
   )
+  // Bumped by every resume and by stop: a resume whose await lands after a
+  // newer resume or a stop gives way instead of re-attaching (focus and
+  // visibilitychange fire together; stop can land mid-resume).
+  const resumeSeqRef = useRef(0)
   const idFrameRef = useRef<DerprIdFrame | null>(null)
   // True while an SSE stream is in flight. State (`stream.active`) is stale
   // inside the action callbacks' closures, so concurrency guards read this ref
@@ -817,6 +821,7 @@ export function usePortalStore() {
     async (p: string, ch: string, mode: ResumeMode) => {
       // A routine check never disturbs a turn this page is already showing.
       if (mode === 'check' && streamingRef.current) return
+      const seq = ++resumeSeqRef.current
       const current = () => p === activePersonaRef.current && ch === activeChannelRef.current
       let run: TurnRunInfo | null
       try {
@@ -824,9 +829,11 @@ export function usePortalStore() {
       } catch {
         // Still offline (the phone is waking up): try again on the next
         // focus / online event. The live row stays as it was.
-        if (mode !== 'check') pendingResumeRef.current = { p, ch }
+        if (mode !== 'check' && seq === resumeSeqRef.current) pendingResumeRef.current = { p, ch }
         return
       }
+      // A newer resume or a stop owns the state now.
+      if (seq !== resumeSeqRef.current) return
       if (mode !== 'check') pendingResumeRef.current = null
       // A send or another resume started while this one was asking.
       if (mode === 'check' && streamingRef.current) return
@@ -864,6 +871,16 @@ export function usePortalStore() {
       resetTokenBuf()
       setBanner(null)
       const cs = (await refreshTranscript(p, ch)) ?? chunksRef.current
+      // Stopped, or superseded by a newer resume, while the transcript loaded.
+      if (seq !== resumeSeqRef.current || runIdRef.current !== run.run_id) return
+      if (!current()) {
+        streamingRef.current = false
+        runIdRef.current = null
+        resetTokenBuf()
+        setStream({ ...EMPTY_STREAM })
+        setResolvingConfirm(false)
+        return
+      }
       // A continue grows its row in place: seed with what the row holds, as
       // sendTurn does — the replay carries only what the continue added.
       const row =
@@ -1033,6 +1050,7 @@ export function usePortalStore() {
     const runId = runIdRef.current
     runIdRef.current = null
     pendingResumeRef.current = null
+    resumeSeqRef.current += 1 // a resume in flight must not re-attach the stopped turn
     streamingRef.current = false
     const sentText = inflightTextRef.current
     inflightTextRef.current = null
