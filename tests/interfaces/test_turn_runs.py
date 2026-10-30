@@ -407,10 +407,13 @@ async def test_an_approval_continuation_survives_a_dropped_connection():
 
         async with client.stream("POST", f"{base}/api/v1/persona/test_persona/confirm",
                                  json={"approved": True, "token": token}) as r2:
+            seen = ""
             async for chunk in r2.aiter_text():
+                seen += chunk
                 if "derpr-run" in chunk:
                     break  # drop the connection before the continuation writes
         active = (await client.get(f"{base}/api/v1/session/test_persona/active_turn")).json()
+        assert active["run"] is not None, (r2.status_code, seen, calls["n"])
         assert active["run"]["kind"] == "confirm"
         gate.set()
         await _wait_for_assistant(mm, "Ticket opened.")
