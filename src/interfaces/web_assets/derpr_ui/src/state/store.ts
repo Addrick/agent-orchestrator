@@ -190,6 +190,10 @@ export function usePortalStore() {
   // on screen, so the next turn re-syncs first or the stale-view guard
   // refuses it as if another device had moved the conversation on.
   const resyncBeforeSendRef = useRef(false)
+  // The typed text of the turn in flight (null for retry/continue/confirm).
+  // A stop that beats the engine's save of the user row leaves it nowhere but
+  // here — abortTurn hands it back to the composer (DP-476).
+  const inflightTextRef = useRef<string | null>(null)
   // Rows whose thinking a raw edit closed with no reply yet (DP-447). The
   // stored columns can't tell that from an open block, so continue says it —
   // for as long as this page is open.
@@ -820,6 +824,7 @@ export function usePortalStore() {
         },
         buildHandlers(persona.name, activeChannel, retry || cont ? undefined : trimmed),
       )
+      inflightTextRef.current = retry || cont ? null : trimmed
       abortRef.current = handle
     },
     [persona, activeChannel, refreshTranscript, refreshPersona, buildHandlers, resetTokenBuf],
@@ -857,6 +862,7 @@ export function usePortalStore() {
       resetTokenBuf()
       setResolvingConfirm(true)
       setStream({ ...EMPTY_STREAM, active: true })
+      inflightTextRef.current = null
       const handle = streamConfirm(
         persona.name,
         approved,
@@ -875,6 +881,8 @@ export function usePortalStore() {
     abortRef.current?.abort()
     abortRef.current = null
     streamingRef.current = false
+    const sentText = inflightTextRef.current
+    inflightTextRef.current = null
     flushTokens() // keep the partial text visible on the aborted row
     // The re-fetch below surfaces the persisted user row — drop the echo.
     // active:false is essential — Conversation passes stream.active as the
@@ -907,7 +915,11 @@ export function usePortalStore() {
       if (delayMs) await new Promise((r) => setTimeout(r, delayMs))
       if (!current()) return
       const cs = await refreshTranscript(name, channel, current)
-      if (!cs) return
+      // Unreachable: whether the user row saved is unknown — keep the text.
+      if (!cs) {
+        if (!current()) return
+        break
+      }
       // The stopped turn's row also follows its own user row (persisted before
       // generation), so an older stopped turn whose row landed late is not
       // taken for this one.
@@ -920,7 +932,11 @@ export function usePortalStore() {
         setStream(EMPTY_STREAM)
         return
       }
+      if (floor > newest) return // the user row landed; the transcript shows it
     }
+    // DP-476: no re-sync shows the user row — the stop beat the engine's save
+    // (or the engine is unreachable). Hand the text back rather than lose it.
+    if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
   }, [persona, flushTokens, resetTokenBuf, refreshTranscript])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
