@@ -15,6 +15,7 @@ import httpx
 import pytest
 import uvicorn
 
+from config import global_config
 from src.interfaces.turn_runs import DONE_FRAME, ReplayGone, TurnRuns
 from tests.interfaces.test_kobold_engine_adapter import (
     KoboldAdapter,
@@ -26,6 +27,9 @@ from tests.interfaces.test_kobold_engine_adapter import (
 @pytest.fixture(autouse=True)
 def _bypass_control_plane_auth(monkeypatch):
     monkeypatch.setattr(KoboldAdapter, "_valid_control_token", lambda self, tok: True)
+    # The gate locks the whole control plane when no token is configured, so a
+    # dev box with DERPR_CONTROL_TOKEN in .env passes while CI gets 401s.
+    monkeypatch.setattr(global_config, "DERPR_CONTROL_TOKEN", "test-token", raising=False)
 
 
 # ---------------------------------------------------------------------------
