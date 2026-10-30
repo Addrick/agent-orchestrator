@@ -176,6 +176,7 @@ def test_data_plane_post_paths_not_gated():
     assert KoboldAdapter.DATA_PLANE_POST_PATHS == frozenset({
         "/chat/completions",
         "/v1/chat/completions",
+        "/v1/chat/cancel",  # DP-487: stopping a turn is data plane like starting one
         "/voice/transcribe",
         "/voice/utterance",
     })

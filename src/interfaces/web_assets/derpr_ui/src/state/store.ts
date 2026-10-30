@@ -6,7 +6,7 @@
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
-import { streamChat, streamConfirm } from '../api/stream'
+import { attachTurn, streamChat, streamConfirm } from '../api/stream'
 import { readPref, writePref } from './persist'
 import { rawThinkState } from './util'
 import type {
@@ -21,9 +21,23 @@ import type {
   PatchPersonaResult,
   DevCommandResponse,
   AssembledRequest,
+  TurnRunInfo,
 } from '../types/contracts'
 
 export type ViewMode = 'rendered' | 'context'
+
+// DP-487: the client names each turn's run so stop can cancel it before the
+// run's first frame arrives. randomUUID needs a secure context — the portal is
+// served over TLS, the fallback covers plain-http dev.
+const newRunId = (): string =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+
+// How a re-attach was triggered (DP-487): the turn's own connection dropped,
+// a send was refused because a turn is running, or a routine check on load /
+// focus / channel switch.
+type ResumeMode = 'drop' | 'busy' | 'check'
 
 // localStorage key for the last-selected persona. Client-side only — the
 // engine's PUT /api/v1/model active persona is runtime routing state, not a
@@ -84,6 +98,7 @@ function lastPersistedId(chunks: Chunk[]): number | null {
   return null
 }
 
+const REPLAY_GONE = 'This reply is too long to pick up mid-way — it will appear when it finishes.'
 const STALE_BANNER = 'The conversation changed on another device — reloaded it. Nothing was sent.'
 
 export interface DevRow {
@@ -166,6 +181,16 @@ export function usePortalStore() {
   const [assembled, setAssembled] = useState<AssembledRequest | null>(null)
 
   const abortRef = useRef<{ abort: () => void } | null>(null)
+  // DP-487: the run of the turn on screen — what stop cancels. Set when the
+  // turn is sent (the client names it) and by its `derpr-run` frame.
+  const runIdRef = useRef<string | null>(null)
+  // A drop whose re-attach could not reach the engine (the phone is still
+  // waking): retried on the next focus / visibility / online event.
+  const pendingResumeRef = useRef<{ p: string; ch: string } | null>(null)
+  // resumeTurn is defined after the handlers and effects that call it.
+  const resumeRef = useRef<(p: string, ch: string, mode: ResumeMode) => Promise<void>>(
+    async () => {},
+  )
   const idFrameRef = useRef<DerprIdFrame | null>(null)
   // True while an SSE stream is in flight. State (`stream.active`) is stale
   // inside the action callbacks' closures, so concurrency guards read this ref
@@ -337,9 +362,19 @@ export function usePortalStore() {
   // own [DONE] re-sync owns the transcript then.
   useEffect(() => {
     const onFocus = () => {
-      if (document.visibilityState !== 'visible' || streamingRef.current) return
+      if (document.visibilityState !== 'visible') return
+      // DP-487: a dropped turn that could not re-attach while offline.
+      const pending = pendingResumeRef.current
+      if (pending) {
+        void resumeRef.current(pending.p, pending.ch, 'drop')
+        return
+      }
+      if (streamingRef.current) return
       const p = activePersonaRef.current
       const ch = activeChannelRef.current
+      // DP-487: a turn may be running here — started on another device, or
+      // by this page before a reload.
+      void resumeRef.current(p, ch, 'check')
       api.getTranscript(p, undefined, ch).then(
         (cs) => {
           // A persona/channel switch or a new turn while this was in flight
@@ -356,9 +391,11 @@ export function usePortalStore() {
       )
     }
     window.addEventListener('focus', onFocus)
+    window.addEventListener('online', onFocus)
     document.addEventListener('visibilitychange', onFocus)
     return () => {
       window.removeEventListener('focus', onFocus)
+      window.removeEventListener('online', onFocus)
       document.removeEventListener('visibilitychange', onFocus)
     }
   }, [])
@@ -424,6 +461,8 @@ export function usePortalStore() {
         setLtmOn(isLtmOn)
         setLtmBlock(blk)
         setOffline(api.usingMock())
+        // DP-487: pick up a reply still being written (reload mid-turn).
+        if (!api.usingMock()) void resumeRef.current(p, resolvedChan, 'check')
       } catch {
         setBanner(UNREACHABLE)
       } finally {
@@ -598,6 +637,7 @@ export function usePortalStore() {
         // Remember this persona's channel choice for next reload (DP-273).
         writePref(channelPrefKey(persona.name), channel)
         await refreshTranscript(persona.name, channel)
+        void resumeRef.current(persona.name, channel, 'check')
         try {
           if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
         } catch {
@@ -671,6 +711,30 @@ export function usePortalStore() {
               : t,
           ),
         })),
+      onRun: (r: TurnRunInfo) => {
+        runIdRef.current = r.run_id
+      },
+      // DP-487: the connection died, the turn did not — pick it back up.
+      onDrop: () => {
+        void resumeRef.current(personaName, channel, 'drop')
+      },
+      // DP-487: this conversation already has a turn running (another device,
+      // or this page lost track of it). Nothing was written: hand the typed
+      // text back and show the running turn instead.
+      onBusy: () => {
+        if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
+        void resumeRef.current(personaName, channel, 'busy')
+      },
+      onReplayGone: () => {
+        streamingRef.current = false
+        runIdRef.current = null
+        abortRef.current = null
+        resetTokenBuf()
+        setStream({ ...EMPTY_STREAM })
+        setResolvingConfirm(false)
+        setBanner(REPLAY_GONE)
+        void refreshTranscript(personaName, channel)
+      },
       onIdFrame: (f: DerprIdFrame) => {
         idFrameRef.current = f
         setStream((s) => ({ ...s, responseType: f.response_type }))
@@ -678,6 +742,7 @@ export function usePortalStore() {
       onError: (msg: string) => {
         flushTokens() // surface any tail tokens before the error treatment
         streamingRef.current = false
+        runIdRef.current = null
         abortRef.current = null
         // A failed CONFIRM resume must re-arm the approve/deny bar — onDone
         // never fires on this path, and leaving resolvingConfirm set keeps the
@@ -689,6 +754,7 @@ export function usePortalStore() {
       onDone: async () => {
         flushTokens()
         streamingRef.current = false
+        runIdRef.current = null
         // Authoritative re-sync: the id-frame is an optimization only. The
         // re-fetch surfaces a newly-persisted row, or the trailing ephemeral
         // chunk when the turn (or a chained confirm) parked again — but ONLY
@@ -729,6 +795,7 @@ export function usePortalStore() {
       // as it really is and hand a typed message back to the composer.
       onStale: () => {
         streamingRef.current = false
+        runIdRef.current = null
         abortRef.current = null
         resetTokenBuf()
         setStream({ ...EMPTY_STREAM })
@@ -740,6 +807,82 @@ export function usePortalStore() {
     }),
     [refreshTranscript, refreshChannels, flushTokens, scheduleFlush, resetTokenBuf],
   )
+
+  // ---- re-attach to a running turn (DP-487) --------------------------
+  // A turn runs on the server whether or not anyone is connected. This finds
+  // the one running in a view and follows it: the transcript re-sync shows
+  // what it already saved (its user row), and the replay from frame 0 rebuilds
+  // the live row — tool cards, thinking, text — then keeps streaming.
+  const resumeTurn = useCallback(
+    async (p: string, ch: string, mode: ResumeMode) => {
+      // A routine check never disturbs a turn this page is already showing.
+      if (mode === 'check' && streamingRef.current) return
+      const current = () => p === activePersonaRef.current && ch === activeChannelRef.current
+      let run: TurnRunInfo | null
+      try {
+        run = await api.getActiveTurn(p, ch)
+      } catch {
+        // Still offline (the phone is waking up): try again on the next
+        // focus / online event. The live row stays as it was.
+        if (mode !== 'check') pendingResumeRef.current = { p, ch }
+        return
+      }
+      if (mode !== 'check') pendingResumeRef.current = null
+      // A send or another resume started while this one was asking.
+      if (mode === 'check' && streamingRef.current) return
+      if (!current()) {
+        // The view moved on; the turn is the old view's business now.
+        if (mode !== 'check') {
+          streamingRef.current = false
+          runIdRef.current = null
+          resetTokenBuf()
+          setStream({ ...EMPTY_STREAM })
+          setResolvingConfirm(false)
+        }
+        return
+      }
+      if (!run) {
+        if (mode === 'check') return
+        // It finished while this page was away — it is in the transcript.
+        abortRef.current?.abort()
+        abortRef.current = null
+        streamingRef.current = false
+        runIdRef.current = null
+        resetTokenBuf()
+        await refreshTranscript(p, ch)
+        setStream({ ...EMPTY_STREAM })
+        setResolvingConfirm(false)
+        return
+      }
+      abortRef.current?.abort() // the dead connection, if any
+      streamingRef.current = true
+      // Another page's turn, or one this page no longer tracks: the text sent
+      // last is not its text, so a stop must not hand it back (DP-476).
+      if (run.run_id !== runIdRef.current) inflightTextRef.current = null
+      runIdRef.current = run.run_id
+      idFrameRef.current = null
+      resetTokenBuf()
+      setBanner(null)
+      const cs = (await refreshTranscript(p, ch)) ?? chunksRef.current
+      // A continue grows its row in place: seed with what the row holds, as
+      // sendTurn does — the replay carries only what the continue added.
+      const row =
+        run.continue_id != null ? cs.find((c) => c.interaction_id === run.continue_id) : undefined
+      setStream({
+        ...EMPTY_STREAM,
+        active: true,
+        text: row?.content ?? '',
+        reasoning: row?.reasoning ?? null,
+        continuingId: row ? run.continue_id : null,
+      })
+      if (run.kind === 'confirm') setResolvingConfirm(true)
+      abortRef.current = attachTurn(run.run_id, 0, buildHandlers(p, ch))
+    },
+    [buildHandlers, refreshTranscript, resetTokenBuf],
+  )
+  useEffect(() => {
+    resumeRef.current = resumeTurn
+  }, [resumeTurn])
 
   // ---- send a chat turn ---------------------------------------------
   const sendTurn = useCallback(
@@ -802,8 +945,11 @@ export function usePortalStore() {
         setStream({ ...EMPTY_STREAM, active: true, userText: retry ? null : trimmed })
       }
 
+      const runId = newRunId()
+      runIdRef.current = runId
       const handle = streamChat(
         {
+          derpr_run_id: runId,
           derpr_user_text: retry && !trimmed ? text : trimmed,
           derpr_retry: retry,
           derpr_continue: cont ? true : undefined,
@@ -863,11 +1009,15 @@ export function usePortalStore() {
       setResolvingConfirm(true)
       setStream({ ...EMPTY_STREAM, active: true })
       inflightTextRef.current = null
+      const runId = newRunId()
+      runIdRef.current = runId
       const handle = streamConfirm(
         persona.name,
         approved,
         token,
         buildHandlers(persona.name, activeChannelRef.current),
+        activeChannelRef.current,
+        runId,
       )
       abortRef.current = handle
     },
@@ -875,11 +1025,14 @@ export function usePortalStore() {
   )
 
   const abortTurn = useCallback(async () => {
-    // Dropping the SSE is the cancel: the engine closes the upstream stream
-    // and the local server stops generating on disconnect (DP-417). (This
-    // used to POST /api/v1/abort first — a route that never existed.)
+    // DP-487: a turn outlives its connection, so dropping the SSE no longer
+    // stops it — POST /v1/chat/cancel does, below. The SSE is still closed
+    // here so no more frames land on the stopped row.
     abortRef.current?.abort()
     abortRef.current = null
+    const runId = runIdRef.current
+    runIdRef.current = null
+    pendingResumeRef.current = null
     streamingRef.current = false
     const sentText = inflightTextRef.current
     inflightTextRef.current = null
@@ -891,20 +1044,30 @@ export function usePortalStore() {
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
     setResolvingConfirm(false)
-    // The engine flushes the partial reply when it notices the disconnect,
-    // which can land after both re-syncs below — re-sync again before sending.
+    // The stopped turn's rows are in the DB but not on screen until a
+    // re-sync — make sure the next send does one first.
     resyncBeforeSendRef.current = true
+    // The view and the rows on screen at the stop — captured before the
+    // cancel's await, which a focus re-sync or a channel switch could land in.
+    const channel = activeChannelRef.current
+    const newest = chunksRef.current.reduce((m, c) => Math.max(m, c.interaction_id ?? -1), -1)
+    // DP-487: returns once the engine has saved the stopped turn, so the
+    // first re-sync below normally finds it. A stop that beat the turn to the
+    // server is remembered there and the turn never starts (nothing written).
+    if (runId) {
+      try {
+        await api.cancelTurn(runId)
+      } catch {
+        // Engine unreachable: the re-syncs below show whatever was saved.
+      }
+    }
     if (!persona) return
-    // DP-444: the server saves the stopped turn once it notices the
-    // disconnect, so this re-sync can land before or after that commit. When
-    // a re-sync shows an assistant row newer than anything on screen before
-    // the stop, that row IS the stopped turn: drop the live row, or the turn
+    // DP-444: when a re-sync shows an assistant row newer than anything on
+    // screen before the stop, that row IS the stopped turn: drop the live row, or the turn
     // renders twice. Checked twice, briefly apart; a slower commit leaves the
     // live row up until dismissed or the next send, which both re-sync. A
     // retry overwrites its row in place (no newer id), so it keeps the live row.
     const name = persona.name
-    const channel = activeChannelRef.current
-    const newest = chunksRef.current.reduce((m, c) => Math.max(m, c.interaction_id ?? -1), -1)
     // A new turn or a view switch since the stop owns the state now — checked
     // again once each fetch lands, so a stale transcript is never applied.
     const current = () =>

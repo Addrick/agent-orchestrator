@@ -177,6 +177,17 @@ export type ResponseType =
   | 'SECURITY_BLOCKED'
 
 // ---- SSE id-frame (DoneEvent) ----
+// DP-487: a turn running on the server, independent of any connection. Sent
+// as the first frame of every turn stream (`event: derpr-run`), and returned
+// by /active_turn and in a 409 `turn_running` refusal.
+export interface TurnRunInfo {
+  run_id: string
+  kind: 'chat' | 'confirm'
+  continue_id: number | null
+  done?: boolean
+  replay_from?: number
+}
+
 export interface DerprIdFrame {
   user_id: number | null
   assistant_id: number | null
