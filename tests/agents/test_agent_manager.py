@@ -313,7 +313,7 @@ def test_codr_agent_built_from_the_shipped_config():
     assert shipped["auto_start"] is False
     agent = mgr._build_agent_instance("codr", CodrAgent, shipped)
     assert agent.cfg["notification_target"] == {"channel": "discord_channel", "recipient": "1562589289332609075"}
-    assert agent.cfg["pool_url"] == "http://10.0.0.70:5002/v1"
+    assert agent.cfg["pool_url"] == "http://10.0.0.70:5001/v1"
     assert agent.persona_name == "codr" and agent.directory.endswith("/codr")
     assert "_recipients" not in agent.cfg
     # The queue is the instance's (DP-481); the shipped battery still loads as tasks.
