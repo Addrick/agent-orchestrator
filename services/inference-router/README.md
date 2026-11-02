@@ -33,6 +33,11 @@ conversation may re-read once.
 - `ROUTER_QUIET_S` (120) — a box idle this long has no conversation between steps on it.
 - `ROUTER_HOST` / `ROUTER_PORT` (`0.0.0.0` / `5001`).
 
+A request is held in the router until its chosen box is free, oldest first, because once sent it is
+stuck in that box's queue even if the other frees up (seen live: 208 s behind the R9700 with dt21 idle).
+A client that leaves while held never reaches a box. Only generation paths (`GENERATION_PATHS`) are held
+or counted; other calls go straight to the first healthy box.
+
 Each box is polled every 3 s: `/v1/models` (up, model, context, loaded) and `/metrics` (busy with work
 that did not come through the router, which is how Adam's direct use of dt21 counts). A box is used
 only if it is **loaded and serves the primary's model**, so a kcpp swap on the R9700 takes dt21 out of

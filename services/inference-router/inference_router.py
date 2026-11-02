@@ -34,6 +34,9 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_SEEN_PREFIXES = 20000
 CHARS_PER_TOKEN = 4  # estimate, only used to keep a prompt off a smaller-context box
 RETRY_STATUSES = {b"502", b"503", b"504"}  # the box's proxy has no live engine behind it
+# Only these occupy a box. Anything else (token counts, load, abort) must not wait behind a generation.
+GENERATION_PATHS = {b"/v1/chat/completions", b"/v1/completions", b"/v1/messages", b"/v1/responses",
+                    b"/api/v1/generate", b"/api/extra/generate/stream"}
 HOP_HEADERS = {b"connection", b"keep-alive", b"proxy-connection", b"transfer-encoding", b"content-length"}
 
 
@@ -149,6 +152,13 @@ class Router:
         self.move_chars = move_chars
         self.quiet_s = quiet_s
         self.expected_model: Optional[str] = None  # the primary's, kept while it is down
+        self.changed = asyncio.Event()  # replaced on each wake; waiters resume in arrival order
+        self.waiting = 0
+
+    def wake(self) -> None:
+        """A box may have freed up: held requests look again, oldest first."""
+        changed, self.changed = self.changed, asyncio.Event()
+        changed.set()
 
     def route(self, body: bytes, now: float) -> tuple[list[Backend], list[tuple[str, int]]]:
         """The chosen box first, then the others to fall back to if it cannot be reached."""
@@ -182,6 +192,7 @@ class Router:
         now = time.monotonic()
         return {
             "expected_model": self.expected_model,
+            "waiting": self.waiting,
             "backends": [{
                 "name": b.name, "url": f"http://{b.host}:{b.port}", "healthy": b.healthy, "model": b.model,
                 "n_ctx": b.n_ctx, "inflight": b.inflight, "external_busy": b.external_busy,
@@ -254,6 +265,10 @@ async def _send(backend: Backend, request: bytes) -> Optional[tuple[asyncio.Stre
         writer.write(request)
         await writer.drain()
         status = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
+    except asyncio.CancelledError:  # the client left: closing this is what stops the generation
+        if writer:
+            writer.close()
+        raise
     except (OSError, asyncio.TimeoutError) as exc:
         log.warning("%s unreachable: %r", backend.name, exc)
         if writer:
@@ -265,6 +280,15 @@ async def _send(backend: Backend, request: bytes) -> Optional[tuple[asyncio.Stre
         writer.close()
         return None
     return reader, writer, status
+
+
+async def _client_closed(reader: asyncio.StreamReader) -> None:
+    """Returns when the client hangs up. Clients send nothing further once the request is in."""
+    try:
+        while await reader.read(4096):
+            pass
+    except ConnectionError:
+        pass
 
 
 async def relay(
@@ -279,11 +303,7 @@ async def relay(
             client.write(chunk)
             await client.drain()
 
-    async def client_gone() -> None:
-        while await client_reader.read(4096):
-            pass
-
-    tasks = [asyncio.ensure_future(pump()), asyncio.ensure_future(client_gone())]
+    tasks = [asyncio.ensure_future(pump()), asyncio.ensure_future(_client_closed(client_reader))]
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
         task.cancel()
@@ -315,47 +335,79 @@ class Server:
         if target == b"/router/status":
             _respond(writer, b"200 OK", self.router.status())
             return
-        now = time.monotonic()
-        if method == b"POST":
-            order, chain = self.router.route(body, now)
-        else:  # status reads, model lists: the primary answers, as it did before the router
+        generation = _is_generation(method, target)
+        if generation:
+            held = await self._hold(body, reader)
+            if held is None:  # the client left while waiting; no box ever saw it
+                return
+            order, chain = held
+        else:  # status reads, model lists, control calls: the primary answers, as it did before the router
             chain = []
-            order = sorted((b for b in self.router.backends if b.healthy), key=self.router.backends.index)
+            order = [b for b in self.router.backends if b.healthy]
         if not order:
             _respond(writer, b"503 Service Unavailable", {"error": "no inference server is up"})
             return
-        await self._forward(order, chain, rewrite_head(lines, len(body)) + body, method, target, reader, writer)
+        await self._forward(order, chain, rewrite_head(lines, len(body)) + body, generation, target, reader, writer)
+
+    async def _hold(
+        self, body: bytes, reader: asyncio.StreamReader,
+    ) -> Optional[tuple[list[Backend], list[tuple[str, int]]]]:
+        """Wait here until the chosen box is free. Sent on, a request is stuck in that box's queue."""
+        gone = asyncio.ensure_future(_client_closed(reader))
+        self.router.waiting += 1
+        try:
+            while True:
+                order, chain = self.router.route(body, time.monotonic())
+                if not order or order[0].idle:
+                    return order, chain
+                changed = asyncio.ensure_future(self.router.changed.wait())
+                await asyncio.wait({gone, changed}, return_when=asyncio.FIRST_COMPLETED)
+                changed.cancel()
+                if gone.done():
+                    return None
+        finally:
+            self.router.waiting -= 1
+            gone.cancel()
 
     async def _forward(
-        self, order: list[Backend], chain: list[tuple[str, int]], request: bytes, method: bytes, target: bytes,
+        self, order: list[Backend], chain: list[tuple[str, int]], request: bytes, generation: bool, target: bytes,
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> None:
         for backend in order:
-            sent = await self._dispatch(backend, chain, request, method, target, reader, writer)
+            sent = await self._dispatch(backend, chain, request, generation, target, reader, writer)
             if sent:
                 return
-            if method == b"POST":
+            if generation:
                 backend.healthy = False  # the next poll restores it
         _respond(writer, b"503 Service Unavailable", {"error": "no inference server answered"})
 
     async def _dispatch(
-        self, backend: Backend, chain: list[tuple[str, int]], request: bytes, method: bytes, target: bytes,
+        self, backend: Backend, chain: list[tuple[str, int]], request: bytes, counted: bool, target: bytes,
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> bool:
-        counted = method == b"POST"
+        matched = backend.matched(chain)
         if counted:
             backend.inflight += 1
             backend.last_active = time.monotonic()
         upstream_writer = None
         try:
-            sent = await _send(backend, request)
+            sending = asyncio.ensure_future(_send(backend, request))
+            gone = asyncio.ensure_future(_client_closed(reader))
+            await asyncio.wait({sending, gone}, return_when=asyncio.FIRST_COMPLETED)
+            gone_first = gone.done() and not sending.done()
+            gone.cancel()
+            if gone_first:  # a box can sit on a request for minutes before its first byte
+                sending.cancel()
+                await asyncio.gather(sending, return_exceptions=True)
+                return True
+            sent = sending.result()
             if sent is None:
                 return False
             upstream, upstream_writer, status = sent
             if counted:
                 backend.remember(chain)
-                log.info("%s %s -> %s (matched %d of %d chars, %d in flight)", method.decode(), target.decode(),
-                         backend.name, backend.matched(chain), chain[-1][1] if chain else 0, backend.inflight)
+                log.info("%s -> %s (cached %d of %d chars, %d in flight, %d waiting)", target.decode(), backend.name,
+                         matched, chain[-1][1] if chain else 0, backend.inflight, self.router.waiting)
             writer.write(status + b"X-Inference-Backend: " + backend.name.encode() + b"\r\n")
             await relay(upstream, reader, writer)
             return True
@@ -365,6 +417,11 @@ class Server:
             if counted:
                 backend.inflight -= 1
                 backend.last_active = time.monotonic()
+                self.router.wake()
+
+
+def _is_generation(method: bytes, target: bytes) -> bool:
+    return method == b"POST" and target.split(b"?", 1)[0] in GENERATION_PATHS
 
 
 def _respond(writer: asyncio.StreamWriter, status: bytes, payload: dict[str, Any]) -> None:
@@ -415,6 +472,7 @@ async def poll_forever(router: Router) -> None:
             router.note_poll(backend, models, metrics)
             if was != backend.healthy:
                 log.info("%s is %s (%s)", backend.name, "up" if backend.healthy else "down", backend.model)
+        router.wake()  # busy flags and quiet timers change without a request ending
         await asyncio.sleep(POLL_INTERVAL_S)
 
 

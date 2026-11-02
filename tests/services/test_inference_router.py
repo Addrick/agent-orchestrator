@@ -306,6 +306,92 @@ async def test_concurrent_conversations_run_on_different_boxes():
 
 
 @pytest.mark.asyncio
+async def test_a_request_waits_for_the_first_free_box_rather_than_join_a_queue():
+    """Live, 2026-11-02: a request sat 208 s queued on the R9700 with dt21 idle after 3 s."""
+    r9700, dt21 = FakeEngine(), FakeEngine()
+    r9700.hold = dt21.hold = True
+    async with Harness({"r9700": r9700, "dt21": dt21}) as h:
+        first = await h.open(body("one"))
+        await asyncio.wait_for(first[0].readuntil(b"first"), 5)
+        second = await h.open(body("two"))
+        await asyncio.wait_for(second[0].readuntil(b"first"), 5)
+        third = await h.open(body("three"))
+        await _until(lambda: h.router.waiting == 1)
+        assert len(r9700.requests) + len(dt21.requests) == 2
+
+        second[1].close()  # dt21 frees up; r9700 stays busy
+        raw = await asyncio.wait_for(third[0].readuntil(b"first"), 5)
+        assert b"X-Inference-Backend: dt21" in raw
+        assert h.router.waiting == 0
+        for reader_writer in (first, third):
+            reader_writer[1].close()
+        r9700.release.set()
+        dt21.release.set()
+
+
+@pytest.mark.asyncio
+async def test_a_client_leaving_while_held_never_reaches_a_box():
+    r9700 = FakeEngine()
+    r9700.hold = True
+    async with Harness({"r9700": r9700}) as h:
+        first = await h.open(body("one"))
+        await asyncio.wait_for(first[0].readuntil(b"first"), 5)
+        second = await h.open(body("two"))
+        await _until(lambda: h.router.waiting == 1)
+        second[1].close()
+        await _until(lambda: h.router.waiting == 0)
+        first[1].close()
+        r9700.release.set()
+        await _until(lambda: h.router.primary.inflight == 0)
+    assert len(r9700.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_control_call_does_not_wait_behind_a_generation():
+    r9700 = FakeEngine()
+    r9700.hold = True
+    async with Harness({"r9700": r9700}) as h:
+        first = await h.open(body("one"))
+        await asyncio.wait_for(first[0].readuntil(b"first"), 5)
+        r9700.hold = False
+        raw = await h.fetch(b"{}", path="/v1/messages/count_tokens")
+        assert raw.endswith(b"first-last")
+        assert h.router.primary.inflight == 1
+        first[1].close()
+        r9700.release.set()
+
+
+@pytest.mark.asyncio
+async def test_a_client_leaving_before_the_first_byte_closes_the_upstream():
+    """A non-streaming reply sends nothing until it is done."""
+    release = asyncio.Event()
+    closed = asyncio.Event()
+
+    class Silent(FakeEngine):
+        async def handle(self, reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            release.set()
+            await reader.read()  # returns at EOF: the router closed its side
+            closed.set()
+            writer.close()
+
+    async with Harness({"r9700": Silent()}) as h:
+        _, writer = await h.open(body("hi"))
+        await asyncio.wait_for(release.wait(), 5)
+        writer.close()
+        await asyncio.wait_for(closed.wait(), 5)
+        await _until(lambda: h.router.primary.inflight == 0)
+
+
+@pytest.mark.asyncio
+async def test_the_log_reports_what_was_cached_before_this_request(caplog):
+    async with Harness({"r9700": FakeEngine()}) as h:
+        with caplog.at_level("INFO", logger="inference_router"):
+            await h.fetch(body("hi"))
+    assert "cached 0 of" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_a_reply_streams_before_it_finishes():
     engine = FakeEngine()
     engine.hold = True
