@@ -28,6 +28,7 @@ CONNECT_TIMEOUT_S = 2.0  # a stopped box may drop packets silently rather than r
 READ_TIMEOUT_S = 1200.0  # same as the nginx proxies: a big prompt can read for minutes
 POLL_INTERVAL_S = 3.0
 POLL_TIMEOUT_S = 5.0  # above r9700-proxy's 2 s connect failover to its backup CT
+POLL_FAILURES_DOWN = 3  # a busy server can miss one poll; a false "down" moves a big conversation off its cache
 MAX_HEAD_BYTES = 64 * 1024
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_SEEN_PREFIXES = 20000
@@ -46,6 +47,7 @@ class Backend:
     n_ctx: Optional[int] = None
     inflight: int = 0
     external_busy: bool = False  # the server reports work this router did not send
+    poll_failures: int = 0
     last_active: float = float("-inf")
     seen: "OrderedDict[str, int]" = field(default_factory=OrderedDict)  # prefix hash -> prefix chars
 
@@ -160,12 +162,15 @@ class Router:
 
     def note_poll(self, backend: Backend, models: Optional[dict[str, Any]], metrics: Optional[dict[str, Any]]) -> None:
         entry = _first_model(models)
-        status = (entry.get("status") or {}).get("value") if entry else None
-        # A lazy or unloaded server must refuse rather than load on a router request.
-        backend.healthy = entry is not None and status in (None, "loaded")
         if entry is None:
-            backend.external_busy = False
+            backend.poll_failures += 1
+            if backend.poll_failures >= POLL_FAILURES_DOWN:
+                backend.healthy = False
+                backend.external_busy = False
             return
+        backend.poll_failures = 0
+        # A lazy or unloaded server must refuse rather than load on a router request.
+        backend.healthy = (entry.get("status") or {}).get("value") in (None, "loaded")
         backend.model = entry.get("id")
         backend.n_ctx = (entry.get("meta") or {}).get("n_ctx")
         if backend is self.primary and backend.healthy:

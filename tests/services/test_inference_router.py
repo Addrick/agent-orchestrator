@@ -161,9 +161,20 @@ def test_only_a_loaded_model_takes_traffic(entry, healthy):
 def test_expected_model_survives_the_primary_going_down():
     router = ir.Router([box("r9700"), box("dt21")], MOVE, QUIET)
     router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None)
-    router.note_poll(router.primary, None, None)
+    for _ in range(ir.POLL_FAILURES_DOWN):
+        router.note_poll(router.primary, None, None)
     assert router.primary.healthy is False
     assert router.expected_model == MODEL
+
+
+def test_one_missed_poll_does_not_move_a_conversation_off_its_cache():
+    """A busy R9700 missed a live /metrics poll on 2026-11-02."""
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    for _ in range(ir.POLL_FAILURES_DOWN - 1):
+        router.note_poll(router.primary, None, None)
+    assert router.primary.healthy is True
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None)
+    assert router.primary.poll_failures == 0
 
 
 def test_strata_generating_for_someone_else_is_busy():
