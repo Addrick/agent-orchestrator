@@ -71,6 +71,12 @@ request, box and match sizes only; no message content is logged or stored.
 ## dt21
 
 Start Menu "Strata Flash-Next 5001" runs `healer_strata-flash-next-5001.ps1` (copy: notes repo
-`infrastructure/scripts/dt21/`): visible window, no `--lazy`, closing it stops serving. Strata 0.2.7 lives in
-`F:\Machine Learning\Strata-0.2.7`, separate from the 0.1.44.1 install that the `:5105` Hindsight slot and the
-A/B baselines depend on. Cannot run beside `:5105`: both want the card.
+`infrastructure/scripts/dt21/`): visible window, no `--lazy`, closing it stops serving, and it joins the router within
+seconds of loading. Test a new config on another port (`--port 5107`), which the router never polls. Strata 0.2.7 lives in
+`F:\Machine Learning\Strata-0.2.7`, separate from the 0.1.44.1 install that the `:5105` Hindsight slot and the A/B
+baselines depend on. Cannot run beside `:5105`: both want the card.
+
+**Leave it in full-RAM mode: no `--resident-budget-gib`, no `--resident-experts`.** Windows pages out the cold experts when
+another program wants RAM: with a program holding 32 GiB, decode stayed 85-88 tok/s. Either flag costs a quarter or more of
+the speed even when nothing is read from the SSD (measured 2026-11-02; table in the notes repo, `benchmarks/strata-dt21.md`).
+`--vram-reserve-mib 1024` stays: with 176 MiB of VRAM free, the first run hung the GPU.
