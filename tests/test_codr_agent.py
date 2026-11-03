@@ -646,6 +646,13 @@ def test_queue_states_follow_the_dependencies():
     assert (failed["a"], failed["b"], failed["c"]) == ("failed", "blocked", "blocked")
 
 
+def test_a_dependency_that_passed_and_left_the_queue_still_counts():
+    """stagr accepts an attempted ticket as a dependency even once its folder is gone."""
+    deps = {"b": ("a",)}
+    assert _states(deps, {"a": ["fail", "pass"]}) == {"b": "open"}
+    assert _states(deps, {"a": ["fail"]}) == {"b": "held"}
+
+
 def _started(fake, sid):
     return [m["parts"][0]["metadata"][AUTO]["task"] for m in _auto_messages(fake, sid)]
 

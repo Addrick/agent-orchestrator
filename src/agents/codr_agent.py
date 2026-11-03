@@ -187,6 +187,13 @@ def _ticket_fields(ticket_id: str, header: Dict[str, str], default_attempts: int
     return fields
 
 
+def _name_order(name: str) -> List[Any]:
+    """Sort key that compares the numbers in a name as numbers, so CD-1000
+    comes after CD-999 (a plain string sort puts it before CD-101). Split on
+    a captured group, strings and ints alternate, so they never meet."""
+    return [int(s) if s.isdigit() else s for s in re.split(r"(\d+)", name)]
+
+
 def load_tickets(tasks_dir: Path, default_attempts: int) -> Tuple[List[CodrTask], Dict[str, str]]:
     """(tickets, {folder name: why it was skipped}). A ticket is every
     `<tasks_dir>/<id>/` holding both TASK.md and check.sh, oldest (by name)
@@ -195,8 +202,8 @@ def load_tickets(tasks_dir: Path, default_attempts: int) -> Tuple[List[CodrTask]
     ticket's starting files. Dot-folders are skipped: `queue_codr_task`
     stages a task in one before it renames it into place."""
     tasks, errors = [], {}
-    for folder in sorted(p for p in tasks_dir.iterdir()
-                         if p.is_dir() and not p.name.startswith(".")) if tasks_dir.is_dir() else []:
+    for folder in sorted((p for p in tasks_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                         key=lambda p: _name_order(p.name)) if tasks_dir.is_dir() else []:
         task_md, check = folder / "TASK.md", folder / "check.sh"
         if not (task_md.is_file() and check.is_file()):
             continue
@@ -235,8 +242,11 @@ def queue_states(tasks: List[CodrTask], outcomes: Dict[str, List[str]]) -> Dict[
     """{ticket id: (state, why)} from each ticket's recorded attempt
     outcomes. `passed`; `failed` (no pass and no attempts left); `blocked`
     (a dependency failed for good, is blocked itself, or is in a cycle: it
-    will never start); `held` (a dependency is not in the queue);
-    `waiting` (a dependency has not passed yet); else `open`, ready to start."""
+    will never start); `held` (a dependency is not in the queue and never
+    passed); `waiting` (a dependency has not passed yet); else `open`, ready
+    to start. `outcomes` may hold tickets no longer in the queue: one that
+    passed and whose folder was removed still satisfies its dependents, as
+    stagr's `queue_codr_task` accepts it as a dependency."""
     by_id = {t.id: t for t in tasks}
     states: Dict[str, Tuple[str, str]] = {}
 
@@ -245,6 +255,8 @@ def queue_states(tasks: List[CodrTask], outcomes: Dict[str, List[str]]) -> Dict[
         if dep in path:
             return BLOCKED, f"its dependencies form a cycle ({' -> '.join(path + (dep,))})"
         if dep not in by_id:
+            if "pass" in outcomes.get(dep, []):
+                return OPEN, ""
             return HELD, f"it depends on `{dep}`, which is not in the queue"
         found = state(dep, path + (dep,))[0]
         if found in (FAILED, BLOCKED):
@@ -853,8 +865,9 @@ class CodrAgent(Agent):
         for task_id, error in errors.items():
             await self._notice_once(task_id, f"skipped: {error}")
         attempts = self._all_attempts()
-        states = queue_states(tasks, {t.id: [str(a.get("outcome")) for a in attempts.get(t.id, [])]
-                                      for t in tasks})
+        # Every attempted ticket, queued or not: a passed one whose folder is gone still counts.
+        states = queue_states(tasks, {tid: [str(a.get("outcome")) for a in rows]
+                                      for tid, rows in attempts.items()})
         for task in tasks:
             state, why = states[task.id]
             if state in NOTICE_STATES:
@@ -862,8 +875,10 @@ class CodrAgent(Agent):
         for task in tasks:
             if states[task.id][0] == OPEN:
                 done = attempts.get(task.id, [])
-                await self._start(client, sid, task, len(done) + 1, done[-1] if done else None)
-                return
+                if not await self._start(client, sid, task, len(done) + 1, done[-1] if done else None):
+                    return
+                # Its project could not be prepared: try the next open ticket
+                # rather than stall the whole queue behind it.
 
     def _task_prompt(self, task: CodrTask, attempt: int, previous: Optional[Dict[str, Any]]) -> str:
         title = f" {task.title}" if task.title else ""
@@ -907,30 +922,34 @@ class CodrAgent(Agent):
         return lines
 
     async def _start(self, client: OpencodeClient, sid: str, task: CodrTask, attempt: int,
-                     previous: Optional[Dict[str, Any]]) -> None:
+                     previous: Optional[Dict[str, Any]]) -> bool:
+        """Start `task`. True only when its project could not be prepared, so
+        the caller may try the next open ticket; False once it started, or
+        when nothing can start this tick (busy, locked, no persona)."""
         persona = self.chat_system.personas.get(self.persona_name)
         if persona is None:
             logger.error("codr agent: persona %r not found; not starting tasks.", self.persona_name)
-            return
+            return False
         lock = workspace_lock(self.directory)
         if lock.locked():
-            return                  # a chat turn is starting or running; next tick
+            return False            # a chat turn is starting or running; next tick
         async with lock:
             msgs = await client.turn_messages(sid)
             start = current_turn_start(msgs)
             if await client.is_busy(sid) or (start is not None and not turn_finished(msgs, start)
                                              and open_auto(msgs[start]) is not None):
-                return
+                return False
             try:
                 await prepare_ticket(client, task)
             except RuntimeError as e:
                 # Retried every tick, but posted once: e.g. a non-repo folder
                 # in the project's place needs a human.
                 await self._notice_once(task.id, f"could not start: {e}")
-                return
+                return True
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
             await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous), meta)
         logger.info("codr agent: started task %s attempt %d", task.id, attempt)
+        return False
 
     async def _prompt(self, client: OpencodeClient, sid: str, persona: Any, text: str,
                       meta: Dict[str, Any]) -> None:

@@ -729,11 +729,15 @@ cases in each group passed, never which ones, so a retry can't fit the tests.
 03 and 04 share the project `notes`, and 04 has `depends_on: 03-notes-api`, so 04
 starts from 03's merged app (copy both folders to run 04).
 
-When codr is idle, the agent starts the oldest ticket (by folder name) that has
-neither passed nor run out of attempts and whose `depends_on` tickets have all
-passed. If one of those failed for good (no pass, no attempts left), the ticket is
-**blocked**: DERPR posts that once and never starts it. A ticket that depends on one
-that is not in the queue waits, and DERPR posts that once too. codr gets the ticket
+When codr is idle, the agent starts the oldest ticket (by folder name, numbers
+compared as numbers, so CD-1000 comes after CD-999) that has neither passed nor run
+out of attempts and whose `depends_on` tickets have all passed. A dependency that
+passed still counts after its folder is removed. If one of those failed for good (no
+pass, no attempts left), the ticket is **blocked**: DERPR posts that once and never
+starts it. A ticket that depends on one that is not in the queue and never passed
+waits, and DERPR posts that once too. A ticket whose project cannot be prepared (say,
+`projects/<project>/` is not a git repo) is posted once and skipped until fixed; the
+next ticket starts in its place. codr gets the ticket
 text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below). When
 the turn ends, DERPR runs the check in the worktree:
 
