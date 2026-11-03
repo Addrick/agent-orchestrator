@@ -801,6 +801,151 @@ Settings, per instance in `agents.json` under `codr`:
   the log. Changing it reloads codr's instance on the next idle tick, like any
   other change to the managed files.
 
+#### codr tickets: one ticket, one session, one worktree (DP-484 / DP-488 / DP-489)
+
+> 🚧 **Spec, being built (2026-11-03).** This describes how codr will work once
+> DP-484, DP-488 and DP-489 ship. Each ticket folds its own part into the sections
+> above and removes it from here as it merges. Until then the sections above describe
+> what is live.
+
+The goal: codr works on **one ticket at a time with only that ticket in its context**,
+yet can find everything else (earlier tickets, other projects, its own notes) in its
+workspace when it needs it. Continuity lives in files, not in one ever-growing
+conversation. codr follows the same development discipline as the agents that build
+DERPR: plan before work (done by stagr, approved by you), one worktree per ticket,
+tiered notes, and root causes before workarounds.
+
+**Planning is stagr's job, and you approve it (DP-489).** Tell stagr what you want
+built. stagr plans it before anything reaches codr, because codr is offline and cannot
+fetch a missing package halfway through. stagr's plan has these parts:
+
+- **Project**: which of codr's projects the work belongs to, new or existing.
+- **Spec**: what to build.
+- **Plan**: the approach, the files likely touched, the risks.
+- **Packages**: every package the work needs. stagr resolves them against **codr's**
+  installed state (codr's dpkg status and Python version), not its own, then installs
+  them on codr's box and verifies them there (DP-479). If the project is an outside
+  repo, stagr also brings it in.
+- **Check**: the hidden pass/fail script.
+- **Dependencies**: earlier tickets this one builds on.
+
+`queue_codr_task` shows all of it in one approval prompt. Approve it and DERPR gives
+the ticket the next free ID, **`CD-NNN`** (three digits, counting up and never reused,
+even after a ticket's folder is deleted), and queues it as `data/codr_tasks/CD-NNN/`.
+The tool's reply names the ID. You can still write a ticket folder by hand under any
+name; the shipped battery folders (`01-…`) keep working.
+
+**Ticket folder format.** `TASK.md` opens with a header of `key: value` lines, ended by
+the first blank line. codr never sees the header:
+
+- `title:` one line, used in the ticket's channel name, posts and notes.
+- `project:` lowercase letters, digits and `-`. If missing, the ticket is its own
+  project, named after the folder.
+- `depends_on:` comma-separated ticket IDs. The ticket waits until all of them have
+  passed. If one of them fails for good, this ticket is **blocked**: DERPR posts that
+  once and starts nothing for it.
+- `max_attempts:` as before.
+
+Every other unknown header key is an error. DERPR logs it and posts it once, and the
+ticket is skipped, not guessed at. The rest of `TASK.md` is the ticket text: stagr
+writes `## Spec`, `## Plan` and `## Packages` sections. A file whose first line is not
+`key: value` has no header, so old tasks keep working. `check.sh` and `seed/` work as
+before.
+
+**codr's workspace (DP-488):**
+
+```
+AGENTS.md              rules codr follows, written by DERPR (like .opencode/)
+memory/                codr's notes, its own git repo (see below)
+projects/<project>/    one git repo per project; its main branch holds finished work
+worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from main
+```
+
+- **Projects.** The first ticket for a project creates `projects/<project>/` as a git
+  repo with an empty first commit on `main`. If stagr already put a repo there (for
+  example `copy_to_codr` with `keep_git`), DERPR uses it as it is, and that repo's
+  checked-out branch counts as its main.
+- **Worktrees.** Before the first attempt, DERPR cuts `worktrees/<ticket>/` (branch
+  `ticket/<ticket>`) from the project's main and copies in any `seed/` files that are
+  missing. A retry reuses the same worktree, so codr's work carries over. codr works only
+  in its worktree and commits there, staging files by path. The box is offline, so
+  there is no remote, no fetch and no push.
+- **The check runs in the worktree**, not in `tasks/<id>/`.
+- **Merge on pass.** When the check passes, DERPR commits anything codr left
+  uncommitted (as `CD-NNN: uncommitted at check pass`), merges the branch into the
+  project's main with a merge commit, removes the worktree and keeps the branch. A ticket
+  that depends on this one is cut from the new main. If the merge **conflicts**, DERPR
+  aborts it and records the attempt as `fail` with the conflicting files as the check
+  output. The worktree stays, and the next attempt asks codr to merge main into its
+  branch and resolve the conflict.
+- **Tickets without a project**, such as the old battery folders, are each their own
+  project. The battery's task 04 says it builds on 03, so it carries `project:` and
+  `depends_on:` to make that explicit.
+
+**codr's rules: `AGENTS.md` (DP-488).** DERPR writes `AGENTS.md` into the workspace and
+overwrites it on its next start, exactly like `.opencode/`. opencode loads it into every
+session automatically. It tells codr how to work:
+
+- Work only in your ticket's worktree. Stage files by path. Run the tests inside the
+  worktree.
+- Read your notes before you start.
+- Fix the root cause and add the test that stops it coming back. Before building
+  something, look for what already does that job.
+- After 3 failed fixes for one problem, or if you can't say in one sentence what is
+  broken and why, stop and ask with `notify_adam`, with a concrete question.
+- Never report something as verified unless you ran it.
+- Keep notes the tiered way (below) and commit them in the same turn you write them.
+- Update docs in the same commit as the code they describe.
+
+The text ships with DERPR (`config/codr_workspace/AGENTS.md`), so changing it is a
+deploy, not an edit on codr's box.
+
+**codr's notes: tiered memory (DP-488).** `memory/` is codr's long-term memory, a git
+repo of its own. Notes are read top-down and written bottom-up:
+
+- `memory/MEMORY.md` (L0): an index only, one line per directory.
+- `memory/<dir>/_overview.md` (L1): a short summary of the directory, usually enough
+  to decide whether to read further.
+- detail files (L2): read only when L1 isn't enough.
+
+DERPR creates the skeleton when it is missing: `MEMORY.md`, `tickets/_overview.md` and
+`projects/_overview.md`. It never rewrites codr's notes. Two exceptions: when a ticket
+starts, DERPR creates `memory/tickets/<ticket>.md` from the ticket text if it isn't
+there yet, and after each check it adds one line to that file with the attempt, the
+outcome and the merge commit. It commits each of those writes. The ticket file replaces
+`attempts.md`: codr keeps what it tried, what happened and what it decided there.
+
+**One session per ticket (DP-484).** Each ticket gets its own opencode session, titled
+`derpr:codr:<ticket>`. Retries continue that session, so codr still sees its earlier
+attempt; opencode compacts it when it gets long. Other tickets never enter it. The
+first message of a ticket session carries:
+
+- the ticket text and the project name;
+- `memory/MEMORY.md`, the project's `memory/projects/<project>.md` if it exists, and
+  `memory/tickets/_overview.md`;
+- on a retry, the previous outcome and the check output, as today.
+
+Everything else codr reads from files when it needs it.
+
+**A channel per ticket (DP-484).** In the portal, codr's channel list gains one channel
+per ticket, `CD-NNN · <title>`. It holds the ticket's full transcript: every step,
+reasoning, tool call with its output, and the sessions of subagents, nested under the
+call that started them. DERPR saves the transcript in its own database, so it survives a
+restore of codr's box. A running ticket's channel updates live. You can **write in a
+ticket's channel**:
+
+- while the ticket runs, your message goes straight into its turn, the way talking to
+  codr mid-task works today (✅ reaction);
+- when it is idle, the message starts an ordinary turn in that ticket's session.
+
+**Discord and the "adam chat" session (DP-484).** Discord messages to codr no longer
+go into a running ticket. They go to codr's own session, `derpr:codr` (the one chat has
+always used), which codr uses for talk outside any ticket. That session reads
+`memory/` like any other, but never sees a ticket's transcript. To steer a ticket, write
+in its portal channel. `notify_adam` calls from any session still post to
+`notification_target`, prefixed `[CD-NNN]` when they come from a ticket, and they are
+saved in that ticket's channel too.
+
 #### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456 / DP-465)
 
 codr's sandbox stays offline while it works. Anything codr needs from the
