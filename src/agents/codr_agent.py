@@ -69,8 +69,8 @@ DEFAULTS: Dict[str, Any] = {
     "check_timeout_seconds": 600,
     "notify_per_hour": 20,
     "start_tasks": True,
-    "pool_url": "http://10.0.0.70:5002/v1",
-    "pool_context": 65536,
+    "pool_url": "http://10.0.0.70:5001/v1",
+    "pool_context": 262144,
 }
 
 
@@ -173,7 +173,7 @@ export default {
 """
 
 _POOL_AGENT_MD = """---
-description: Worker on the shared inference pool (other model servers). Give it one self-contained subtask with everything it needs; run it in the background to keep working meanwhile. Pool servers may run a different, weaker model, so check what it returns.
+description: Worker running the same model as you, on whichever local model server is free. Give it one self-contained subtask with everything it needs; run it in the background to keep working meanwhile. Check what it returns.
 mode: subagent
 model: kcpp-pool/local
 ---
@@ -228,9 +228,9 @@ def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:
         "$schema": "https://opencode.ai/config.json",
         "provider": {"kcpp-pool": {
             "npm": "@ai-sdk/openai-compatible",
-            "name": "Inference pool (any free local server)",
+            "name": "Inference router (any free local server)",
             "options": {"baseURL": cfg["pool_url"]},
-            "models": {"local": {"name": "whatever the pool server holds",
+            "models": {"local": {"name": "the model the router is serving",
                                  "limit": {"context": int(cfg["pool_context"]), "output": 16384}}},
         }},
     }

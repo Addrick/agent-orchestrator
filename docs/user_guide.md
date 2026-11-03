@@ -164,6 +164,16 @@ If Proxmox access is disabled (`PVE_TOOLS_ENABLED` unset, or no host key mounted
 
 `model local` talks to the server at `LOCAL_LLM_URL` (or whichever server the statusline's switch selected, DP-438) over the OpenAI chat-completions API (DP-417), and that server applies the model's own chat template and parses its tool calls. Strata does this out of the box. **A KoboldCPP server must be started with both `--jinja` and `--jinja_tools`** (`"jinja": true, "jinja_tools": true` in a `.kcpps` file): with `--jinja` alone KoboldCPP falls back to its own built-in format for every request that carries tools — nearly all of derpr's — and without either flag it uses that format for everything. Units written by `install_model` include both flags. Stopping a reply (the portal's stop button) stops the turn, which closes its connection to the model server, and both servers abort the generation on disconnect. Closing the *portal's* connection does not stop a reply (DP-487). The portal statusline tracks local processing metrics live for both KoboldCPP and Strata (DP-417, DP-433, DP-435).
 
+**More than one server behind `:5001` (DP-483).** The default `LOCAL_LLM_URL` is a router that spreads work over the R9700 and, when Adam has started it, dt21, so two conversations (stagr and codr, or codr and its subagents) generate at the same time instead of queueing. There is nothing to configure in a client, and it behaves like this:
+
+- **A conversation stays on the box that holds its prompt cache.** A big conversation would otherwise spend minutes re-reading its prompt after every hop.
+- **It moves only to avoid waiting.** If its box is busy and another box is free, it moves there and re-reads once. A big conversation moves only to a box with nothing else in progress (idle for 2 minutes), so it never pushes out another conversation that is between steps; otherwise it waits its turn. Waiting happens in the router, so a request goes to whichever box frees up first that the rules allow, rather than being stuck in one box's queue.
+- **A new conversation takes the box that disturbs the least,** the R9700 first when both are quiet.
+- **dt21 is used only while it serves the same model as the R9700, fully loaded.** The router never loads a model on dt21 by itself: starting and stopping it stays Adam's choice (Start Menu "Strata Flash-Next 5001"). While dt21 is off, or the R9700 runs a different model, everything goes to the R9700 as before.
+- **If a box dies before a reply starts, the request goes to the other one.** A reply already streaming is not re-sent; it fails, as it did with one server.
+
+`GET http://10.0.0.70:5001/router/status` shows each box's state, and every response carries an `X-Inference-Backend` header naming the box that served it. The portal statusline shows the R9700's metrics, not dt21's. The statusline's backend switch still pins derpr to one box directly, bypassing the router.
+
 **Thinking models (DP-434).** A model's thinking is kept apart from its reply. The portal shows it in collapsible reasoning folds, live and after reload, in the order the model produced it (DP-437): when a reply uses tools, each step's thinking gets its own fold just above the tool calls it led to, and any thinking after the last tool result sits below the tool cards, above the reply. The portal follows the order the model saw rather than merging steps for neatness. Text the model writes beside its tool calls — "checking the node and the card first" — is shown the same way (DP-440): under that step's thinking, just above its calls, live and after reload, not glued onto the final reply. The model reads that text back on every later turn, so you see it too. (On `agy-*` personas it appears once the reply finishes, because agy does not stream.) Replies saved before DP-437 still show all their thinking in one fold above the tools; Discord and other chat surfaces get the reply alone (or the thinking, if the model ran out of room before answering). Older messages that stored their thinking inside the reply are converted once at startup and look the same. During one reply the model still sees its own thinking from earlier tool-call steps, but once the reply is done its thinking is never sent back to it on later turns, and is never retained to long-term memory. The portal still shows that earlier thinking. This is the one intentional difference between what you see and what the model sees on later turns.
 
 ### Memory imports panel (DP-292)
@@ -756,10 +766,10 @@ channel. Running past `max_turn_seconds` aborts right away and posts the reason,
 attempt is out of time.
 
 **More than one model server.** codr can hand subtasks to a `pool` subagent
-(opencode's `task` tool, in the background if it wants to keep working). The
-subagent runs on the inference pool, which uses whichever local model servers are
-up. Each subagent stays on one server, and the servers may run different models.
-codr itself stays on its configured model.
+(opencode's `task` tool, in the background if it wants to keep working). codr and
+its subagents all go through the `:5001` router (see "More than one server behind
+`:5001`"), so they run the same model and a subagent generates alongside codr
+whenever a second server is free. With only the R9700 up they take turns.
 
 **Setup DERPR does in the workspace.** On the agent's first tick it writes
 `.opencode/` into codr's workspace: the `notify_adam` tool, the `pool` subagent
@@ -779,8 +789,8 @@ Settings, per instance in `agents.json` under `codr`:
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but
   starts no new tasks.
-- `pool_url` (default `http://10.0.0.70:5002/v1`) and `pool_context`
-  (default `65536`): the pool provider codr's subagent uses.
+- `pool_url` (default `http://10.0.0.70:5001/v1`) and `pool_context`
+  (default `262144`): the provider codr's subagent uses.
 - `mcp` (default none): MCP servers codr may use, written into the managed
   `.opencode/opencode.json` as its `mcp` block, in opencode's own format: each
   name maps to `{"type": "local", "command": ["prog", "arg", ...]}` or
