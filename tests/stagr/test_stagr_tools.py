@@ -5,7 +5,9 @@
 # its own folder. What matters is what lands where, so the transfers are run
 # for real rather than asserted on as script text.
 
+import asyncio
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,9 +18,13 @@ from config import global_config
 from src.engine.providers.opencode import (
     AUTO_FIELD, session_title, workspace_directory, workspace_hold, workspace_lock,
 )
-from src.agents.codr_agent import load_tasks
+from src.agents import codr_agent
+from src.agents.codr_agent import CodrAgent, load_tasks
+from src.memory.memory_manager import MemoryManager
+from src.stagr.codr_ticket import ATTEMPT_ACTION as CODR_ATTEMPT_ACTION, CODR_AGENT_NAME
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
+from src.tools.tool_loop import _render_confirmation_text
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from src.tools.tool_defs.stagr import STAGR_TOOLS
 from tests.test_opencode_provider import FakeOpencode, real_bash
@@ -303,33 +309,170 @@ def queue(monkeypatch, tmp_path):
     return folder
 
 
-async def test_a_queued_task_is_one_the_codr_agent_starts(queue):
-    result = await StagrToolHandler()._queue_codr_task(
-        "09-click", "# Fix the bug\nIn tasks/09-click.", "python3 -I -m unittest\n", max_attempts=1)
-    assert result["status"] == "ok"
-    [task] = load_tasks(queue, default_attempts=3)
-    assert (task.id, task.text, task.check, task.max_attempts) == (
-        "09-click", "# Fix the bug\nIn tasks/09-click.", "python3 -I -m unittest\n", 1)
-    assert [p.name for p in queue.iterdir()] == ["09-click"]  # no staging folder left
+# --- DP-489: stagr writes codr tickets, DERPR picks the CD-NNN ------------------
 
 
-async def test_queueing_never_replaces_a_task(queue):
-    handler = StagrToolHandler()
-    assert (await handler._queue_codr_task("t", "first", "true"))["status"] == "ok"
-    result = await handler._queue_codr_task("t", "second", "false")
-    assert result["status"] == "error" and "new name" in result["message"]
-    assert (queue / "t" / "TASK.md").read_text() == "first\n"
+@pytest.fixture
+def action_log():
+    """A real action log, so the codr agent's own rows are what is read."""
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    yield mm
+    mm.close()
 
 
-@pytest.mark.parametrize("name", ["", ".hidden", "-x", "../out", "a/b", "a b"])
-async def test_queueing_refuses_a_bad_name(queue, name):
-    result = await StagrToolHandler()._queue_codr_task(name, "task", "true")
-    assert result["status"] == "error"
+def _attempted(mm, task_id, outcome="fail"):
+    """An attempt row exactly as the codr agent writes it."""
+    mm.log_agent_action(agent_name=CodrAgent.agent_name, action_type=codr_agent.ATTEMPT_ACTION,
+                        trigger_context=f"task:{task_id}", outcome=outcome)
+
+
+_TICKET = dict(title="Fix the --count flag", project="click-cli", spec="It must count.",
+               plan="Edit cli.py; risk: none.", packages="none", check_sh="python3 -I -m unittest\n")
+
+
+async def _queue(handler, **fields):
+    return await handler._queue_codr_task(**{**_TICKET, **fields})
+
+
+def test_the_shared_attempt_row_names_match_the_codr_agent():
+    """stagr reads the codr agent's attempt rows by these names; src.stagr
+    cannot import them from src.agents, so they are pinned here instead."""
+    assert (CODR_AGENT_NAME, CODR_ATTEMPT_ACTION) == (CodrAgent.agent_name, codr_agent.ATTEMPT_ACTION)
+
+
+async def test_a_ticket_is_written_in_the_shared_format(queue, action_log):
+    handler = StagrToolHandler(memory_manager=action_log)
+    assert (await _queue(handler))["queued"] == "CD-001"
+    result = await _queue(handler, title="Add --total", depends_on=["CD-001"], max_attempts=2,
+                          packages="python3-click (apt), installed and imported on codr")
+    assert result["status"] == "ok" and result["queued"] == "CD-002" and "CD-002" in result["note"]
+    assert (queue / "CD-002" / "TASK.md").read_text(encoding="utf-8") == (
+        "title: Add --total\n"
+        "project: click-cli\n"
+        "depends_on: CD-001\n"
+        "max_attempts: 2\n"
+        "\n"
+        "## Spec\n\nIt must count.\n\n"
+        "## Plan\n\nEdit cli.py; risk: none.\n\n"
+        "## Packages\n\npython3-click (apt), installed and imported on codr\n")
+    assert (queue / "CD-001" / "TASK.md").read_text(encoding="utf-8").startswith(
+        "title: Fix the --count flag\nproject: click-cli\n\n## Spec\n")
+    assert (queue / "CD-002" / "check.sh").read_text(encoding="utf-8") == "python3 -I -m unittest\n"
+    # The codr agent sees both, and no staging folder is left behind.
+    assert [t.id for t in load_tasks(queue, default_attempts=3)] == ["CD-001", "CD-002"]
+    assert sorted(p.name for p in queue.iterdir() if p.is_dir()) == ["CD-001", "CD-002"]
+
+
+async def test_the_next_id_follows_the_highest_ever_seen(queue, action_log):
+    """Gaps are not refilled, and a number lives on in the action log, in a
+    folder being staged, and in the high-water mark after its folder is gone."""
+    (queue / "CD-003").mkdir(parents=True)
+    (queue / "01-battery").mkdir()
+    handler = StagrToolHandler(memory_manager=action_log)
+    assert (await _queue(handler))["queued"] == "CD-004"
+    _attempted(action_log, "CD-011")
+    assert (await _queue(handler))["queued"] == "CD-012"
+    (queue / ".CD-020.queue-1a2b3c4d").mkdir()
+    assert (await _queue(handler))["queued"] == "CD-021"
+    for name in ("CD-003", "CD-004", "CD-012", "CD-021", ".CD-020.queue-1a2b3c4d"):
+        shutil.rmtree(queue / name)
+    assert (await _queue(handler))["queued"] == "CD-022"
+
+
+async def test_ids_run_past_three_digits(queue, action_log):
+    _attempted(action_log, "CD-999")
+    assert (await _queue(StagrToolHandler(memory_manager=action_log)))["queued"] == "CD-1000"
+
+
+async def test_two_queue_calls_at_once_get_two_ids(queue, action_log):
+    """Allocation is under a lock: calls racing from several threads still
+    get one ID each."""
+    handler = StagrToolHandler(memory_manager=action_log)
+    results = await asyncio.gather(*(asyncio.to_thread(asyncio.run, _queue(handler, title=f"t{i}"))
+                                     for i in range(4)))
+    assert sorted(r["queued"] for r in results) == ["CD-001", "CD-002", "CD-003", "CD-004"]
+
+
+async def test_depends_on_must_name_a_known_ticket(queue, action_log):
+    handler = StagrToolHandler(memory_manager=action_log)
+    (queue / "03-cron").mkdir(parents=True)           # a hand-written ticket counts
+    _attempted(action_log, "CD-007", outcome="pass")  # so does one only in the log
+    ok = await _queue(handler, depends_on="CD-007, 03-cron")
+    assert ok["status"] == "ok"
+    assert "depends_on: CD-007, 03-cron\n" in (queue / ok["queued"] / "TASK.md").read_text(encoding="utf-8")
+    bad = await _queue(handler, depends_on=["CD-007", "CD-404"])
+    assert bad["status"] == "error" and "CD-404" in bad["message"]
+    assert not (queue / "CD-009").exists()
+
+
+@pytest.mark.parametrize("fields, word", [
+    ({"project": "Click_CLI"}, "project"),
+    ({"project": ""}, "project"),
+    ({"project": "../x"}, "project"),
+    ({"title": ""}, "title"),
+    ({"title": "two\nlines"}, "title"),
+    ({"spec": " "}, "spec"),
+    ({"plan": ""}, "plan"),
+    ({"packages": ""}, "packages"),
+    ({"check_sh": ""}, "check_sh"),
+    ({"depends_on": ["../x"]}, "depends_on"),
+    ({"max_attempts": 0}, "max_attempts"),
+    ({"max_attempts": "lots"}, "max_attempts"),
+])
+async def test_a_bad_ticket_is_refused_and_writes_nothing(queue, action_log, fields, word):
+    result = await _queue(StagrToolHandler(memory_manager=action_log), **fields)
+    assert result["status"] == "error" and word in result["message"]
     assert not queue.exists() or list(queue.iterdir()) == []
 
 
+async def test_without_the_action_log_nothing_is_queued(queue):
+    """Without it an ID could repeat one the codr agent already used."""
+    result = await _queue(StagrToolHandler())
+    assert result["status"] == "error" and "action log" in result["message"]
+    assert not any(p.is_dir() for p in queue.iterdir())
+
+
+async def test_the_approval_prompt_shows_the_whole_ticket_and_its_id(queue, action_log):
+    """The prompt prints every argument; the enrichment adds the ID it would
+    get, or why it would be refused, before the operator approves."""
+    handler = StagrToolHandler(memory_manager=action_log)
+    _attempted(action_log, "CD-004")
+    args = {**_TICKET, "depends_on": ["CD-004"]}
+    enrichment = await handler._queue_preview(**args)
+    assert enrichment == "new ticket CD-005, project click-cli"
+    prompt = _render_confirmation_text(
+        {"tool": "queue_codr_task", "arguments": args, "irreversible": False, "always_confirm": False,
+         "service_binding": "stagr", "sensitivity": None, "enrichment": enrichment}, False, [])
+    for value in ("CD-005", "Fix the --count flag", "click-cli", "CD-004", "It must count.",
+                  "Edit cli.py; risk: none.", '"packages": "none"', "python3 -I -m unittest"):
+        assert value in prompt
+    refused = await handler._queue_preview(**{**args, "depends_on": ["CD-404"]})
+    assert refused is not None and refused.startswith("⚠️") and "CD-404" in refused
+    bad_project = await handler._queue_preview(**{**args, "project": "Bad"})
+    assert bad_project is not None and bad_project.startswith("⚠️")
+
+
+def test_the_tool_schema_takes_the_ticket_fields():
+    [tool] = [t for t in STAGR_TOOLS if t["function"]["name"] == "queue_codr_task"]
+    params = tool["function"]["parameters"]
+    assert set(params["properties"]) == {"title", "project", "depends_on", "spec", "plan", "packages",
+                                         "check_sh", "max_attempts"}
+    assert set(params["required"]) == {"title", "project", "spec", "plan", "packages", "check_sh"}
+    assert tool["is_write"] is True
+
+
+def test_the_stagr_prompt_carries_the_package_recipe():
+    """DP-479: packages are resolved against codr's state, not stagr's."""
+    prompt = json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]["prompt"]
+    for needle in ("Dir::State::status", "dpkg --print-foreign-architectures", "--only-binary=:all:",
+                   "--python-version", "--implementation", "--abi", "--platform", "queue_codr_task",
+                   "projects/<project>", "keep_git"):
+        assert needle in prompt
+
+
 def test_load_tasks_skips_a_half_staged_task(tmp_path):
-    staged = tmp_path / ".queue-1234"
+    staged = tmp_path / ".CD-001.queue-1234"
     staged.mkdir()
     (staged / "TASK.md").write_text("x")
     (staged / "check.sh").write_text("true")

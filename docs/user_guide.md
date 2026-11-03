@@ -815,25 +815,10 @@ conversation. codr follows the same development discipline as the agents that bu
 DERPR: plan before work (done by stagr, approved by you), one worktree per ticket,
 tiered notes, and root causes before workarounds.
 
-**Planning is stagr's job, and you approve it (DP-489).** Tell stagr what you want
-built. stagr plans it before anything reaches codr, because codr is offline and cannot
-fetch a missing package halfway through. stagr's plan has these parts:
-
-- **Project**: which of codr's projects the work belongs to, new or existing.
-- **Spec**: what to build.
-- **Plan**: the approach, the files likely touched, the risks.
-- **Packages**: every package the work needs. stagr resolves them against **codr's**
-  installed state (codr's dpkg status and Python version), not its own, then installs
-  them on codr's box and verifies them there (DP-479). If the project is an outside
-  repo, stagr also brings it in.
-- **Check**: the hidden pass/fail script.
-- **Dependencies**: earlier tickets this one builds on.
-
-`queue_codr_task` shows all of it in one approval prompt. Approve it and DERPR gives
-the ticket the next free ID, **`CD-NNN`** (three digits, counting up and never reused,
-even after a ticket's folder is deleted), and queues it as `data/codr_tasks/CD-NNN/`.
-The tool's reply names the ID. You can still write a ticket folder by hand under any
-name; the shipped battery folders (`01-…`) keep working.
+stagr plans and queues tickets: see **Planning and queueing a ticket** under
+[Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-setup-agent-dp-455--dp-456--dp-465).
+You can still write a ticket folder by hand under any name; the shipped battery
+folders (`01-…`) keep working.
 
 **Ticket folder format.** `TASK.md` opens with a header of `key: value` lines, ended by
 the first blank line. codr never sees the header:
@@ -1024,12 +1009,36 @@ only thing that talks to both:
   `codr_shell` refuses a command that runs `opencode` itself (DP-481): a codr
   started that way is a session DERPR doesn't watch, with no loop guard, time
   limit or check, and it dies when DERPR restarts. Tasks go through the queue.
-- **Queueing a task**: `queue_codr_task` puts a task's `TASK.md` and `check.sh`
-  into the queue under a new name, after your approval; the approval prompt shows
-  both, so you see the check codr is graded on. An optional `max_attempts` becomes
-  the `TASK.md` first line. It is refused if a task of that name is already queued
-  (a new name is a new task). The agent starts it on its next tick when codr is
-  idle.
+- **Planning and queueing a ticket (DP-489)**: planning is stagr's job, and you
+  approve it. Tell stagr what you want built; it plans the work before anything
+  reaches codr, because codr is offline and cannot fetch a missing package halfway
+  through. Its plan has these parts, and `queue_codr_task` takes each one:
+  - **Title**: one line naming the work.
+  - **Project**: which of codr's projects it belongs to, new or existing
+    (lowercase letters, digits and `-`). If the project is an outside repo, stagr
+    brings it in first: checked out at the starting commit, with anything that
+    gives the answer away removed, as a fresh one-commit repo copied to
+    `projects/<project>/` in codr's workspace (`copy_to_codr` with `keep_git`).
+  - **Spec**: what to build. **Plan**: the approach, the files likely touched, the
+    risks.
+  - **Packages**: every package the work needs, or `none`. stagr resolves them
+    against **codr's** installed state, not its own (DP-479): it copies codr's dpkg
+    status out and downloads with `apt-get install -d -o Dir::State::status=<that
+    copy>` (with codr's foreign architectures), and downloads wheels with `pip
+    download --only-binary=:all:` for codr's Python version, implementation, ABI
+    and platform. Then it installs them on codr's box and checks each import or
+    command works there, before it queues.
+  - **Dependencies** (`depends_on`, optional): earlier tickets this one builds on.
+    Each must be queued or already attempted, or the call is refused.
+  - **Check**: the hidden pass/fail script; and optionally `max_attempts`.
+
+  The approval prompt shows every field, with the ID the ticket will get (or a ⚠️
+  line saying why it would be refused), so approving it is approving the plan.
+  DERPR then gives the ticket the next free ID, **`CD-NNN`** (three digits,
+  counting up and never reused, even after a ticket's folder is deleted), writes
+  `TASK.md` (header, then `## Spec`, `## Plan` and `## Packages`) and `check.sh`
+  into `data/codr_tasks/CD-NNN/`, and the tool's reply names the ID. The agent
+  starts it on its next tick when codr is idle.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
   back to any path on the setup box. Only `copy_from_codr` needs your approval:
@@ -1047,12 +1056,11 @@ only thing that talks to both:
   `STAGR_OUTPUT_CHARS`). Discord shows the persona's replies and the approval
   prompts.
 
-To give codr a real-repo task: ask stagr to prepare it (clone, check out the
-start commit, download wheels for what the tests need into the folder, run the
-tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then queue the task's
-`TASK.md` and `check.sh` under the same name with `queue_codr_task`. The codr
-agent starts a task as soon as its folder is in the queue, and its seeding never
-replaces files that are already there.
+To give codr a real-repo task: describe it to stagr. It brings the repo into
+`projects/<project>/`, installs and verifies the packages on codr's box, runs the
+tests the way codr will, and only then queues the ticket with `queue_codr_task`.
+The codr agent starts a ticket as soon as its folder is in the queue, so the
+preparation comes first.
 
 **Setting it up.** `STAGR_SERVER_URL` (e.g. `http://10.0.0.76:4096`) and
 `STAGR_SERVER_PASSWORD` (from `/etc/opencode/serve.env` on the setup box) in
@@ -1726,6 +1734,7 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
+| `queue_codr_task` | yes | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts); DERPR gives it the next `CD-NNN` and the reply names it |
 
 Two more tools sit behind the same binding for the portal's INFRA panel only,
 and no persona is given them: `sandbox_net_status` (both boxes' switches,

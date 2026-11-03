@@ -15,9 +15,16 @@ the network is gated, not the local work. What crosses a boundary is gated
   codr's offline sandbox, to a path that must not exist yet. Any `.git` is left
   behind unless asked for, so upstream history (a later fix, say) never reaches
   codr by accident;
-- `queue_codr_task` writes a task's TASK.md and check.sh into the codr task
-  queue (`global_config.CODR_TASKS_DIR`, DP-481), staged in a dot-folder the
-  agent skips and renamed into place, so a tick never sees half a task.
+- `queue_codr_task` writes a codr ticket (DP-489) into the codr task queue
+  (`global_config.CODR_TASKS_DIR`, DP-481): TASK.md (the header of
+  `src/stagr/codr_ticket.py`, then stagr's Spec, Plan and Packages) and the
+  hidden check.sh. DERPR picks the ID, `CD-NNN`, one past the highest it has
+  ever seen in the queue folder or the codr agent's attempt log, so an ID is
+  never reused. The ticket is staged in a dot-folder named after its ID (the
+  agent skips it, the next allocation counts it) and renamed into place, so a
+  tick never sees half a ticket. stagr does the planning before it: packages
+  are resolved against codr's installed state and installed there (DP-479,
+  the persona prompt).
 
 `codr_shell` runs unapproved too, in codr's workspace (DP-462): codr-vm is
 offline and is restored from a backup if a command wrecks it. It holds codr's
@@ -38,8 +45,10 @@ import posixpath
 import re
 import shlex
 import shutil
+import threading
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
 
 import aiohttp
 
@@ -49,9 +58,13 @@ from src.engine.providers.opencode import (
 )
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
+from src.stagr.codr_ticket import (
+    ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, render_task_md, ticket_id, ticket_number,
+)
 from src.stagr.net import BOXES, ZONES, SandboxNet
 
 if TYPE_CHECKING:
+    from src.memory.memory_manager import MemoryManager
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -70,6 +83,10 @@ _LONG = aiohttp.ClientTimeout(total=600)
 # `.opencode/` or `opencode.json`.
 _OPENCODE_CMD = re.compile(r"(?:^|[^\w.-])opencode(?=\s|$|[;&|)])")
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The highest ticket number handed out, kept in the queue folder so a ticket
+# deleted before its first attempt still keeps its number.
+HIGH_WATER_FILE = ".last-ticket-number"
+_QUEUE_LOCK = threading.Lock()
 
 
 class _Refused(Exception):
@@ -143,8 +160,11 @@ def _shell_result(out: str, seconds: int) -> Dict[str, Any]:
 
 
 class StagrToolHandler:
-    def __init__(self, runner: SSHRunner | None = None, net_runner: SSHRunner | None = None) -> None:
+    def __init__(self, runner: SSHRunner | None = None, net_runner: SSHRunner | None = None,
+                 memory_manager: "MemoryManager | None" = None) -> None:
         self._net = SandboxNet(runner, net_runner)
+        # The codr agent's attempt log: where a ticket ID was used before.
+        self._memory = memory_manager
 
     def register(self, manager: "ToolManager") -> None:
         manager.register("stagr_shell", self._stagr_shell)
@@ -156,7 +176,7 @@ class StagrToolHandler:
         manager.register("codr_shell", self._codr_shell)
         manager.register("copy_to_codr", self._copy_to_codr)
         manager.register("copy_from_codr", self._copy_from_codr)
-        manager.register("queue_codr_task", self._queue_codr_task)
+        manager.register("queue_codr_task", self._queue_codr_task, enricher=self._queue_preview)
 
     # -- clients ---------------------------------------------------------------
 
@@ -412,45 +432,125 @@ class StagrToolHandler:
         return {"status": "ok", "copied": f"codr {src} -> stagr {dst}", "bytes": len(archive),
                 "git": "kept" if keep else "any .git was left behind"}
 
-    # -- the codr task queue (DP-481) ------------------------------------------------
+    # -- the codr task queue (DP-481; tickets, DP-489) ---------------------------------
+
+    def _seen_tickets(self, queue: Path) -> Union[Tuple[int, Set[str]], Dict[str, Any]]:
+        """(the highest CD-NNN ever handed out, every ticket a depends_on may
+        name); or the error. Read from the queue folder (dot-folders being
+        staged and the high-water mark included) and from the codr agent's
+        attempt rows, so a ticket whose folder was deleted keeps its number."""
+        if self._memory is None:
+            return _error("the codr action log is not wired in, so a new ticket ID could repeat an old one.")
+        highest, names = 0, set()
+        mark = queue / HIGH_WATER_FILE
+        if mark.is_file():
+            try:
+                highest = int(mark.read_text(encoding="utf-8").strip() or 0)
+            except ValueError:
+                return _error(f"{mark} does not hold a number; fix or remove it.")
+        for entry in queue.iterdir() if queue.is_dir() else []:
+            if entry.is_dir() and not entry.name.startswith("."):
+                names.add(entry.name)
+            # `.CD-007.queue-1a2b3c4d` is CD-007 being staged.
+            highest = max(highest, ticket_number(entry.name.lstrip(".").split(".", 1)[0]) or 0)
+        prefix = attempt_context("")
+        for row in self._memory.get_agent_actions(CODR_AGENT_NAME, limit=100000, action_type=ATTEMPT_ACTION):
+            context = str(row.get("trigger_context") or "")
+            if context.startswith(prefix):
+                names.add(context[len(prefix):])
+                highest = max(highest, ticket_number(context[len(prefix):]) or 0)
+        return highest, names
 
     @staticmethod
-    def _task_text(task_md: str, check_sh: str, max_attempts: Any) -> Union[str, Dict[str, Any]]:
-        """TASK.md's content, with the `max_attempts:` first line if given; or the error."""
-        if not (task_md or "").strip() or not (check_sh or "").strip():
-            return _error("task_md and check_sh must both be non-empty.")
-        text = task_md.strip() + "\n"
-        if max_attempts is None:
-            return text
-        try:
-            attempts = int(max_attempts)
-        except (TypeError, ValueError):
-            return _error("max_attempts must be a whole number.")
-        return f"max_attempts: {attempts}\n{text}" if attempts >= 1 else _error("max_attempts must be at least 1.")
+    def _depends_on(value: Any) -> List[str]:
+        """The listed ticket IDs, in order, once each. Models send a list or a
+        comma-separated string."""
+        items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+        return list(dict.fromkeys(str(i).strip() for i in items if str(i).strip()))
 
-    async def _queue_codr_task(self, name: str, task_md: str, check_sh: str,
+    def _ticket(self, title: Any, project: Any, depends_on: Any, spec: Any, plan: Any, packages: Any,
+                check_sh: Any, max_attempts: Any) -> Union[Dict[str, Any], Tuple[str, List[str]]]:
+        """(TASK.md, depends_on) once every field checks out, or the error.
+        Whether depends_on names real tickets is checked when it is written."""
+        line = str(title or "").strip()
+        if not line or "\n" in line or "\r" in line:
+            return _error("title must be one non-empty line.")
+        name = str(project or "").strip()
+        if not PROJECT_RE.match(name):
+            return _error(f"project must be lowercase letters, digits and '-': {name!r}")
+        deps = self._depends_on(depends_on)
+        if bad := [d for d in deps if not TASK_NAME_RE.match(d)]:
+            return _error(f"depends_on must be ticket IDs such as CD-004: {bad}")
+        for field, value in (("spec", spec), ("plan", plan), ("packages", packages), ("check_sh", check_sh)):
+            if not str(value or "").strip():
+                return _error(f"{field} must not be empty (packages may say none).")
+        attempts: Optional[int] = None
+        if max_attempts is not None:
+            try:
+                attempts = int(max_attempts)
+            except (TypeError, ValueError):
+                return _error("max_attempts must be a whole number.")
+            if attempts < 1:
+                return _error("max_attempts must be at least 1.")
+        return render_task_md(title=line, project=name, depends_on=deps, max_attempts=attempts,
+                              spec=str(spec), plan=str(plan), packages=str(packages)), deps
+
+    async def _queue_preview(self, title: Any = None, project: Any = None, depends_on: Any = None,
+                             spec: Any = None, plan: Any = None, packages: Any = None, check_sh: Any = None,
+                             max_attempts: Any = None, **_: Any) -> Optional[str]:
+        """The approval prompt's enrichment: the ID the ticket would get now,
+        or why it would be refused. The prompt itself shows every field."""
+        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts)
+        if isinstance(ticket, dict):
+            return f"⚠️ will be refused: {ticket['message']}"
+        seen = self._seen_tickets(global_config.CODR_TASKS_DIR)
+        if isinstance(seen, dict):
+            return f"⚠️ will be refused: {seen['message']}"
+        if missing := [d for d in ticket[1] if d not in seen[1]]:
+            return f"⚠️ will be refused: depends_on names no known ticket: {', '.join(missing)}"
+        return f"new ticket {ticket_id(seen[0] + 1)}, project {str(project).strip()}"
+
+    async def _queue_codr_task(self, title: Any = None, project: Any = None, spec: Any = None, plan: Any = None,
+                               packages: Any = None, check_sh: Any = None, depends_on: Any = None,
                                max_attempts: Any = None) -> Dict[str, Any]:
-        """Runs only once the operator approved it: the prompt shows both files."""
-        name = (name or "").strip()
-        if not TASK_NAME_RE.match(name):
-            return _error(f"name must be letters, digits, '.', '_' or '-', not starting with '.' or '-': {name!r}")
-        text = self._task_text(task_md, check_sh, max_attempts)
-        if isinstance(text, dict):
-            return text
+        """Runs only once the operator approved it: the prompt shows every
+        field. DERPR picks the ID, so two tickets never share one."""
+        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts)
+        if isinstance(ticket, dict):
+            return ticket
+        text, deps = ticket
+        project = str(project).strip()
         queue = global_config.CODR_TASKS_DIR
-        dest = queue / name
-        staged = queue / f".queue-{uuid.uuid4().hex[:8]}"
-        try:
-            if dest.exists():
-                return _error(f"a task named {name} is already queued; a new name is a new task.")
-            staged.mkdir(parents=True)
-            (staged / "TASK.md").write_text(text, encoding="utf-8")
-            (staged / "check.sh").write_text(check_sh.rstrip() + "\n", encoding="utf-8")
-            staged.rename(dest)
-        except OSError as e:
-            return _error(f"could not queue {name}: {e}")
-        finally:
-            shutil.rmtree(staged, ignore_errors=True)
-        logger.info("stagr: queued codr task %s", name)
+        # Nothing below awaits, and the lock covers threads: one allocation at
+        # a time. The ID is in the staging folder's name, so it counts as taken
+        # until the rename, and a second mkdir of that name fails.
+        with _QUEUE_LOCK:
+            try:
+                queue.mkdir(parents=True, exist_ok=True)
+                seen = self._seen_tickets(queue)
+                if isinstance(seen, dict):
+                    return seen
+                highest, names = seen
+                if missing := [d for d in deps if d not in names]:
+                    return _error(f"depends_on names no queued or attempted ticket: {', '.join(missing)}")
+                name = ticket_id(highest + 1)
+                staged = queue / f".{name}.queue-{uuid.uuid4().hex[:8]}"
+                staged.mkdir()
+                try:
+                    (staged / "TASK.md").write_text(text, encoding="utf-8")
+                    (staged / "check.sh").write_text(str(check_sh).rstrip() + "\n", encoding="utf-8")
+                    if (queue / name).exists():
+                        return _error(f"{name} appeared while it was being queued; nothing was written. Try again.")
+                    # The mark goes first: a failed rename leaves a gap, never a reuse.
+                    tmp = queue / f"{HIGH_WATER_FILE}.tmp"
+                    tmp.write_text(f"{highest + 1}\n", encoding="utf-8")
+                    tmp.replace(queue / HIGH_WATER_FILE)
+                    staged.rename(queue / name)
+                finally:
+                    shutil.rmtree(staged, ignore_errors=True)
+            except OSError as e:
+                return _error(f"could not queue the ticket: {e}")
+        logger.info("stagr: queued codr ticket %s (project %s)", name, project)
         return {"status": "ok", "queued": name,
-                "note": f"codr starts it when it is idle; its files should be in tasks/{name}/ in codr's workspace."}
+                "note": f"Ticket {name}. DERPR starts it when codr is idle and every ticket in depends_on "
+                        f"has passed, in its own worktree of projects/{project}/."}

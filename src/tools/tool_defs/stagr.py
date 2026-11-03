@@ -7,7 +7,8 @@ reason (DP-462): codr's sandbox is offline and restorable, and the handler runs
 it only between codr's turns. Everything that crosses a boundary is
 ``is_write`` and parked for approval: turning a switch on, approving a host,
 copying files out of codr's sandbox, and queueing a codr task
-(``queue_codr_task``: the approval is where the operator sees the hidden check). ``sandbox_net_status`` and
+(``queue_codr_task``: the approval is the operator's approval of stagr's plan,
+and where they see the hidden check; DERPR allocates the ticket's ``CD-NNN``, DP-489). ``sandbox_net_status`` and
 ``set_sandbox_net`` are the portal panel's (the operator's click is the
 approval there); no persona is given them. ``copy_to_codr`` is not: ``codr_shell`` can already write
 any file there, so a gate on the copy would only be a convention.
@@ -212,7 +213,7 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
                     "source": {"type": "string", "description": "File or folder on stagr, relative to /home/agent/work."},
                     "dest": {
                         "type": "string",
-                        "description": "New path in codr's workspace, e.g. tasks/09-click-issue-2711 or tools/mcp-foo.",
+                        "description": "New path in codr's workspace, e.g. projects/click-cli or packages/click-cli.",
                     },
                     "keep_git": {"type": "boolean", "description": "Copy .git folders too. Default false."},
                 },
@@ -235,7 +236,7 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "source": {"type": "string", "description": "File or folder in codr's workspace, e.g. tasks/08-cron."},
+                    "source": {"type": "string", "description": "File or folder in codr's workspace, e.g. worktrees/CD-004 or a copy of codr's dpkg status."},
                     "dest": {"type": "string", "description": "New path on stagr, relative to /home/agent/work."},
                     "keep_git": {"type": "boolean", "description": "Copy .git folders too, e.g. to diff codr's commits. Default false."},
                 },
@@ -251,21 +252,40 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "queue_codr_task",
             "description": (
-                "Put a task in codr's queue. Needs Adam's approval. DERPR starts it when codr is "
-                "idle, in tasks/<name>/ of codr's workspace: copy the task's files there with "
-                "copy_to_codr first, under the same name. task_md is what codr reads; check_sh "
-                "is the hidden pass/fail check (exit 0 = pass), run in tasks/<name>/ after codr "
-                "says it is done. codr never sees it. Refused if a task of that name is queued."
+                "Queue a planned ticket for codr. Needs Adam's approval: the prompt shows every "
+                "field, so it is his approval of your plan. Prepare first: the project's repo in "
+                "projects/<project>/ if it comes from outside, and every package installed and "
+                "verified on codr's box. DERPR gives the ticket the next free ID (CD-NNN, named in "
+                "the result) and starts it when codr is idle and its dependencies have passed, in "
+                "a git worktree of projects/<project>/. spec, plan and packages are what codr "
+                "reads; check_sh is the hidden pass/fail check, run in that worktree after codr "
+                "says it is done. codr never sees it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "The task's name, e.g. 09-click-issue-2711. Same as its folder in tasks/."},
-                    "task_md": {"type": "string", "description": "The task for codr, in markdown."},
+                    "title": {"type": "string", "description": "One line naming the work."},
+                    "project": {
+                        "type": "string",
+                        "description": "codr's project: lowercase letters, digits and '-', e.g. click-cli. "
+                                       "New or existing.",
+                    },
+                    "depends_on": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "IDs of queued tickets this one builds on, e.g. [\"CD-004\"]. It waits "
+                                       "until they have passed.",
+                    },
+                    "spec": {"type": "string", "description": "What to build, in markdown."},
+                    "plan": {"type": "string", "description": "The approach, the files likely touched, the risks."},
+                    "packages": {
+                        "type": "string",
+                        "description": "Every package the work needs and that it is installed on codr's box; "
+                                       "or none.",
+                    },
                     "check_sh": {"type": "string", "description": "The bash check. Exit code 0 means pass."},
                     "max_attempts": {"type": "integer", "description": "Attempts before it counts as failed. Default 3."},
                 },
-                "required": ["name", "task_md", "check_sh"],
+                "required": ["title", "project", "spec", "plan", "packages", "check_sh"],
             },
         },
     },
