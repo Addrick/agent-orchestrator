@@ -1,4 +1,8 @@
-This continues task `03-notes-api`. Copy `../03-notes-api/app.py` and `../03-notes-api/test_app.py` into this folder and extend them here; leave the task-03 folder as it is. Same rules as before: Python 3's standard library only, nothing can be installed.
+title: notes accounts and migrations
+project: notes
+depends_on: 03-notes-api
+
+This continues ticket `03-notes-api` in the same project. Its `app.py` and `test_app.py` are already in your worktree, merged into the project's main; extend them. Same rules as before: Python 3's standard library only, nothing can be installed.
 
 Add user accounts and schema migrations. Everything task 03 asked for still holds, except that the notes endpoints now need a login.
 

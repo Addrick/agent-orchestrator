@@ -5,6 +5,7 @@
 # turn by adding messages, the way opencode records them.
 
 import json
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -104,13 +105,19 @@ def _agent(tmp_path, **cfg):
     return agent, router
 
 
-def _shell(check_passes=True):
+def _shell(check_passes=True, merge="__DERPR_MAIN=main\n__DERPR_MERGED=abc1234\n"):
+    """Each workspace script's success marker, standing in for codr's box."""
     def run(script):
         if "DERPR_EOF_0" in script:
             return "__DERPR_CHANGED=0\n"
         if "__DERPR_EXIT=" in script:
             return ("PASS\n__DERPR_EXIT=0\n" if check_passes
                     else "FAIL: csvstats.py missing\n__DERPR_EXIT=1\n")
+        if "__DERPR_MERGED=" in script:
+            return merge
+        for mark in ("__DERPR_TICKET_READY", "__DERPR_MEMORY_READY", "__DERPR_NOTED", "__DERPR_WRITTEN"):
+            if f"echo {mark}" in script:
+                return mark + "\n"
         return ""
     return run
 
@@ -150,7 +157,7 @@ def test_load_tasks_reads_the_attempts_header_and_seed(tmp_path):
 
 def test_check_script_keeps_stdin_away_from_the_check(tmp_path):
     # DP-463: a command that reads stdin must not swallow the rest of the check.
-    (tmp_path / "tasks" / "t").mkdir(parents=True)
+    (tmp_path / "worktrees" / "t").mkdir(parents=True)
     task = codr_agent.CodrTask(id="t", text="", check="cat\necho after\nexit 3", max_attempts=1)
     out = real_bash(tmp_path)(codr_agent.check_script(task, 30))
     assert parse_check(out) == (False, "after\n")
@@ -182,7 +189,15 @@ def test_workspace_files_stop_the_offline_npm_install():
     config = json.loads(files[".opencode/opencode.json"])
     assert config["provider"]["kcpp-pool"]["options"]["baseURL"] == codr_agent.DEFAULTS["pool_url"]
     assert "model: kcpp-pool/local" in files[".opencode/agent/pool.md"]
-    assert "mkdir -p .opencode/tool .opencode/agent .opencode/node_modules" in sync_script(files)
+    assert "mkdir -p .opencode .opencode/agent .opencode/node_modules .opencode/tool" in sync_script(files)
+
+
+def test_workspace_files_carry_the_shipped_agents_md():
+    """DP-488: codr's rules ship with DERPR and sync like `.opencode/`."""
+    files = workspace_files({**codr_agent.DEFAULTS})
+    assert files["AGENTS.md"] == codr_agent.AGENTS_MD.read_text(encoding="utf-8")
+    for rule in ("worktrees/<ticket>/", "notify_adam", "memory/MEMORY.md", "staging files by path"):
+        assert rule in files["AGENTS.md"]
 
 
 @pytest.mark.parametrize("mcp, error", [
@@ -227,22 +242,48 @@ async def test_an_mcp_change_rewrites_the_config_and_reloads_codr(fake, tmp_path
     assert [c for c in fake.calls if c[1] == "/instance/dispose"]
 
 
+async def test_a_changed_agents_md_is_rewritten_and_reloads_codr(fake, tmp_path, monkeypatch):
+    """AGENTS.md is a managed file like `.opencode/`: a new text on DERPR's
+    side replaces codr's copy and reloads the opencode instance."""
+    fake.shell_output = real_bash(tmp_path)
+    agent, _ = _agent(tmp_path, start_tasks=False)
+    await agent.deploy()
+    await agent.deploy()
+    assert (tmp_path / "AGENTS.md").read_text() == codr_agent.AGENTS_MD.read_text(encoding="utf-8")
+    fake.calls.clear()
+    rules = tmp_path / "rules.md"
+    rules.write_text("# new rules\n")
+    monkeypatch.setattr(codr_agent, "AGENTS_MD", rules)
+    agent, _ = _agent(tmp_path, start_tasks=False)
+    await agent.deploy()
+    assert (tmp_path / "AGENTS.md").read_text() == "# new rules\n"
+    assert [c for c in fake.calls if c[1] == "/instance/dispose"]
+
+
+async def _prepare(task, work):
+    from aiohttp import ClientSession
+    async with ClientSession(headers=opencode.auth_headers()) as http:
+        await codr_agent.prepare_ticket(opencode.OpencodeClient(http, f"{ROOT}/codr"), task)
+
+
 async def test_a_seed_of_any_size_arrives_and_keeps_what_codr_changed(fake, tmp_path):
     """DP-455: a seed bigger than one shell command's argument cap still
     arrives whole, and files codr already edited are left alone."""
-    from aiohttp import ClientSession
     seed = {f"pkg/mod{i}.py": "x = 1  # " + "y" * 20_000 + "\n" for i in range(10)}
     _task(tmp_path, "09-big", seed=seed)
     (task,) = load_tasks(tmp_path, 3)
     work = tmp_path / "work"
-    (work / "tasks/09-big/pkg").mkdir(parents=True)
-    (work / "tasks/09-big/pkg/mod0.py").write_text("edited by codr\n")
+    work.mkdir()
     fake.shell_output = real_bash(work)
-    async with ClientSession(headers=opencode.auth_headers()) as http:
-        await codr_agent.seed_task(opencode.OpencodeClient(http, f"{ROOT}/codr"), task)
-    assert (work / "tasks/09-big/pkg/mod0.py").read_text() == "edited by codr\n"
-    assert (work / "tasks/09-big/pkg/mod9.py").read_text() == seed["pkg/mod9.py"]
-    assert [p.name for p in work.iterdir()] == ["tasks"]      # staged archive removed
+    await _prepare(task, work)
+    wt = work / "worktrees/09-big"
+    (wt / "pkg/mod0.py").write_text("edited by codr\n")
+    (wt / "pkg/mod1.py").unlink()
+    await _prepare(task, work)                                 # the retry
+    assert (wt / "pkg/mod0.py").read_text() == "edited by codr\n"
+    assert (wt / "pkg/mod1.py").read_text() == seed["pkg/mod1.py"]   # missing: seeded again
+    assert (wt / "pkg/mod9.py").read_text() == seed["pkg/mod9.py"]
+    assert sorted(p.name for p in work.iterdir()) == ["memory", "projects", "worktrees"]   # staging removed
 
 
 # --- ticks ---------------------------------------------------------------------
@@ -258,11 +299,14 @@ async def test_first_tick_sets_up_the_workspace_and_starts_the_oldest_task(fake,
     assert fake.sessions[sid]["directory"] == f"{ROOT}/codr"
     scripts = [s for _, s in fake.scripts]
     assert any("DERPR_EOF_0" in s for s in scripts)            # .opencode/ synced
-    assert "mkdir -p -- 'tasks/01-a'" in scripts[-1]           # task folder seeded
+    assert any("echo __DERPR_MEMORY_READY" in s for s in scripts)   # memory/ skeleton
+    assert "worktree add -q -b ticket/01-a" in scripts[-1]      # worktree cut
     (start,) = _auto_messages(fake, sid)
     part = start["parts"][0]
     assert part["metadata"][AUTO]["task"] == "01-a" and part["metadata"][AUTO]["attempt"] == 1
-    assert "Build csvstats." in part["text"] and "tasks/01-a/attempts.md" in part["text"]
+    assert "Build csvstats." in part["text"] and "memory/tickets/01-a.md" in part["text"]
+    assert "worktrees/01-a/" in part["text"] and "AGENTS.md" in part["text"]
+    assert "attempts.md" not in part["text"]
     post = next(c for c in fake.calls if c[1].endswith("/prompt_async"))
     assert post[3]["system"] == "You are codr."
 
@@ -535,7 +579,7 @@ async def test_start_tasks_false_only_watches(fake, tmp_path):
 
 
 async def test_changed_workspace_config_reloads_the_instance_when_idle(fake, tmp_path):
-    fake.shell_output = lambda s: "__DERPR_CHANGED=1\n" if "DERPR_EOF_0" in s else ""
+    fake.shell_output = lambda s: "__DERPR_CHANGED=1\n" if "DERPR_EOF_0" in s else _shell()(s)
     agent, _ = _agent(tmp_path)
     await agent.deploy()
     disposes = [c for c in fake.calls if c[1] == "/instance/dispose"]
@@ -548,3 +592,285 @@ async def test_a_failed_workspace_sync_raises(fake, tmp_path, bad):
     agent, _ = _agent(tmp_path)
     with pytest.raises(RuntimeError, match="workspace setup failed"):
         await agent.deploy()
+
+
+# --- DP-488: ticket header, queue order --------------------------------------
+
+
+def test_a_ticket_header_is_parsed_and_hidden_from_codr(tmp_path):
+    _task(tmp_path, "CD-007", text="title: notes auth\nproject: notes\ndepends_on: CD-005, CD-006\n"
+                                   "max_attempts: 4\n\n## Spec\nAdd logins.")
+    (task,) = load_tasks(tmp_path, 3)
+    assert (task.title, task.project, task.depends_on, task.max_attempts) == (
+        "notes auth", "notes", ("CD-005", "CD-006"), 4)
+    assert task.text == "## Spec\nAdd logins."
+    assert (task.project_dir, task.worktree, task.branch) == ("projects/notes", "worktrees/CD-007", "ticket/CD-007")
+
+
+def test_a_ticket_without_a_header_is_its_own_project(tmp_path):
+    _task(tmp_path, "CD-001", text="Note: this first line is text, not a header.\nBuild it.")
+    (task,) = load_tasks(tmp_path, 3)
+    assert task.text.startswith("Note: this first line")
+    assert (task.project, task.project_name, task.depends_on) == ("", "cd-001", ())
+
+
+@pytest.mark.parametrize("text, error", [
+    ("priority: high\n\nBuild it.", "unknown header key(s): priority"),
+    ("project: Notes_App\n\nBuild it.", "project name 'Notes_App'"),
+    ("max_attempts: 0\n\nBuild it.", "`max_attempts:` must be"),
+    ("title: a\ntitle: b\n\nBuild it.", "appears twice"),
+    ("depends_on: t\n\nBuild it.", "cannot depend on itself"),
+])
+def test_a_bad_header_skips_the_ticket_with_the_reason(tmp_path, text, error):
+    _task(tmp_path, "t", text=text)
+    tasks, errors = codr_agent.load_tickets(tmp_path, 3)
+    assert tasks == [] and error in errors["t"]
+
+
+def test_a_folder_name_that_cannot_be_a_branch_is_skipped(tmp_path):
+    _task(tmp_path, "a..b")
+    assert "git branch name" in codr_agent.load_tickets(tmp_path, 3)[1]["a..b"]
+
+
+def _states(deps, outcomes, attempts=2):
+    tasks = [codr_agent.CodrTask(t, "", "", attempts, depends_on=d) for t, d in deps.items()]
+    return {t: s[0] for t, s in codr_agent.queue_states(tasks, outcomes).items()}
+
+
+def test_queue_states_follow_the_dependencies():
+    deps = {"a": (), "b": ("a",), "c": ("b",), "d": ("x",), "e": ("f",), "f": ("e",)}
+    assert _states(deps, {}) == {"a": "open", "b": "waiting", "c": "waiting", "d": "held",
+                                 "e": "blocked", "f": "blocked"}
+    assert _states(deps, {"a": ["fail", "pass"]})["b"] == "open"
+    failed = _states(deps, {"a": ["fail", "aborted"]})
+    assert (failed["a"], failed["b"], failed["c"]) == ("failed", "blocked", "blocked")
+
+
+def _started(fake, sid):
+    return [m["parts"][0]["metadata"][AUTO]["task"] for m in _auto_messages(fake, sid)]
+
+
+async def test_a_bad_header_is_posted_once_and_the_queue_moves_on(fake, tmp_path):
+    _task(tmp_path, "01-a", text="priority: high\n\nBuild it.")
+    _task(tmp_path, "02-b")
+    fake.shell_output = _shell(check_passes=False)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    assert _started(fake, sid) == ["02-b"]
+    _reply(fake, sid)
+    await agent.deploy()                                       # 02-b fails, its result is posted
+    await agent.deploy()                                       # 02-b attempt 2 starts
+    notices = [b for _, _, b in router.sent if "01-a" in b]
+    assert notices == ["codr ticket `01-a`: skipped: unknown header key(s): priority "
+                       "(known: title, project, depends_on, max_attempts)"]
+
+
+async def test_a_ticket_whose_dependency_failed_is_blocked_posted_once_and_never_started(fake, tmp_path):
+    _task(tmp_path, "01-a", text="max_attempts: 1\nBuild it.")
+    _task(tmp_path, "02-b", text="depends_on: 01-a\n\nBuild on it.")
+    _task(tmp_path, "03-c")
+    fake.shell_output = _shell(check_passes=False)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()                                       # starts 01-a
+    sid = _session(fake)
+    _reply(fake, sid)
+    await agent.deploy()                                       # 01-a fails for good
+    await agent.deploy()                                       # 02-b blocked; 03-c starts
+    await agent.deploy()
+    assert _started(fake, sid) == ["01-a", "03-c"]
+    assert [b for _, _, b in router.sent if "02-b" in b] == [
+        "codr ticket `02-b`: blocked: it depends on `01-a`, which failed for good"]
+
+
+async def test_a_dependent_ticket_starts_only_after_its_dependency_passed(fake, tmp_path):
+    _task(tmp_path, "01-b", text="depends_on: 02-a\n\nBuild on it.")
+    _task(tmp_path, "02-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    assert _started(fake, sid) == ["02-a"]
+    _reply(fake, sid)
+    await agent.deploy()                                       # 02-a passes and merges
+    assert "merged into `02-a` main" in router.sent[-1][2]
+    await agent.deploy()
+    assert _started(fake, sid) == ["02-a", "01-b"]
+
+
+async def test_a_merge_conflict_fails_the_attempt_and_the_retry_says_to_merge_main(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(merge="__DERPR_MAIN=main\n__DERPR_CONFLICT\napp.py\ntest_app.py\n")
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    _reply(fake, sid)
+    await agent.deploy()                                       # check passes, merge conflicts
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    detail = json.loads(row["outcome_payload"])
+    assert row["outcome"] == "fail" and detail["merge_conflict"] is True
+    assert detail["check_tail"] == "merging into `main` conflicted in:\napp.py\ntest_app.py"
+    notes = [s for _, s in fake.scripts if "__DERPR_NOTED" in s]
+    assert "- attempt 1: fail: merging into `main` conflicted in:" in notes[-1]
+    await agent.deploy()                                       # the retry
+    retry = _auto_messages(fake, sid)[1]["parts"][0]["text"]
+    assert "Merge `main` into your branch in `worktrees/01-a/`" in retry and "test_app.py" in retry
+
+
+async def test_a_pass_notes_the_merge_commit_in_the_ticket_file(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    _reply(fake, _session(fake))
+    await agent.deploy()
+    (note,) = [s for _, s in fake.scripts if "__DERPR_NOTED" in s]
+    assert "- attempt 1: pass, merged into `main` as abc1234" in note
+    assert "memory/tickets/01-a.md" in note
+
+
+# --- DP-488: the scripts against a real bash and git ---------------------------
+
+
+def _git(cwd, *args):
+    done = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    return done.stdout.strip()
+
+
+def _commit_all(cwd, message):
+    _git(cwd, "add", "-A")
+    _git(cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", message)
+
+
+def _run(work, script):
+    return real_bash(work)(script)
+
+
+async def test_a_ticket_gets_a_project_a_worktree_and_a_memory_record(fake, tmp_path):
+    _task(tmp_path / "q", "01-a", text="title: first\nproject: notes\n\nBuild app.py.", seed={"README": "seed\n"})
+    (task,) = load_tasks(tmp_path / "q", 3)
+    work = tmp_path / "work"
+    work.mkdir()
+    fake.shell_output = real_bash(work)
+    await _prepare(task, work)
+    proj, wt = work / "projects/notes", work / "worktrees/01-a"
+    assert _git(proj, "symbolic-ref", "--short", "HEAD") == "main"
+    assert _git(proj, "log", "--format=%s") == "DERPR: start notes"
+    assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "ticket/01-a"
+    assert (wt / "README").read_text() == "seed\n"
+    record = (work / "memory/tickets/01-a.md").read_text()
+    assert record.startswith("# 01-a: first\n") and "Build app.py." in record
+    assert "title:" not in record                              # the header stays hidden
+    assert _git(work / "memory", "status", "--porcelain") == ""        # all committed
+
+    # Check -> merge: leftovers committed, merged with a merge commit, worktree gone, branch kept.
+    (wt / "app.py").write_text("print('hi')\n")
+    check = codr_agent.CodrTask("01-a", "", "test -f app.py && echo in-the-worktree", 1, project="notes")
+    assert parse_check(_run(work, codr_agent.check_script(check, 30))) == (True, "in-the-worktree\n")
+    merged, main, problem = codr_agent.parse_merge(_run(work, codr_agent.merge_script(task)))
+    assert (main, problem) == ("main", "") and merged
+    assert (proj / "app.py").read_text() == "print('hi')\n"
+    assert _git(proj, "log", "-1", "--format=%s") == "01-a: merge ticket/01-a"
+    assert len(_git(proj, "log", "-1", "--format=%p").split()) == 2          # a merge commit
+    assert "01-a: uncommitted at check pass" in _git(proj, "log", "--format=%s")
+    assert not wt.exists() and _git(proj, "branch", "--list", "ticket/01-a")
+
+    # A ticket depending on it is cut from the new main.
+    _task(tmp_path / "q", "02-b", text="project: notes\ndepends_on: 01-a\n\nExtend it.")
+    task2 = next(t for t in load_tasks(tmp_path / "q", 3) if t.id == "02-b")
+    await _prepare(task2, work)
+    assert (work / "worktrees/02-b/app.py").read_text() == "print('hi')\n"
+
+    out = _run(work, codr_agent.ticket_note_script("01-a", "- attempt 1: pass, merged into `main` as x"))
+    assert "__DERPR_NOTED" in out
+    assert (work / "memory/tickets/01-a.md").read_text().endswith("- attempt 1: pass, merged into `main` as x\n")
+    assert _git(work / "memory", "status", "--porcelain") == ""
+
+
+async def test_a_conflicting_merge_is_aborted_and_the_worktree_stays(fake, tmp_path):
+    _task(tmp_path / "q", "01-a", text="project: p\n\nx")
+    (task,) = load_tasks(tmp_path / "q", 3)
+    work = tmp_path / "work"
+    work.mkdir()
+    fake.shell_output = real_bash(work)
+    await _prepare(task, work)
+    proj, wt = work / "projects/p", work / "worktrees/01-a"
+    (proj / "app.py").write_text("main side\n")
+    _commit_all(proj, "main moved on")
+    (wt / "app.py").write_text("ticket side\n")
+    merged, main, problem = codr_agent.parse_merge(_run(work, codr_agent.merge_script(task)))
+    assert merged is None and problem == "merging into `main` conflicted in:\napp.py"
+    assert wt.is_dir() and (proj / "app.py").read_text() == "main side\n"
+    assert _git(proj, "status", "--porcelain") == ""           # merge aborted, main clean
+
+
+async def test_an_existing_repo_keeps_its_branch_and_old_task_files_move_in(fake, tmp_path):
+    _task(tmp_path / "q", "04-x", text="project: shop\n\nx", seed={"a.py": "seed a\n", "b.py": "seed b\n"})
+    (task,) = load_tasks(tmp_path / "q", 3)
+    work = tmp_path / "work"
+    proj = work / "projects/shop"
+    proj.mkdir(parents=True)
+    _git(proj, "init", "-q", "-b", "master")
+    (proj / "lib.py").write_text("lib\n")
+    _commit_all(proj, "imported")
+    (work / "tasks/04-x").mkdir(parents=True)                  # pre-DP-488 layout, in flight
+    (work / "tasks/04-x/a.py").write_text("codr's work\n")
+    fake.shell_output = real_bash(work)
+    await _prepare(task, work)
+    wt = work / "worktrees/04-x"
+    assert _git(proj, "log", "--format=%s") == "imported"      # no DERPR commit in a repo with history
+    assert (wt / "lib.py").read_text() == "lib\n"
+    assert (wt / "a.py").read_text() == "codr's work\n"       # old work wins over the seed
+    assert (wt / "b.py").read_text() == "seed b\n"
+    merged, main, _ = codr_agent.parse_merge(_run(work, codr_agent.merge_script(task)))
+    assert main == "master" and merged
+
+
+def test_the_memory_skeleton_never_touches_codrs_notes(tmp_path):
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory/MEMORY.md").write_text("codr's index\n")
+    assert "__DERPR_MEMORY_READY" in _run(tmp_path, codr_agent.memory_skeleton_script())
+    assert (tmp_path / "memory/MEMORY.md").read_text() == "codr's index\n"
+    assert (tmp_path / "memory/tickets/_overview.md").is_file()
+    assert _git(tmp_path / "memory", "log", "--format=%s").splitlines() == [
+        "DERPR: add projects/_overview.md", "DERPR: add tickets/_overview.md"]
+    assert _git(tmp_path / "memory", "status", "--porcelain") == "?? MEMORY.md"   # codr's, left to codr
+    _run(tmp_path, codr_agent.memory_skeleton_script())       # idempotent
+    assert len(_git(tmp_path / "memory", "log", "--format=%s").splitlines()) == 2
+
+
+def test_the_shipped_battery_loads_and_04_builds_on_03():
+    tasks, errors = codr_agent.load_tickets(codr_agent.global_config.CONFIG_DIR / "codr_tasks", 3)
+    assert errors == {}
+    by_id = {t.id: t for t in tasks}
+    assert by_id["04-notes-auth"].depends_on == ("03-notes-api",)
+    assert by_id["03-notes-api"].project_name == by_id["04-notes-auth"].project_name == "notes"
+    assert "ticket/03-notes-api" in by_id["04-notes-auth"].check
+
+
+async def test_a_ticket_that_cannot_be_prepared_is_posted_once_and_not_started(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    ok = _shell()
+    fake.shell_output = lambda s: "projects/01-a exists but is not a git repo\n" if "TICKET_READY" in s else ok(s)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    await agent.deploy()
+    assert not _auto_messages(fake, _session(fake))
+    assert [b for _, _, b in router.sent] == [
+        "codr ticket `01-a`: could not start: codr: preparing ticket 01-a failed: "
+        "projects/01-a exists but is not a git repo\n"]
+
+
+def test_the_reader_round_trips_what_stagr_writes(tmp_path):
+    """DP-489 writes TASK.md with `codr_ticket.render_task_md`; this side parses it."""
+    from src.stagr.codr_ticket import render_task_md
+    text = render_task_md(title="notes auth", project="notes", depends_on=["CD-001", "CD-002"], max_attempts=4,
+                          spec="Add logins.", plan="Extend app.py.", packages="none")
+    _task(tmp_path, "CD-003", text=text)
+    (tmp_path / ".last-ticket-number").write_text("3\n")        # stagr's high-water mark: not a ticket
+    tasks, errors = codr_agent.load_tickets(tmp_path, 3)
+    assert errors == {}
+    (task,) = tasks
+    assert (task.title, task.project, task.depends_on, task.max_attempts) == (
+        "notes auth", "notes", ("CD-001", "CD-002"), 4)
+    assert task.text == "## Spec\n\nAdd logins.\n\n## Plan\n\nExtend app.py.\n\n## Packages\n\nnone"
