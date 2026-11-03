@@ -61,6 +61,11 @@ _EXIT_MARK = "__DERPR_EXIT="
 _CHANGED_MARK = "__DERPR_CHANGED="
 _SEEDED_MARK = "__DERPR_SEEDED"
 
+# The router holds a request until its box is free and sends no headers meanwhile (DP-490).
+# opencode aborts a request whose headers take longer than `headerTimeout` (default 5 min)
+# and resends it at the back of the queue, so a few queued codr/stagr turns would cycle.
+_POOL_HEADER_TIMEOUT_MS = 30 * 60 * 1000
+
 DEFAULTS: Dict[str, Any] = {
     "persona": "codr",
     "max_attempts": 3,
@@ -229,7 +234,7 @@ def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:
         "provider": {"kcpp-pool": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "Inference router (any free local server)",
-            "options": {"baseURL": cfg["pool_url"]},
+            "options": {"baseURL": cfg["pool_url"], "headerTimeout": _POOL_HEADER_TIMEOUT_MS},
             "models": {"local": {"name": "the model the router is serving",
                                  "limit": {"context": int(cfg["pool_context"]), "output": 16384}}},
         }},

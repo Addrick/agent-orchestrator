@@ -35,7 +35,11 @@ conversation may re-read once.
 
 A request is held in the router until its chosen box is free, oldest first, because once sent it is
 stuck in that box's queue even if the other frees up (seen live: 208 s behind the R9700 with dt21 idle).
-A client that leaves while held never reaches a box. Only generation paths (`GENERATION_PATHS`) are held
+A client that leaves while held never reaches a box. **A held request gets no headers until its box
+takes it**, and opencode gives up on headers after 5 min by default and resends at the back of the
+queue, so opencode clients set the provider's `headerTimeout` to 30 min (codr's `workspace_files()`,
+VM200's `~/.config/opencode/opencode.json`; DP-490). Once a box answers, Strata sends `: keep-alive`
+every ~3 s during prefill, so opencode's 5 min `chunkTimeout` is not at risk. Only generation paths (`GENERATION_PATHS`) are held
 or counted; other calls go straight to the first healthy box.
 
 Each box is polled every 3 s: `/v1/models` (up, model, context, loaded) and `/metrics` (busy with work
