@@ -684,24 +684,39 @@ going while it waits for your answer. The agent is off by default
 (`auto_start: false` in `agents.json`); start it with `manage_agent` or set
 `auto_start`.
 
-**The task queue.** Each task is a folder under `data/codr_tasks/<task>/` (DP-481:
-in the instance's data folder, `/data/codr_tasks/` in the container, so adding or
-removing a task needs no deploy). The setup agent adds tasks with
-`queue_codr_task`, which waits for your approval; you can also create the folder
-by hand:
+**The task queue.** Each task (a **ticket**) is a folder under
+`data/codr_tasks/<ticket>/` (DP-481: in the instance's data folder,
+`/data/codr_tasks/` in the container, so adding or removing a ticket needs no
+deploy). The folder's name is the ticket's ID; it also names the ticket's worktree
+and branch, so it may hold only letters, digits, `.`, `_` and `-`. The setup agent
+adds tickets with `queue_codr_task`, which waits for your approval; you can also
+create the folder by hand:
 
-- `TASK.md`: what to build, written for codr. An optional first line
-  `max_attempts: N` overrides the default.
-- `check.sh`: how DERPR decides pass or fail. It is a shell script run in codr's
-  workspace folder for that task; exit code 0 means pass. **codr never sees the
-  check**: DERPR keeps it and only runs it after codr says it is done, so codr can't
-  edit it to pass. The folder is codr's to write, so a check's own Python should run
-  as `python3 -I` and refuse files that shadow standard-library modules (the shipped
+- `TASK.md`: what to build, written for codr. It may open with a **header** of
+  `key: value` lines, ended by the first blank line (DP-488). codr never sees the
+  header:
+  - `title:` one line, used in codr's note on the ticket and its prompt.
+  - `project:` lowercase letters, digits and `-`. If missing, the ticket is its own
+    project, named after the folder (in lower case).
+  - `depends_on:` comma-separated ticket IDs. The ticket waits until all of them have
+    passed (below).
+  - `max_attempts:` overrides the default.
+
+  Any other key is an error: DERPR logs it, posts it once to codr's channel, and
+  skips the ticket rather than guess. A bad `project:` or `max_attempts:` value, or a
+  folder name that can't be a branch name, is skipped the same way. A file whose
+  first line is not `key: value` has no header, so old tasks keep working, and so
+  does the older form, a `max_attempts: N` first line with the text right under it.
+- `check.sh`: how DERPR decides pass or fail. It is a shell script run in the
+  ticket's worktree (below); exit code 0 means pass. **codr never sees the check**:
+  DERPR keeps it and only runs it after codr says it is done, so codr can't edit it
+  to pass. The worktree is codr's to write, so a check's own Python should run as
+  `python3 -I` and refuse files that shadow standard-library modules (the shipped
   checks do both). Otherwise a planted `hashlib.py` or `unittest.py` could fake a pass.
 - `seed/` (optional): starting files, e.g. a small repo with a bug in it. Before
-  each attempt DERPR copies any of them that are missing into the task folder, so
-  what codr changed stays. A seed can be any size (DP-455): DERPR packs it into one
-  archive and sends it in pieces, so a whole repo fits. Before DP-455 everything
+  each attempt DERPR copies any of them that are missing into the ticket's worktree,
+  so what codr changed stays. A seed can be any size (DP-455): DERPR packs it into
+  one archive and sends it in pieces, so a whole repo fits. Before DP-455 everything
   over about 90 KB in total failed to arrive.
 
 The shipped tasks in `config/codr_tasks/` are a test battery, not the queue: to
@@ -711,25 +726,68 @@ migration), 05 has a deliberately ambiguous spec, 06 is a long build (a static s
 generator), 07 asks for a package the sandbox doesn't have, and 08 is a library
 built from a spec alone and graded by a hidden suite. 08's check shows only how many
 cases in each group passed, never which ones, so a retry can't fit the tests.
+03 and 04 share the project `notes`, and 04 has `depends_on: 03-notes-api`, so 04
+starts from 03's merged app (copy both folders to run 04).
 
-When codr is idle, the agent starts the oldest task that has neither passed nor run
-out of attempts. codr gets the task text, its own folder `tasks/<task>/` in the
-workspace, and the instruction to keep an attempts log at
-`tasks/<task>/attempts.md`. When the turn ends, DERPR runs the check:
+When codr is idle, the agent starts the oldest ticket (by folder name, numbers
+compared as numbers, so CD-1000 comes after CD-999) that has neither passed nor run
+out of attempts and whose `depends_on` tickets have all passed. A dependency that
+passed still counts after its folder is removed. If one of those failed for good (no
+pass, no attempts left), the ticket is **blocked**: DERPR posts that once and never
+starts it. A ticket that depends on one that is not in the queue and never passed
+waits, and DERPR posts that once too. A ticket whose project cannot be prepared (say,
+`projects/<project>/` is not a git repo) is posted once and skipped until fixed; the
+next ticket starts in its place. codr gets the ticket
+text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below). When
+the turn ends, DERPR runs the check in the worktree:
 
-- **pass**: the task is done, and a one-line result (task, attempt, PASS/FAIL, run time)
-  is posted to codr's channel;
+- **pass**: DERPR merges the ticket's branch into the project's main (below), and a
+  one-line result (ticket, attempt, PASS/FAIL, run time, where it merged) is posted
+  to codr's channel;
 - **fail**: if attempts remain, the next tick starts a new attempt with the check's
-  output (its last 2,500 characters); if not, the task is marked failed and the
+  output (its last 2,500 characters); if not, the ticket is marked failed and the
   result is posted.
 
-Every attempt is recorded in the agent action log (task, attempt, outcome, run
-time, and codr's final reply). Results stay there, so a restart or deploy resumes the queue where it was.
-To rerun a task, rename its folder: a new name is a new task. To take a task out
+Every attempt is recorded in the agent action log (ticket, attempt, outcome, run
+time, and codr's final reply), and as one line in codr's notes file for the ticket.
+Results stay there, so a restart or deploy resumes the queue where it was.
+To rerun a ticket, rename its folder: a new name is a new ticket. To take a ticket out
 of the queue, delete its folder; if it is running, also abort codr's turn (opencode
 web UI, or `POST /session/<id>/abort`), and the next tick records the attempt as
 `aborted`. In that order: aborting first only ends the turn, so the check runs and
 the next attempt starts.
+
+**codr's workspace: projects and worktrees (DP-488).**
+
+```
+AGENTS.md              rules codr follows, written by DERPR (like .opencode/)
+memory/                codr's notes, its own git repo (below)
+projects/<project>/    one git repo per project; its main branch holds finished work
+worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from main
+```
+
+- **Projects.** The first ticket for a project creates `projects/<project>/` as a git
+  repo whose first commit on `main` is a `.gitignore` for caches, virtualenvs, build
+  output and databases (a pass commits whatever codr left in the worktree, so these
+  must be ignored from the start). If a repo is already there (for example
+  one stagr copied in with `copy_to_codr` and `keep_git`), DERPR uses it as it is,
+  and that repo's checked-out branch counts as its main. A folder there that is not a
+  git repo is left alone, and the ticket's attempt fails to start.
+- **Worktrees.** Before the first attempt, DERPR cuts `worktrees/<ticket>/` (branch
+  `ticket/<ticket>`) from the project's main and copies in any `seed/` files that are
+  missing. A retry reuses the same worktree, so codr's work carries over. codr works
+  only in its worktree and commits there, staging files by path. The box is offline,
+  so there is no remote, no fetch and no push. A ticket that was running before
+  DP-488, in the old `tasks/<ticket>/` folder, keeps its work: when its worktree is
+  first made, the old folder's files are copied in (where the worktree has none of
+  that name).
+- **Merge on pass.** When the check passes, DERPR commits anything codr left
+  uncommitted (as `<ticket>: uncommitted at check pass`), merges the branch into the
+  project's main with a merge commit, removes the worktree and keeps the branch. A
+  ticket that depends on this one is cut from the new main. If the merge
+  **conflicts**, DERPR aborts it and records the attempt as `fail` with the
+  conflicting files as the check output. The worktree stays, and the next attempt
+  asks codr to merge main into its branch and resolve the conflict.
 
 **codr can message you.** codr has a `notify_adam` tool in every turn. While the
 agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
@@ -772,10 +830,46 @@ its subagents all go through the `:5001` router (see "More than one server behin
 whenever a second server is free. With only the R9700 up they take turns.
 
 **Setup DERPR does in the workspace.** On the agent's first tick it writes
-`.opencode/` into codr's workspace: the `notify_adam` tool, the `pool` subagent
-and its provider, plus any `mcp` servers configured below. Edits to those files are
-overwritten on the next start, so an MCP server is added in `agents.json`, not by
-editing `opencode.json` in the workspace.
+`.opencode/` and `AGENTS.md` into codr's workspace: the `notify_adam` tool, the
+`pool` subagent and its provider, plus any `mcp` servers configured below, and
+codr's rules. Edits to those files are overwritten on the next start, so an MCP
+server is added in `agents.json`, not by editing `opencode.json` in the workspace.
+A change to any of them reloads codr's instance on the next idle tick. It also
+creates codr's `memory/` skeleton where it is missing.
+
+**codr's rules: `AGENTS.md` (DP-488).** opencode loads `AGENTS.md` into every
+session automatically. It tells codr how to work:
+
+- Work only in your ticket's worktree. Stage files by path. Run the tests inside the
+  worktree.
+- Read your notes before you start.
+- Fix the root cause and add the test that stops it coming back. Before building
+  something, look for what already does that job.
+- After 3 failed fixes for one problem, or if you can't say in one sentence what is
+  broken and why, stop and ask with `notify_adam`, with a concrete question.
+- Never report something as verified unless you ran it.
+- Keep notes the tiered way (below) and commit them in the same turn you write them.
+  A status line in a note is a claim to check, not evidence.
+- Update docs in the same commit as the code they describe.
+
+The text ships with DERPR (`config/codr_workspace/AGENTS.md`), so changing it is a
+deploy, not an edit on codr's box.
+
+**codr's notes: tiered memory (DP-488).** `memory/` is codr's long-term memory, a git
+repo of its own. Notes are read top-down and written bottom-up:
+
+- `memory/MEMORY.md` (L0): an index only, one line per directory.
+- `memory/<dir>/_overview.md` (L1): a short summary of the directory, usually enough
+  to decide whether to read further.
+- detail files (L2): read only when L1 isn't enough.
+
+DERPR creates the skeleton when it is missing: `MEMORY.md`, `tickets/_overview.md` and
+`projects/_overview.md`. It never rewrites codr's notes. Two exceptions: when a ticket
+starts, DERPR creates `memory/tickets/<ticket>.md` from the ticket text if it isn't
+there yet, and after each attempt it adds one line to that file with the attempt, the
+outcome and, on a pass, the merge commit. It commits each of those writes, as
+`DERPR`. The ticket file replaces the old `attempts.md`: codr keeps what it tried,
+what happened and what it decided there.
 
 Settings, per instance in `agents.json` under `codr`:
 - `schedule.interval` (default `30` s): how often the agent checks codr.
@@ -801,12 +895,13 @@ Settings, per instance in `agents.json` under `codr`:
   the log. Changing it reloads codr's instance on the next idle tick, like any
   other change to the managed files.
 
-#### codr tickets: one ticket, one session, one worktree (DP-484 / DP-488 / DP-489)
+#### codr tickets: one ticket, one session (DP-484 / DP-489)
 
 > 🚧 **Spec, being built (2026-11-03).** This describes how codr will work once
-> DP-484, DP-488 and DP-489 ship. Each ticket folds its own part into the sections
-> above and removes it from here as it merges. Until then the sections above describe
-> what is live.
+> DP-484 and DP-489 ship. Each ticket folds its own part into the sections above and
+> removes it from here as it merges. Until then the sections above describe what is
+> live. DP-488's part (ticket header, projects, worktrees, `AGENTS.md`, `memory/`) is
+> live and described above.
 
 The goal: codr works on **one ticket at a time with only that ticket in its context**,
 yet can find everything else (earlier tickets, other projects, its own notes) in its
@@ -835,85 +930,10 @@ even after a ticket's folder is deleted), and queues it as `data/codr_tasks/CD-N
 The tool's reply names the ID. You can still write a ticket folder by hand under any
 name; the shipped battery folders (`01-…`) keep working.
 
-**Ticket folder format.** `TASK.md` opens with a header of `key: value` lines, ended by
-the first blank line. codr never sees the header:
-
-- `title:` one line, used in the ticket's channel name, posts and notes.
-- `project:` lowercase letters, digits and `-`. If missing, the ticket is its own
-  project, named after the folder.
-- `depends_on:` comma-separated ticket IDs. The ticket waits until all of them have
-  passed. If one of them fails for good, this ticket is **blocked**: DERPR posts that
-  once and starts nothing for it.
-- `max_attempts:` as before.
-
-Every other unknown header key is an error. DERPR logs it and posts it once, and the
-ticket is skipped, not guessed at. The rest of `TASK.md` is the ticket text: stagr
-writes `## Spec`, `## Plan` and `## Packages` sections. A file whose first line is not
-`key: value` has no header, so old tasks keep working. `check.sh` and `seed/` work as
+**What stagr writes (DP-489).** The ticket's `TASK.md` header (see "The task queue"
+above) with `title:`, `project:` and `depends_on:`, then the ticket text in
+`## Spec`, `## Plan` and `## Packages` sections. `check.sh` and `seed/` work as
 before.
-
-**codr's workspace (DP-488):**
-
-```
-AGENTS.md              rules codr follows, written by DERPR (like .opencode/)
-memory/                codr's notes, its own git repo (see below)
-projects/<project>/    one git repo per project; its main branch holds finished work
-worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from main
-```
-
-- **Projects.** The first ticket for a project creates `projects/<project>/` as a git
-  repo with an empty first commit on `main`. If stagr already put a repo there (for
-  example `copy_to_codr` with `keep_git`), DERPR uses it as it is, and that repo's
-  checked-out branch counts as its main.
-- **Worktrees.** Before the first attempt, DERPR cuts `worktrees/<ticket>/` (branch
-  `ticket/<ticket>`) from the project's main and copies in any `seed/` files that are
-  missing. A retry reuses the same worktree, so codr's work carries over. codr works only
-  in its worktree and commits there, staging files by path. The box is offline, so
-  there is no remote, no fetch and no push.
-- **The check runs in the worktree**, not in `tasks/<id>/`.
-- **Merge on pass.** When the check passes, DERPR commits anything codr left
-  uncommitted (as `CD-NNN: uncommitted at check pass`), merges the branch into the
-  project's main with a merge commit, removes the worktree and keeps the branch. A ticket
-  that depends on this one is cut from the new main. If the merge **conflicts**, DERPR
-  aborts it and records the attempt as `fail` with the conflicting files as the check
-  output. The worktree stays, and the next attempt asks codr to merge main into its
-  branch and resolve the conflict.
-- **Tickets without a project**, such as the old battery folders, are each their own
-  project. The battery's task 04 says it builds on 03, so it carries `project:` and
-  `depends_on:` to make that explicit.
-
-**codr's rules: `AGENTS.md` (DP-488).** DERPR writes `AGENTS.md` into the workspace and
-overwrites it on its next start, exactly like `.opencode/`. opencode loads it into every
-session automatically. It tells codr how to work:
-
-- Work only in your ticket's worktree. Stage files by path. Run the tests inside the
-  worktree.
-- Read your notes before you start.
-- Fix the root cause and add the test that stops it coming back. Before building
-  something, look for what already does that job.
-- After 3 failed fixes for one problem, or if you can't say in one sentence what is
-  broken and why, stop and ask with `notify_adam`, with a concrete question.
-- Never report something as verified unless you ran it.
-- Keep notes the tiered way (below) and commit them in the same turn you write them.
-- Update docs in the same commit as the code they describe.
-
-The text ships with DERPR (`config/codr_workspace/AGENTS.md`), so changing it is a
-deploy, not an edit on codr's box.
-
-**codr's notes: tiered memory (DP-488).** `memory/` is codr's long-term memory, a git
-repo of its own. Notes are read top-down and written bottom-up:
-
-- `memory/MEMORY.md` (L0): an index only, one line per directory.
-- `memory/<dir>/_overview.md` (L1): a short summary of the directory, usually enough
-  to decide whether to read further.
-- detail files (L2): read only when L1 isn't enough.
-
-DERPR creates the skeleton when it is missing: `MEMORY.md`, `tickets/_overview.md` and
-`projects/_overview.md`. It never rewrites codr's notes. Two exceptions: when a ticket
-starts, DERPR creates `memory/tickets/<ticket>.md` from the ticket text if it isn't
-there yet, and after each check it adds one line to that file with the attempt, the
-outcome and the merge commit. It commits each of those writes. The ticket file replaces
-`attempts.md`: codr keeps what it tried, what happened and what it decided there.
 
 **One session per ticket (DP-484).** Each ticket gets its own opencode session, titled
 `derpr:codr:<ticket>`. Retries continue that session, so codr still sees its earlier
@@ -1040,8 +1060,9 @@ only thing that talks to both:
   still give an answer away, such as a changelog entry or the fix's own test; the
   setup agent is told to look for those.) Neither ever overwrites: the copy is
   refused if the destination already exists. `copy_to_codr` is also refused
-  while codr is working. To make a task folder a git repo for codr, the setup
-  agent runs `git init` there with `codr_shell`.
+  while codr is working. Each of codr's projects is a git repo already (DERPR
+  makes it, DP-488); a repo copied into `projects/<project>/` with `keep_git` is
+  used as it is.
 - **Seeing what it did**: the portal shows each tool call as a card with the
   command and its output (the middle of very long output is cut, at
   `STAGR_OUTPUT_CHARS`). Discord shows the persona's replies and the approval
@@ -1049,10 +1070,11 @@ only thing that talks to both:
 
 To give codr a real-repo task: ask stagr to prepare it (clone, check out the
 start commit, download wheels for what the tests need into the folder, run the
-tests the way codr will) and copy it into `tasks/<task>/` with `copy_to_codr`, and only then queue the task's
-`TASK.md` and `check.sh` under the same name with `queue_codr_task`. The codr
-agent starts a task as soon as its folder is in the queue, and its seeding never
-replaces files that are already there.
+tests the way codr will) and copy it into `projects/<project>/` with `copy_to_codr`
+and `keep_git`, and only then queue the ticket's `TASK.md` (with `project: <project>`
+in its header) and `check.sh` with `queue_codr_task`. The codr agent starts a ticket
+as soon as its folder is in the queue; its worktree is cut from that repo's
+checked-out branch, and seeding never replaces files that are already there.
 
 **Setting it up.** `STAGR_SERVER_URL` (e.g. `http://10.0.0.76:4096`) and
 `STAGR_SERVER_PASSWORD` (from `/etc/opencode/serve.env` on the setup box) in

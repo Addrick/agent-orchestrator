@@ -1,3 +1,6 @@
+title: notes web service
+project: notes
+
 Build a small notes web service in `app.py`, with Python 3's standard library only (`http.server`, `sqlite3`, `json`). The sandbox has no internet, so nothing can be installed.
 
 `python3 app.py --port PORT [--db PATH]` serves on 127.0.0.1:PORT until it is killed. Notes persist in the SQLite file at PATH (default `notes.db` next to `app.py`), so they survive a restart.
