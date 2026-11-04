@@ -841,7 +841,9 @@ any portal channel that is not a ticket's) go to codr's own session, `derpr:codr
 the one chat has always used, and never into a running ticket. That session is for
 talk outside any ticket: it reads `memory/` like any other, but never sees a
 ticket's transcript. While a ticket runs, a chat turn there runs alongside it in
-the same workspace. To steer a ticket, write in its channel. `notify_adam` calls
+the same workspace: it can see and change the ticket's files and `memory/`, and the
+two share the model server. Nothing stops that yet, so ask chat codr to look, not
+edit, while a ticket is running. To steer a ticket, write in its channel. `notify_adam` calls
 from any session still post to `notification_target`, and are saved as codr's
 replies in the conversation of the channel they are posted to; from a ticket they
 also show in the ticket's channel, as the call itself.
