@@ -56,6 +56,8 @@ from src.origin import Origin
 from src.security.scrubber import get_scrubber
 from src.engine.providers import local_backend
 from src.engine.providers.local import local_base_url
+from src.engine.providers.opencode import channel_ticket, ticket_channel
+from src.stagr.codr_ticket import ticket_titles
 from src.generation_params import CHAT_TEMPLATE_THINKING
 from src.personas.store import save_personas_to_file
 from src.interfaces._persona_patch import (
@@ -253,6 +255,8 @@ def _channel_source(channel: str) -> str:
     only — it never gates behavior.
     """
     c = (channel or "").lower()
+    if channel_ticket(channel):
+        return "tsk"            # a codr ticket's channel (DP-484)
     if c.startswith("web_ui") or c.startswith("web"):
         return "web"
     if c.startswith("discord") or c.startswith("dsc"):
@@ -262,6 +266,13 @@ def _channel_source(channel: str) -> str:
     if c.startswith("gmail") or c.startswith("email") or c.startswith("gml"):
         return "gml"
     return "web"
+
+
+def _ticket_labels() -> Dict[str, str]:
+    """`CD-001 · <title>` for each queued codr ticket's channel (DP-484). A
+    ticket whose folder is gone keeps its channel, shown by its tag."""
+    return {ticket_channel(tid): f"{tid} · {title}"
+            for tid, title in ticket_titles(global_config.CODR_TASKS_DIR).items()}
 
 
 class KoboldEngineAdapter:
@@ -856,6 +867,8 @@ class KoboldEngineAdapter:
             rows = await asyncio.to_thread(
                 self._memory_manager.get_distinct_channels, persona
             )
+            labels = (await asyncio.to_thread(_ticket_labels)
+                      if any(channel_ticket(r.get("channel")) for r in rows) else {})
             channels = [
                 {
                     "channel": r.get("channel"),
@@ -863,6 +876,7 @@ class KoboldEngineAdapter:
                     "source": _channel_source(r.get("channel") or ""),
                     "count": r.get("count", 0),
                     "last_ts": r.get("last_ts"),
+                    "label": labels.get(r.get("channel") or ""),
                 }
                 for r in rows
                 if r.get("channel")

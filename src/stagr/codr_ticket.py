@@ -31,7 +31,8 @@ import them from there.
 from __future__ import annotations
 
 import re
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import Dict, Iterable, Optional, Tuple
 
 TICKET_PREFIX = "CD"
 TICKET_ID_RE = re.compile(rf"^{TICKET_PREFIX}-(\d{{3,}})$")
@@ -41,6 +42,46 @@ SECTIONS = ("Spec", "Plan", "Packages")
 
 CODR_AGENT_NAME = "codr"
 ATTEMPT_ACTION = "task_attempt"
+
+
+_HEADER_LINE = re.compile(r"([a-z][a-z_]*):[ \t]*(.*?)\s*")
+
+
+def parse_header(text: str) -> Tuple[Dict[str, str], str]:
+    """(header, ticket text). The header is the run of `key: value` lines at
+    the top, ended by the first blank line or the first line that is not
+    `key: value` (the pre-DP-488 form was one `max_attempts: N` line with the
+    text right under it). No such first line = no header."""
+    header: Dict[str, str] = {}
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = _HEADER_LINE.fullmatch(lines[i])
+        if not match:
+            break
+        key, value = match.groups()
+        if key in header:
+            raise ValueError(f"`{key}:` appears twice in the header")
+        header[key] = value
+        i += 1
+    if i < len(lines) and header and not lines[i].strip():
+        i += 1
+    return header, "\n".join(lines[i:])
+
+
+def ticket_titles(tasks_dir: Path) -> Dict[str, str]:
+    """{ticket id: title} for each queue folder whose TASK.md has a readable
+    header with a title (the portal's channel labels, DP-484). Unlike the
+    codr agent's `load_tickets`, nothing is validated: a label is not a start."""
+    titles: Dict[str, str] = {}
+    for task_md in sorted(tasks_dir.glob("*/TASK.md")) if tasks_dir.is_dir() else []:
+        try:
+            header, _ = parse_header(task_md.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if header.get("title"):
+            titles[task_md.parent.name] = header["title"]
+    return titles
 
 
 def attempt_context(task_id: str) -> str:

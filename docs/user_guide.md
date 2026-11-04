@@ -738,7 +738,8 @@ starts it. A ticket that depends on one that is not in the queue and never passe
 waits, and DERPR posts that once too. A ticket whose project cannot be prepared (say,
 `projects/<project>/` is not a git repo) is posted once and skipped until fixed; the
 next ticket starts in its place. codr gets the ticket
-text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below). When
+text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below), in the
+ticket's own session (see **One ticket, one session** below). When
 the turn ends, DERPR runs the check in the worktree:
 
 - **pass**: DERPR merges the ticket's branch into the project's main (below), and a
@@ -790,24 +791,60 @@ worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from m
   asks codr to merge main into its branch and resolve the conflict.
 
 **codr can message you.** codr has a `notify_adam` tool in every turn. While the
-agent runs, DERPR posts each call to codr's channel as `codr: <message>` within
-one tick, whole: a message too long for one Discord post is split across several. A message that would take more than 5 posts is not sent; you get one warning
+agent runs, DERPR posts each call to codr's channel as `codr: <message>` (from a
+ticket's session: `codr [CD-NNN]: <message>`) within one tick, whole: a message too long for one Discord post is split across several. A message that would take more than 5 posts is not sent; you get one warning
 post with its size and how it began instead, and the next task result counts it as failed to post.
 The same cap applies to every agent notification sent to Discord. It is meant for progress worth knowing and for problems you can help
 with, and the task prompt tells codr to use it to report when it finishes a task:
 its final reply is not posted. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
 dropped and logged, and the next task result says how many were dropped.
 
-**Talking to codr while it works.** A message to codr while one of its own tasks is
-running does not wait for the task to finish. It goes straight into the running
-turn, and codr reads it at its next step. DERPR marks your message with a ✅ reaction
-at once (delivered), instead of posting a reply.
-codr answers with `notify_adam`, mid-task or in its report at the end, which can be
-up to `max_turn_seconds` later.
-Messages codr sends with `notify_adam` are saved as its replies in the conversation of
-the channel they are posted to, so they are part of that chat's history like any other
-answer. In the portal, the ✅ shows as the reply to your message until you reload.
-When codr is idle, a message is an ordinary chat turn, as before.
+**One ticket, one session (DP-484).** codr works on one ticket at a time with only
+that ticket in its context. Each ticket gets its own opencode session, titled
+`derpr:codr:<ticket>`. Retries continue that session, so codr still sees its earlier
+attempt; opencode compacts it when it gets long. Other tickets never enter it.
+Continuity lives in files: the first message of a ticket's session carries, besides
+the ticket text and its project:
+
+- `memory/MEMORY.md`, the project's `memory/projects/<project>.md` if it exists, and
+  `memory/tickets/_overview.md` (each cut at 12,000 characters);
+- on a retry, the previous outcome and the check output (retries carry no memory
+  files: the session already has them).
+
+Everything else codr reads from files when it needs it.
+
+**A channel per ticket (DP-484).** In the portal, codr's channel list has a
+**codr tickets** group with one channel per ticket, `CD-NNN · <title>` (the tag is
+`task:<ticket>`; a ticket whose folder is gone shows by its tag). It holds the
+ticket's whole transcript: DERPR's prompts, and for each turn one reply with every
+step's reasoning, prose and tool call with its output (cut at 6,000 characters per
+call), plus each attempt's result line and, on a fail, the check output. A subagent's
+session (codr's `task` tool) shows inside the result of the call that started it,
+cut to its last 20,000 characters. DERPR saves all of it in its own database, so
+it survives a restore of codr's box. While a ticket runs, its channel updates every
+agent tick, and the open channel re-reads every 5 seconds: what shows is each step
+as it finishes, not each token.
+
+You can **write in a ticket's channel**:
+
+- while the ticket runs, your message goes straight into its turn, and codr reads it
+  at its next step. DERPR marks your message with a ✅ at once (delivered) instead of
+  posting a reply; codr answers with `notify_adam` or in the turn itself, which you
+  see in the channel. In the portal the ✅ shows as the reply to your message until
+  you reload.
+- when it is idle, the message starts an ordinary turn in that ticket's session.
+  Only that turn's final reply is saved in the channel, not its steps (it is your
+  chat, not one of DERPR's turns).
+
+**Discord and codr's own session (DP-484).** Messages to codr from Discord (and from
+any portal channel that is not a ticket's) go to codr's own session, `derpr:codr`,
+the one chat has always used, and never into a running ticket. That session is for
+talk outside any ticket: it reads `memory/` like any other, but never sees a
+ticket's transcript. While a ticket runs, a chat turn there runs alongside it in
+the same workspace. To steer a ticket, write in its channel. `notify_adam` calls
+from any session still post to `notification_target`, and are saved as codr's
+replies in the conversation of the channel they are posted to; from a ticket they
+also show in the ticket's channel, as the call itself.
 
 **Loop guard.** DERPR watches each turn codr starts on its own and stops it when:
 
@@ -872,7 +909,8 @@ outcome and, on a pass, the merge commit. It commits each of those writes, as
 what happened and what it decided there.
 
 Settings, per instance in `agents.json` under `codr`:
-- `schedule.interval` (default `30` s): how often the agent checks codr.
+- `schedule.interval` (`10` s in the shipped `agents.json`; `30` s if unset): how
+  often the agent checks codr. A ticket's channel in the portal updates once per check.
 - `notification_target`: where results and `notify_adam` messages go, e.g.
   `{"channel": "discord_channel", "recipient": "<channel id>"}`. Unset = nothing
   is posted (logged instead).
@@ -894,57 +932,6 @@ Settings, per instance in `agents.json` under `codr`:
   stagr). A malformed entry stops the agent from starting, with the reason in
   the log. Changing it reloads codr's instance on the next idle tick, like any
   other change to the managed files.
-
-#### codr tickets: one ticket, one session (DP-484)
-
-> 🚧 **Spec, being built (2026-11-03).** This describes how codr will work once
-> DP-484 ships, which folds it into the sections above and removes it from here.
-> Until then the sections above describe what is live. DP-488's part (ticket header,
-> projects, worktrees, `AGENTS.md`, `memory/`) and DP-489's (stagr plans and writes
-> the tickets) are live and described above.
-
-The goal: codr works on **one ticket at a time with only that ticket in its context**,
-yet can find everything else (earlier tickets, other projects, its own notes) in its
-workspace when it needs it. Continuity lives in files, not in one ever-growing
-conversation. codr follows the same development discipline as the agents that build
-DERPR: plan before work (done by stagr, approved by you), one worktree per ticket,
-tiered notes, and root causes before workarounds.
-
-stagr plans and queues tickets: see **Planning and queueing a ticket** under
-[Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-setup-agent-dp-455--dp-456--dp-465).
-You can still write a ticket folder by hand under any name; the shipped battery
-folders (`01-…`) keep working.
-
-**One session per ticket (DP-484).** Each ticket gets its own opencode session, titled
-`derpr:codr:<ticket>`. Retries continue that session, so codr still sees its earlier
-attempt; opencode compacts it when it gets long. Other tickets never enter it. The
-first message of a ticket session carries:
-
-- the ticket text and the project name;
-- `memory/MEMORY.md`, the project's `memory/projects/<project>.md` if it exists, and
-  `memory/tickets/_overview.md`;
-- on a retry, the previous outcome and the check output, as today.
-
-Everything else codr reads from files when it needs it.
-
-**A channel per ticket (DP-484).** In the portal, codr's channel list gains one channel
-per ticket, `CD-NNN · <title>`. It holds the ticket's full transcript: every step,
-reasoning, tool call with its output, and the sessions of subagents, nested under the
-call that started them. DERPR saves the transcript in its own database, so it survives a
-restore of codr's box. A running ticket's channel updates live. You can **write in a
-ticket's channel**:
-
-- while the ticket runs, your message goes straight into its turn, the way talking to
-  codr mid-task works today (✅ reaction);
-- when it is idle, the message starts an ordinary turn in that ticket's session.
-
-**Discord and the "adam chat" session (DP-484).** Discord messages to codr no longer
-go into a running ticket. They go to codr's own session, `derpr:codr` (the one chat has
-always used), which codr uses for talk outside any ticket. That session reads
-`memory/` like any other, but never sees a ticket's transcript. To steer a ticket, write
-in its portal channel. `notify_adam` calls from any session still post to
-`notification_target`, prefixed `[CD-NNN]` when they come from a ticket, and they are
-saved in that ticket's channel too.
 
 #### Preparing codr's work: stagr, the setup box and setup agent (DP-455 / DP-456 / DP-465)
 

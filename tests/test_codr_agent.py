@@ -16,6 +16,7 @@ from src.agents.codr_agent import (
 )
 from src.engine.providers import opencode
 from src.generation_events import ResponseType
+from src.turn_persistence import TurnPersistence
 from tests import test_opencode_provider as provider_tests
 from tests.test_opencode_provider import ROOT, real_bash
 
@@ -54,12 +55,45 @@ class FakeMemory:
                 and (action_type is None or r["action_type"] == action_type)]
         return list(reversed(rows))[:limit]          # newest first, like the DB
 
+    # The interaction rows a ticket's channel gets (DP-484).
+    interactions: list
+
+    def _rows(self):
+        if not hasattr(self, "interactions"):
+            self.interactions = []
+        return self.interactions
+
+    def get_interaction_by_platform_id(self, pid):
+        row = next((r for r in self._rows() if r["platform_message_id"] == pid), None)
+        return None if row is None else {"interaction_id": row["interaction_id"], "content": row["content"],
+                                         "reasoning_content": row["reasoning_content"],
+                                         "tool_context": row["tool_context"]}
+
+    def log_message(self, **kw):
+        if kw.get("platform_message_id") and self.get_interaction_by_platform_id(kw["platform_message_id"]):
+            raise RuntimeError("UNIQUE constraint failed: platform_message_id")
+        row = {"interaction_id": len(self._rows()) + 1, "tool_context": None, "reasoning_content": None, **kw}
+        self._rows().append(row)
+        return row["interaction_id"]
+
+    def update_interaction_content(self, interaction_id, content, reasoning_content=None, tool_context=None):
+        row = self._rows()[interaction_id - 1]
+        row.update(content=content, reasoning_content=reasoning_content, tool_context=tool_context)
+        return True
+
+    def channel(self, name):
+        return [r for r in self._rows() if r["channel"] == name]
+
 
 class Persistence:
-    """The TurnPersistence calls a relayed reply makes."""
+    """The TurnPersistence calls a relayed reply makes; the keyed rows of a
+    ticket's channel (DP-484) go through the real method into FakeMemory."""
 
-    def __init__(self):
+    upsert_keyed_row = TurnPersistence.upsert_keyed_row
+
+    def __init__(self, memory_manager=None):
         self.committed, self.queued = [], []
+        self.memory_manager = memory_manager
 
     def commit_or_update_assistant(self, **kw):
         self.committed.append(kw)
@@ -96,8 +130,9 @@ def _task(tmp_path, name, text="Build it.", check="exit 0", seed=None):
 
 def _agent(tmp_path, **cfg):
     persona = SimpleNamespace(get_prompt=lambda: "You are codr.", get_model_name=lambda: "opencode")
-    chat = SimpleNamespace(text_engine=None, memory_manager=FakeMemory(), personas={"codr": persona},
-                           turn_persistence=Persistence())
+    memory = FakeMemory()
+    chat = SimpleNamespace(text_engine=None, memory_manager=memory, personas={"codr": persona},
+                           turn_persistence=Persistence(memory))
     router = Router()
     agent = CodrAgent(chat, router, {
         "_recipients": {},
@@ -122,9 +157,17 @@ def _shell(check_passes=True, merge="__DERPR_MAIN=main\n__DERPR_MERGED=abc1234\n
     return run
 
 
-def _session(fake):
-    (sid,) = [s for s in fake.sessions if fake.sessions[s]["title"] == "derpr:codr"]
+def _session(fake, ticket=None):
+    """codr's own session, or a ticket's (DP-484)."""
+    title = "derpr:codr" + (f":{ticket}" if ticket else "")
+    (sid,) = [s for s in fake.sessions if fake.sessions[s]["title"] == title]
     return sid
+
+
+def _all_auto(fake):
+    """Every task prompt in any session, in the order they were posted."""
+    msgs = [m for sid in fake.sessions for m in _auto_messages(fake, sid)]
+    return sorted(msgs, key=lambda m: int(m["info"]["id"].split("_")[1]))
 
 
 def _auto_messages(fake, sid):
@@ -296,12 +339,13 @@ async def test_first_tick_sets_up_the_workspace_and_starts_the_oldest_task(fake,
     agent, _ = _agent(tmp_path)
     await agent.deploy()
 
-    sid = _session(fake)
+    sid = _session(fake, "01-a")                               # the ticket's own session
     assert fake.sessions[sid]["directory"] == f"{ROOT}/codr"
+    assert not _auto_messages(fake, _session(fake))            # chat's session gets no task
     scripts = [s for _, s in fake.scripts]
     assert any("DERPR_EOF_0" in s for s in scripts)            # .opencode/ synced
     assert any("echo __DERPR_MEMORY_READY" in s for s in scripts)   # memory/ skeleton
-    assert "worktree add -q -b ticket/01-a" in scripts[-1]      # worktree cut
+    assert any("worktree add -q -b ticket/01-a" in s for s in scripts)   # worktree cut
     (start,) = _auto_messages(fake, sid)
     part = start["parts"][0]
     assert part["metadata"][AUTO]["task"] == "01-a" and part["metadata"][AUTO]["attempt"] == 1
@@ -320,7 +364,7 @@ async def test_a_finished_turn_is_checked_recorded_and_posted_once(fake, tmp_pat
     fake.shell_output = _shell(check_passes=True)
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     _reply(fake, sid)
 
     await agent.deploy()
@@ -344,7 +388,7 @@ async def test_a_failed_check_retries_with_its_output_until_attempts_run_out(fak
     sid = None
     for _ in range(2):
         await agent.deploy()                                   # start
-        sid = _session(fake)
+        sid = _session(fake, "01-a")                           # retries continue it
         _reply(fake, sid)
         await agent.deploy()                                   # finish: fail
     second = _auto_messages(fake, sid)[1]["parts"][0]
@@ -362,7 +406,7 @@ async def test_a_loop_is_nudged_once_then_aborted(fake, tmp_path):
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     for _ in range(3):
         _tool_step(fake, sid)
     await agent.deploy()
@@ -388,7 +432,7 @@ async def test_an_overrun_is_aborted_without_a_nudge(fake, tmp_path):
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path, max_turn_seconds=0)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     _tool_step(fake, sid)
     await agent.deploy()
     assert len(_auto_messages(fake, sid)) == 1
@@ -403,7 +447,7 @@ async def test_a_stall_counts_as_stuck(fake, tmp_path, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     _tool_step(fake, sid)
     await agent.deploy()                                       # progress seen
     clock[0] += 50
@@ -477,7 +521,7 @@ async def test_a_relay_that_fails_to_post_is_marked_and_reported(fake, tmp_path)
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path)
     await agent.deploy()                                       # starts 01-a
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
                                  "state": {"status": "completed", "input": {"message": "done"}}}],
              time={"created": 1, "completed": 2}, finish="tool-calls")
@@ -499,7 +543,7 @@ async def test_a_task_turn_followed_by_a_chat_turn_is_still_finished(fake, tmp_p
     fake.shell_output = _shell(check_passes=True)
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     _reply(fake, sid, "task done")
     fake.add(sid, "user", [{"type": "text", "text": "User: hi"}])
     _reply(fake, sid, "hello")
@@ -517,7 +561,7 @@ async def test_a_closed_task_turn_is_not_running_even_if_its_last_step_never_com
     fake.shell_output = _shell()
     agent, _ = _agent(tmp_path)
     await agent.deploy()                                       # starts 01-a
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     fake.add(sid, "assistant", [{"type": "text", "text": "half"}], time={"created": 1})   # never completed
     start = _auto_messages(fake, sid)[0]["parts"][0]
     start["metadata"][AUTO]["result"] = "aborted"
@@ -532,7 +576,7 @@ async def test_the_loop_guard_holds_the_workspace_lock_until_the_nudge_is_in(fak
     fake.shell_output = _shell()
     agent, _ = _agent(tmp_path, stall_seconds=0)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     fake.busy.add(sid)
     _tool_step(fake, sid)
     seen = []
@@ -562,13 +606,12 @@ async def test_no_task_starts_while_a_chat_turn_runs(fake, tmp_path):
     fake.shell_output = _shell()
     agent, _ = _agent(tmp_path)
     await agent.deploy()                                       # creates the session, starts 01-a
-    sid = _session(fake)
-    _reply(fake, sid)
+    _reply(fake, _session(fake, "01-a"))
     await agent.deploy()                                       # 01-a passes
     _task(tmp_path, "02-b")
-    fake.busy.add(sid)                                         # a chat turn is running
+    fake.busy.add(_session(fake))                              # a chat turn is running in codr's session
     await agent.deploy()
-    assert len(_auto_messages(fake, sid)) == 1
+    assert _started(fake) == ["01-a"]
 
 
 async def test_start_tasks_false_only_watches(fake, tmp_path):
@@ -576,7 +619,7 @@ async def test_start_tasks_false_only_watches(fake, tmp_path):
     fake.shell_output = _shell()
     agent, _ = _agent(tmp_path, start_tasks=False)
     await agent.deploy()
-    assert not _auto_messages(fake, _session(fake))
+    assert not _all_auto(fake)
 
 
 async def test_changed_workspace_config_reloads_the_instance_when_idle(fake, tmp_path):
@@ -654,8 +697,8 @@ def test_a_dependency_that_passed_and_left_the_queue_still_counts():
     assert _states(deps, {"a": ["fail"]}) == {"b": "held"}
 
 
-def _started(fake, sid):
-    return [m["parts"][0]["metadata"][AUTO]["task"] for m in _auto_messages(fake, sid)]
+def _started(fake):
+    return [m["parts"][0]["metadata"][AUTO]["task"] for m in _all_auto(fake)]
 
 
 async def test_a_bad_header_is_posted_once_and_the_queue_moves_on(fake, tmp_path):
@@ -664,9 +707,8 @@ async def test_a_bad_header_is_posted_once_and_the_queue_moves_on(fake, tmp_path
     fake.shell_output = _shell(check_passes=False)
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
-    assert _started(fake, sid) == ["02-b"]
-    _reply(fake, sid)
+    assert _started(fake) == ["02-b"]
+    _reply(fake, _session(fake, "02-b"))
     await agent.deploy()                                       # 02-b fails, its result is posted
     await agent.deploy()                                       # 02-b attempt 2 starts
     notices = [b for _, _, b in router.sent if "01-a" in b]
@@ -681,12 +723,11 @@ async def test_a_ticket_whose_dependency_failed_is_blocked_posted_once_and_never
     fake.shell_output = _shell(check_passes=False)
     agent, router = _agent(tmp_path)
     await agent.deploy()                                       # starts 01-a
-    sid = _session(fake)
-    _reply(fake, sid)
+    _reply(fake, _session(fake, "01-a"))
     await agent.deploy()                                       # 01-a fails for good
     await agent.deploy()                                       # 02-b blocked; 03-c starts
     await agent.deploy()
-    assert _started(fake, sid) == ["01-a", "03-c"]
+    assert _started(fake) == ["01-a", "03-c"]
     assert [b for _, _, b in router.sent if "02-b" in b] == [
         "codr ticket `02-b`: blocked: it depends on `01-a`, which failed for good"]
 
@@ -697,13 +738,12 @@ async def test_a_dependent_ticket_starts_only_after_its_dependency_passed(fake, 
     fake.shell_output = _shell(check_passes=True)
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
-    assert _started(fake, sid) == ["02-a"]
-    _reply(fake, sid)
+    assert _started(fake) == ["02-a"]
+    _reply(fake, _session(fake, "02-a"))
     await agent.deploy()                                       # 02-a passes and merges
     assert "merged into `02-a` main" in router.sent[-1][2]
     await agent.deploy()
-    assert _started(fake, sid) == ["02-a", "01-b"]
+    assert _started(fake) == ["02-a", "01-b"]
 
 
 async def test_a_merge_conflict_fails_the_attempt_and_the_retry_says_to_merge_main(fake, tmp_path):
@@ -711,7 +751,7 @@ async def test_a_merge_conflict_fails_the_attempt_and_the_retry_says_to_merge_ma
     fake.shell_output = _shell(merge="__DERPR_MAIN=main\n__DERPR_CONFLICT\napp.py\ntest_app.py\n")
     agent, router = _agent(tmp_path)
     await agent.deploy()
-    sid = _session(fake)
+    sid = _session(fake, "01-a")
     _reply(fake, sid)
     await agent.deploy()                                       # check passes, merge conflicts
     (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
@@ -730,7 +770,7 @@ async def test_a_pass_notes_the_merge_commit_in_the_ticket_file(fake, tmp_path):
     fake.shell_output = _shell()
     agent, _ = _agent(tmp_path)
     await agent.deploy()
-    _reply(fake, _session(fake))
+    _reply(fake, _session(fake, "01-a"))
     await agent.deploy()
     (note,) = [s for _, s in fake.scripts if "__DERPR_NOTED" in s]
     assert "- attempt 1: pass, merged into `main` as abc1234" in note
@@ -868,7 +908,7 @@ async def test_a_ticket_that_cannot_be_prepared_is_posted_once_and_not_started(f
     agent, router = _agent(tmp_path)
     await agent.deploy()
     await agent.deploy()
-    assert not _auto_messages(fake, _session(fake))
+    assert not _all_auto(fake)
     assert [b for _, _, b in router.sent] == [
         "codr ticket `01-a`: could not start: codr: preparing ticket 01-a failed: "
         "projects/01-a exists but is not a git repo\n"]
@@ -887,3 +927,116 @@ def test_the_reader_round_trips_what_stagr_writes(tmp_path):
     assert (task.title, task.project, task.depends_on, task.max_attempts) == (
         "notes auth", "notes", ("CD-001", "CD-002"), 4)
     assert task.text == "## Spec\n\nAdd logins.\n\n## Plan\n\nExtend app.py.\n\n## Packages\n\nnone"
+
+
+# --- DP-484: a session and a channel per ticket --------------------------------
+
+
+def _context_shell(files):
+    """`_shell`, plus codr's memory files for the ticket's first prompt."""
+    base = _shell(check_passes=False)
+
+    def run(script):
+        if "__DERPR_FILE=" in script:
+            return "".join(f"__DERPR_FILE={p}\n{body}\n__DERPR_FILE_END\n" for p, body in files.items())
+        return base(script)
+    return run
+
+
+async def test_a_tickets_first_prompt_carries_codrs_memory_index_and_a_retry_does_not(fake, tmp_path):
+    _task(tmp_path, "CD-001", text="title: csv\nproject: tools\n\nBuild csvstats.")
+    fake.shell_output = _context_shell({"memory/MEMORY.md": "# Index\n- tickets/: one file per ticket",
+                                        "memory/projects/tools.md": "tools: python, no deps"})
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "CD-001")
+    first = _auto_messages(fake, sid)[0]["parts"][0]["text"]
+    assert "`memory/MEMORY.md`:\n```\n# Index\n- tickets/: one file per ticket\n```" in first
+    assert "tools: python, no deps" in first and "memory/tickets/_overview.md`:" not in first
+    context_reads = [s for _, s in fake.scripts if "__DERPR_FILE=" in s]
+    assert "memory/projects/tools.md" in context_reads[0]
+    _reply(fake, sid)
+    await agent.deploy()                                       # fails
+    await agent.deploy()                                       # the retry, same session
+    retry = _auto_messages(fake, sid)[1]["parts"][0]["text"]
+    assert "attempt 2 of 3" in retry and "# Index" not in retry
+    assert len([s for _, s in fake.scripts if "__DERPR_FILE=" in s]) == 1
+
+
+async def test_a_tickets_channel_holds_its_transcript_and_each_attempts_result(fake, tmp_path):
+    _task(tmp_path, "CD-001", text="max_attempts: 1\n\nBuild it.")
+    fake.shell_output = _shell(check_passes=False)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "CD-001")
+    fake.add(sid, "assistant", [{"type": "tool", "callID": "c1", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": {"message": "halfway"}}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    await agent.deploy()                                       # watched: relayed, mirrored
+    assert router.sent[-1][2] == "codr [CD-001]: halfway"      # from a ticket: prefixed
+    rows = agent.memory_manager.channel("task:CD-001")
+    assert [(r["author_role"], r["author_name"]) for r in rows] == [("user", "DERPR"), ("assistant", "codr")]
+    assert "Build it." in rows[0]["content"]
+    assert json.loads(rows[1]["tool_context"])[0]["tool_calls"][0]["name"] == "notify_adam"
+
+    _reply(fake, sid, "gave up")
+    await agent.deploy()                                       # finished: its last step, then the result
+    rows = agent.memory_manager.channel("task:CD-001")
+    assert rows[1]["content"] == "gave up"
+    note = rows[-1]
+    assert (note["author_role"], note["author_name"]) == ("assistant", "DERPR")
+    assert "attempt 1/1: **FAIL**" in note["content"] and "FAIL: csvstats.py missing" in note["content"]
+    assert note["platform_message_id"] == "codr-attempt:CD-001:1"
+
+
+async def test_a_restarted_agent_finds_the_running_ticket_in_its_own_session(fake, tmp_path):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    _reply(fake, _session(fake, "01-a"))
+    restarted, router = _agent(tmp_path)
+    restarted.memory_manager.rows = agent.memory_manager.rows
+    await restarted.deploy()
+    assert "`01-a` attempt 1/3: **PASS**" in router.sent[-1][2]
+
+
+async def test_a_chat_turn_in_codrs_own_session_never_sees_a_ticket(fake, tmp_path):
+    """Discord talks to `derpr:codr`; a ticket's turn runs in its own session."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    own, ticket = _session(fake), _session(fake, "01-a")
+    assert own != ticket and not fake.messages[own]
+    assert opencode.auto_turn_running(fake.messages[ticket])
+
+
+async def test_a_settled_session_is_not_read_again_until_it_changes(fake, tmp_path):
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    reads = lambda: len([c for c in fake.calls if c[0] == "GET" and c[1].endswith("/message")])  # noqa: E731
+    before = reads()
+    await agent.deploy()
+    assert reads() == before                                   # idle, unchanged: skipped
+    sid = _session(fake)
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": {"message": "hi"}}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    await agent.deploy()                                       # changed: read, relayed
+    assert [b for _, _, b in router.sent] == ["codr: hi"]
+
+
+async def test_a_removed_tickets_aborted_turn_is_still_recorded(fake, tmp_path):
+    """Delete the folder, then abort the turn: the next tick records it."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    (tmp_path / "01-a" / "TASK.md").unlink()
+    fake.add(sid, "assistant", [{"type": "text", "text": "partial"}],
+             time={"created": 1, "completed": 2}, finish="stop", error={"name": "MessageAbortedError"})
+    await agent.deploy()
+    assert "**ABORTED**" in router.sent[-1][2] and "no longer in the queue" in router.sent[-1][2]

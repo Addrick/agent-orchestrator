@@ -96,12 +96,14 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       {
         id: 'web_ui:scratch',
         channel: 'web_ui',
+        label: 'web_ui',
         source: 'web',
         preview: "reissued jdoe's VPN cert and noted…",
       },
       {
         id: 'web_ui:tune',
         channel: 'web_ui_tune',
+        label: 'web_ui_tune',
         source: 'web',
         preview: 'temp 0.4 felt better, keep it',
       },
@@ -113,12 +115,14 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       {
         id: 'discord:it',
         channel: 'discord_it-support',
+        label: 'discord_it-support',
         source: 'dsc',
         preview: 'ticket 8821 escalated to L2',
       },
       {
         id: 'discord:ops',
         channel: 'discord_ops',
+        label: 'discord_ops',
         source: 'dsc',
         preview: 'routed 3 notifications',
       },
@@ -130,6 +134,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       {
         id: 'zammad:q2',
         channel: 'zammad',
+        label: 'zammad',
         source: 'zmd',
         preview: 'stage 2/3 · classifying',
       },
@@ -141,6 +146,7 @@ export const MOCK_CHANNELS: ChannelGroup[] = [
       {
         id: 'gmail:sup',
         channel: 'gmail',
+        label: 'gmail',
         source: 'gml',
         preview: '2 unread · vpn access req',
       },

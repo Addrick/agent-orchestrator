@@ -245,6 +245,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .src.dsc { color: var(--dsc); border-color: rgba(138,160,224,0.35); }
 .src.zmd { color: var(--zmd); border-color: rgba(231,173,98,0.35); }
 .src.gml { color: var(--gml); border-color: rgba(229,114,114,0.35); }
+.src.tsk { color: var(--zmd); border-color: rgba(231,173,98,0.35); }
 .newchan { margin: 8px 12px; padding: 9px; border: 1px dashed var(--line-2); border-radius: var(--r); color: var(--ink-dim); font-size: 11px; text-align: center; background: none; width: calc(100% - 24px); }
 .newchan:hover { color: var(--accent); border-color: var(--accent-dim); }
 

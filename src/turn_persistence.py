@@ -341,6 +341,43 @@ class TurnPersistence:
             interaction_id=retried_id, untrusted=untrusted,
         )
 
+    def upsert_keyed_row(
+            self,
+            *,
+            platform_message_id: str,
+            persona_name: str,
+            user_identifier: str,
+            channel: str,
+            role: str,
+            author_name: Optional[str],
+            content: str,
+            timestamp: datetime,
+            reasoning_content: Optional[str] = None,
+            tool_context_json: Optional[str] = None,
+    ) -> Tuple[Optional[int], bool]:
+        """A row copied from somewhere else, keyed by its unique
+        `platform_message_id` (DP-484: a codr ticket's opencode session
+        mirrored into its channel): inserted the first time, rewritten in
+        place when its content changed since, left alone otherwise. Not
+        retained: the source keeps its own record. Returns (row id, written)."""
+        existing = self.memory_manager.get_interaction_by_platform_id(platform_message_id)
+        if existing is None:
+            row_id = self.memory_manager.log_message(
+                user_identifier=user_identifier, persona_name=persona_name, channel=channel,
+                author_role=role, author_name=author_name, content=content, timestamp=timestamp,
+                platform_message_id=platform_message_id, tool_context=tool_context_json,
+                reasoning_content=reasoning_content,
+            )
+            return row_id, True
+        row_id = int(existing["interaction_id"])
+        if (existing.get("content"), existing.get("reasoning_content"), existing.get("tool_context")) == (
+                content, reasoning_content, tool_context_json):
+            return row_id, False
+        self.memory_manager.update_interaction_content(
+            row_id, content, reasoning_content=reasoning_content, tool_context=tool_context_json,
+        )
+        return row_id, True
+
     def queue_retain_safe(
         self,
         *,

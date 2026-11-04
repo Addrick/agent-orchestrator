@@ -1744,3 +1744,14 @@ async def test_exhaustion_wrap_up_reasoning_belongs_to_the_turn():
     reasoning = [e.delta for e in events if isinstance(e, ReasoningEvent)]
     assert reasoning == ["summarise what the tool said"]
     assert events[-1].retain_text == "It spun."
+
+
+@pytest.mark.asyncio
+async def test_the_conversation_channel_reaches_the_provider_config():
+    """DP-484: opencode keeps a session per ticket channel, so the provider
+    must know which conversation a turn belongs to."""
+    engine = _make_engine([[{"type": "token", "content": "hi"}, {"type": "done", "content": "hi"}]])
+    loop = ToolLoop(engine, _make_tool_manager({}))
+    await _drain(loop.run(persona=_make_persona(), conversation_history=[{"role": "user", "content": "x"}],
+                          params=MagicMock(), tools=[], channel="task:CD-001"))
+    assert engine.stream_messages.call_args.args[0]["channel"] == "task:CD-001"

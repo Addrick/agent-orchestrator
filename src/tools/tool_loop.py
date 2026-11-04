@@ -867,6 +867,7 @@ class ToolLoop:
         resolved_lookup: Optional[
             Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]
         ] = None,
+        channel: Optional[str] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Yield generation events for one turn. Mutates
         `conversation_history` in-place so the orchestrator (and any
@@ -890,6 +891,10 @@ class ToolLoop:
         history entry that will need correcting later.
         """
         persona_config = persona.get_config_for_engine()
+        if channel is not None:
+            # The conversation, for a provider whose server keeps one session
+            # per conversation (opencode's ticket sessions, DP-484).
+            persona_config["channel"] = channel
         # DP-404: the names actually sent to the provider this turn. Policy,
         # service bindings and model compatibility were all applied by
         # `RequestBuilder.filter_tools_for_persona` before `tools` got here,

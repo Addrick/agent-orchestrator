@@ -20,8 +20,11 @@ whole agentic turn, so each forwarded message carries the driver's per-call
 session's last user message resumes that turn (waits for it to finish and
 reads its reply) instead of posting again.
 
-DP-449: the `codr` agent (`src/agents/codr_agent.py`) also starts turns in the
-same session, fire-and-forget (`prompt_async`), and marks them with
+DP-484: a chat in a codr ticket's channel (`task:<ticket>`) goes to that
+ticket's session, `derpr:<persona>:<ticket>`, instead (`chat_session_title`).
+
+DP-449: the `codr` agent (`src/agents/codr_agent.py`) also starts turns,
+fire-and-forget (`prompt_async`), in each ticket's session, and marks them with
 `AUTO_FIELD` in the user part's metadata. While such a turn runs, a chat
 message is delivered into it (opencode picks a new user message up at the
 running turn's next step) and answered at once with `INJECTED_ACK` as a
@@ -58,7 +61,8 @@ logger = logging.getLogger(__name__)
 
 MODEL_PREFIX = "opencode"
 SESSION_TITLE_PREFIX = "derpr:"
-_KEY_FIELD = "derpr_key"
+# User-part metadata: the chat call that posted the message (its request id).
+KEY_FIELD = "derpr_key"
 # User-part metadata: a turn the codr agent started (value: its task state), and
 # a chat message delivered into one of those turns while it ran.
 AUTO_FIELD = "derpr_auto"
@@ -200,6 +204,40 @@ def session_title(persona_name: Optional[str]) -> str:
     return f"{SESSION_TITLE_PREFIX}{persona_name or workspace_slug(persona_name)}"
 
 
+# DP-484: each codr ticket has its own session, and its own conversation
+# channel in DERPR, `task:<ticket>`. A message in that channel goes to the
+# ticket's session; any other channel goes to the persona's own session.
+TICKET_CHANNEL_PREFIX = "task:"
+
+
+def ticket_session_title(persona_name: Optional[str], ticket: str) -> str:
+    return f"{session_title(persona_name)}:{ticket}"
+
+
+def ticket_channel(ticket: str) -> str:
+    return f"{TICKET_CHANNEL_PREFIX}{ticket}"
+
+
+def channel_ticket(channel: Optional[str]) -> Optional[str]:
+    """The ticket a `task:<ticket>` channel belongs to, else None."""
+    if channel and channel.startswith(TICKET_CHANNEL_PREFIX) and len(channel) > len(TICKET_CHANNEL_PREFIX):
+        return channel[len(TICKET_CHANNEL_PREFIX):]
+    return None
+
+
+def chat_session_title(persona_name: Optional[str], channel: Optional[str]) -> str:
+    """The session a chat message in `channel` goes to."""
+    ticket = channel_ticket(channel)
+    return ticket_session_title(persona_name, ticket) if ticket else session_title(persona_name)
+
+
+def persona_sessions(sessions: List[Dict[str, Any]], persona_name: Optional[str]) -> List[Dict[str, Any]]:
+    """The persona's root sessions: its own and every ticket's."""
+    own = session_title(persona_name)
+    return [s for s in sessions or [] if not s.get("parentID")
+            and (s.get("title") == own or str(s.get("title") or "").startswith(f"{own}:"))]
+
+
 def auth_headers(password: Optional[str] = None) -> Dict[str, str]:
     """Basic auth for an opencode server: codr's sandbox by default, or the one
     whose password is given (stagr, DP-456)."""
@@ -272,7 +310,7 @@ def _role(message: Dict[str, Any]) -> Any:
 
 
 def _has_key(message: Dict[str, Any], key: str) -> bool:
-    return any((p.get("metadata") or {}).get(_KEY_FIELD) == key for p in message.get("parts", []))
+    return any((p.get("metadata") or {}).get(KEY_FIELD) == key for p in message.get("parts", []))
 
 
 class OpencodeClient:
@@ -457,7 +495,7 @@ async def deliver_into_auto_turn(client: OpencodeClient, session_id: str, key: s
     if not auto_turn_running(msgs):
         return False
     await client.prompt_async(session_id, {"parts": [{
-        "type": "text", "text": prompt, "metadata": {_KEY_FIELD: key, INJECTED_FIELD: True},
+        "type": "text", "text": prompt, "metadata": {KEY_FIELD: key, INJECTED_FIELD: True},
     }]})
     logger.info("opencode: delivered a message into the running codr task in %s", session_id)
     return True
@@ -584,7 +622,8 @@ class OpencodeProvider(Provider):
                 if directory not in self._ready_dirs:
                     await client.ensure_directory(root, slug)
                     self._ready_dirs.add(directory)
-                session_id = await client.find_or_create_session(session_title(persona_name))
+                session_id = await client.find_or_create_session(
+                    chat_session_title(persona_name, config.get("channel")))
                 api_payload["session"] = session_id
 
                 if await deliver_into_auto_turn(client, session_id, key, prompt):
@@ -592,7 +631,7 @@ class OpencodeProvider(Provider):
                     return {"type": "reaction", "content": INJECTED_ACK}, api_payload
 
                 body: Dict[str, Any] = {
-                    "parts": [{"type": "text", "text": prompt, "metadata": {_KEY_FIELD: key}}],
+                    "parts": [{"type": "text", "text": prompt, "metadata": {KEY_FIELD: key}}],
                 }
                 if system_prompt:
                     body["system"] = system_prompt

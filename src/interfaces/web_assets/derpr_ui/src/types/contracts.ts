@@ -144,7 +144,8 @@ export interface LtmBlockResponse {
 }
 
 // ---- channel tags (source-agnostic `channel` string) ----
-export type ChannelSource = 'web' | 'dsc' | 'zmd' | 'gml'
+// `tsk`: a codr ticket's channel, `task:<ticket>` (DP-484)
+export type ChannelSource = 'web' | 'dsc' | 'zmd' | 'gml' | 'tsk'
 
 // ---- GET /api/v1/channels → { channels: ChannelRow[] } (DP-136 6b) ----
 export interface ChannelRow {
@@ -153,12 +154,16 @@ export interface ChannelRow {
   source: ChannelSource
   count: number
   last_ts: string | null
+  // display name when the tag alone is not one (a ticket's `CD-001 · title`)
+  label?: string | null
 }
 
 export interface ChannelItem {
   id: string
   // the raw source-agnostic `channel` string used to scope transcript/submit
   channel: string
+  // what the rail shows; the raw tag when the engine sends no label
+  label: string
   source: ChannelSource
   preview: string
 }
