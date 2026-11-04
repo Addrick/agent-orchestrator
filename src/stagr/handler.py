@@ -449,7 +449,10 @@ class StagrToolHandler:
             except ValueError:
                 return _error(f"{mark} does not hold a number; fix or remove it.")
         for entry in queue.iterdir() if queue.is_dir() else []:
-            if entry.is_dir() and not entry.name.startswith("."):
+            # Only a folder codr's agent would load (`load_tickets`): an empty
+            # one would be accepted here and hold its dependents forever there.
+            if (entry.is_dir() and not entry.name.startswith(".")
+                    and (entry / "TASK.md").is_file() and (entry / "check.sh").is_file()):
                 names.add(entry.name)
             # `.CD-007.queue-1a2b3c4d` is CD-007 being staged.
             highest = max(highest, ticket_number(entry.name.lstrip(".").split(".", 1)[0]) or 0)

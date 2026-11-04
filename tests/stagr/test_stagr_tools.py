@@ -397,12 +397,17 @@ async def test_two_queue_calls_at_once_get_two_ids(queue, action_log):
 async def test_depends_on_must_name_a_known_ticket(queue, action_log):
     handler = StagrToolHandler(memory_manager=action_log)
     (queue / "03-cron").mkdir(parents=True)           # a hand-written ticket counts
+    (queue / "03-cron" / "TASK.md").write_text("Build it.\n", encoding="utf-8")
+    (queue / "03-cron" / "check.sh").write_text("exit 0\n", encoding="utf-8")
+    (queue / "04-empty").mkdir()                      # a folder codr would not load does not
     _attempted(action_log, "CD-007", outcome="pass")  # so does one only in the log
     ok = await _queue(handler, depends_on="CD-007, 03-cron")
     assert ok["status"] == "ok"
     assert "depends_on: CD-007, 03-cron\n" in (queue / ok["queued"] / "TASK.md").read_text(encoding="utf-8")
     bad = await _queue(handler, depends_on=["CD-007", "CD-404"])
     assert bad["status"] == "error" and "CD-404" in bad["message"]
+    empty = await _queue(handler, depends_on="04-empty")
+    assert empty["status"] == "error" and "04-empty" in empty["message"]
     assert not (queue / "CD-009").exists()
 
 
