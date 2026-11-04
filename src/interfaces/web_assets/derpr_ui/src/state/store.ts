@@ -577,33 +577,59 @@ export function usePortalStore() {
   // preview mirrors the per-message recall the engine recomputes at submit.
   // Preview-only: the submit path still sends derpr_user_text untouched.
   const ltmPreviewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const ltmPreviewSeq = useRef(0)
+  // DP-492: at most ONE preview recall in flight. Each is a full Hindsight
+  // recall (~4.5 s on a big bank) and the debounce is 400 ms, so firing per
+  // pause stacked dozens of recalls and starved the server. A draft that
+  // settles while one is in flight is parked in `pending` (latest wins) and
+  // sent when the current one returns. The backend also cancels a superseded
+  // preview for the same persona+channel, covering other tabs/clients.
+  const ltmPreviewPending = useRef<string | null>(null)
+  const ltmPreviewBusy = useRef(false)
+  const ltmPreviewAbort = useRef<AbortController | null>(null)
+  const cancelLtmPreview = useCallback(() => {
+    if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
+    ltmPreviewPending.current = null
+    ltmPreviewAbort.current?.abort()
+  }, [])
   const previewLtm = useCallback((draft: string) => {
     if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
     const trimmed = draft.trim()
     // Blank draft → leave the existing empty-query preview in place; don't fire.
     if (!trimmed) return
     ltmPreviewTimer.current = setTimeout(() => {
-      const p = personaRef.current
-      if (!p || !ltmOnRef.current) return
-      const seq = ++ltmPreviewSeq.current
-      const pName = p.name
-      const chan = activeChannelRef.current
+      ltmPreviewPending.current = trimmed
+      if (ltmPreviewBusy.current) return // the running loop picks it up
+      ltmPreviewBusy.current = true
       void (async () => {
         try {
-          const blk = await api.getLtmBlock(pName, trimmed, chan)
-          // Drop a response superseded by a newer keystroke, an LTM-off toggle,
-          // or a persona/channel switch that landed while this was in flight.
-          if (
-            seq !== ltmPreviewSeq.current ||
-            !ltmOnRef.current ||
-            personaRef.current?.name !== pName ||
-            activeChannelRef.current !== chan
-          )
-            return
-          setLtmBlock(blk)
-        } catch {
-          /* preview-only — keep the last block on a transient fetch failure */
+          while (ltmPreviewPending.current !== null) {
+            const q = ltmPreviewPending.current
+            ltmPreviewPending.current = null
+            const p = personaRef.current
+            if (!p || !ltmOnRef.current) break
+            const pName = p.name
+            const chan = activeChannelRef.current
+            const ctl = new AbortController()
+            ltmPreviewAbort.current = ctl
+            try {
+              const blk = await api.getLtmBlock(pName, q, chan, ctl.signal)
+              // Drop a response made stale by a cancel, an LTM-off toggle, or
+              // a persona/channel switch that landed while it was in flight.
+              if (
+                ctl.signal.aborted ||
+                !ltmOnRef.current ||
+                personaRef.current?.name !== pName ||
+                activeChannelRef.current !== chan
+              )
+                continue
+              setLtmBlock(blk)
+            } catch {
+              /* preview-only — keep the last block on abort/supersede/failure */
+            }
+          }
+        } finally {
+          ltmPreviewBusy.current = false
+          ltmPreviewAbort.current = null
         }
       })()
     }, 400)
@@ -613,6 +639,7 @@ export function usePortalStore() {
   const switchPersona = useCallback(
     async (name: string) => {
       const prev = activePersonaRef.current
+      cancelLtmPreview()
       setActivePersona(name)
       localStorage.setItem(PERSONA_LS_KEY, name)
       try {
@@ -631,7 +658,7 @@ export function usePortalStore() {
       // reloads its channel list — no forced web_ui reset here.
       await loadAll(name)
     },
-    [loadAll],
+    [loadAll, cancelLtmPreview],
   )
 
   // ---- create a new persona (DP-231) --------------------------------
@@ -662,6 +689,7 @@ export function usePortalStore() {
   // engine honors the persona's memory_mode for isolation.
   const switchChannel = useCallback(
     async (channel: string) => {
+      cancelLtmPreview()
       setActiveChannel(channel)
       activeChannelRef.current = channel
       if (persona) {
@@ -676,7 +704,7 @@ export function usePortalStore() {
         }
       }
     },
-    [persona, ltmOn, refreshTranscript],
+    [persona, ltmOn, refreshTranscript, cancelLtmPreview],
   )
 
   // "+ new channel" — just point the active channel at a fresh tag. No row

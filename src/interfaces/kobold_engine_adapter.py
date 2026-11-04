@@ -332,6 +332,10 @@ class KoboldEngineAdapter:
         self.host = host or global_config.KOBOLD_ADAPTER_HOST
         self.port = port
         self.active_persona: Optional[str] = None
+        # DP-492: the in-flight ltm_block recall per (persona, user, channel,
+        # server). A newer request for the same key cancels the older one, so
+        # draft previews can never stack recalls on Hindsight.
+        self._ltm_block_inflight: Dict[Tuple[str, str, str, Optional[str]], "asyncio.Task[Optional[str]]"] = {}
         # DP-277: auto-docs advertise the whole route surface — off.
         self.app: FastAPI = FastAPI(
             title="DERPR Kobold Engine Adapter",
@@ -908,16 +912,45 @@ class KoboldEngineAdapter:
             inject. DP-136: `channel`/`user_identifier`/`server_id` are accepted so the
             recalled block is scoped to the active channel (defaults preserve the
             single web_ui/portal behavior).
+
+            DP-492: draft previews (non-empty `query`) are single-flight per
+            (persona, user, channel, server). The SPA calls this as the user
+            types; each call is a full Hindsight recall (~4.5 s on a large
+            bank), so unbounded calls pile up and starve the server. A newer
+            preview cancels the older one's recall, which closes its Hindsight
+            connection, and the older caller gets
+            {"block": null, "superseded": true}. Empty-query calls (navigation,
+            LTM toggle) are one-shots and never supersede or get superseded.
             """
             if persona not in self._personas:
                 return JSONResponse(status_code=404, content={"error": f"Persona '{persona}' not found"})
-            block = await self._get_session_memory_block(
+            recall = self._get_session_memory_block(
                 persona_name=persona,
                 user_identifier=user_identifier,
                 channel=channel,
                 server_id=server_id,
                 query=query,
             )
+            if not query.strip():
+                return {"block": await recall}
+            key = (persona, user_identifier, channel, server_id)
+            prev = self._ltm_block_inflight.get(key)
+            if prev is not None and not prev.done():
+                prev.cancel()
+            task: "asyncio.Task[Optional[str]]" = asyncio.ensure_future(recall)
+            self._ltm_block_inflight[key] = task
+            try:
+                # Awaiting the task directly also cancels it if THIS handler
+                # is cancelled, so an abandoned request never leaks a recall.
+                block = await task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if task.cancelled() and current is not None and not current.cancelling():
+                    return {"block": None, "superseded": True}
+                raise
+            finally:
+                if self._ltm_block_inflight.get(key) is task:
+                    del self._ltm_block_inflight[key]
             return {"block": block}
 
         @self.app.get("/api/v1/session/{persona}/assemble")

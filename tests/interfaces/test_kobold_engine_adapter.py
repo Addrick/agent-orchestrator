@@ -880,6 +880,113 @@ def test_ltm_block_empty_query_passes_none():
     mm.close()
 
 
+# -------- DP-492: ltm_block draft previews are single-flight --------
+
+def _gated_retrieve():
+    """A retrieve stub that blocks until released, recording cancellations."""
+    state = {"started": [], "cancelled": [], "release": asyncio.Event()}
+
+    async def retrieve(**kwargs):
+        state["started"].append(kwargs.get("query"))
+        try:
+            await state["release"].wait()
+        except asyncio.CancelledError:
+            state["cancelled"].append(kwargs.get("query"))
+            raise
+        return f"<memory>{kwargs.get('query')}</memory>"
+
+    return retrieve, state
+
+
+async def _get(client, query, channel="web_ui"):
+    return await client.get(
+        "/api/v1/session/test_persona/ltm_block",
+        params={"query": query, "channel": channel},
+    )
+
+
+async def _until(cond):
+    for _ in range(200):
+        if cond():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition never became true")
+
+
+def _asgi_client(adapter):
+    import httpx
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=adapter.app), base_url="http://t"
+    )
+
+
+def test_ltm_block_newer_preview_cancels_older_recall():
+    retrieve, state = _gated_retrieve()
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=retrieve)
+
+    async def run():
+        async with _asgi_client(adapter) as client:
+            first = asyncio.create_task(_get(client, "draft one"))
+            await _until(lambda: state["started"] == ["draft one"])
+            second = asyncio.create_task(_get(client, "draft two"))
+            await _until(lambda: state["cancelled"] == ["draft one"])
+            r1 = await first
+            state["release"].set()
+            r2 = await second
+            return r1, r2
+
+    r1, r2 = asyncio.run(run())
+    # The older recall was really cancelled (not left running on Hindsight)...
+    assert state["cancelled"] == ["draft one"]
+    # ...its caller is told so, distinctly from "no memories"...
+    assert r1.status_code == 200
+    assert r1.json() == {"block": None, "superseded": True}
+    # ...and the newer preview completes normally.
+    assert r2.json() == {"block": "<memory>draft two</memory>"}
+    assert adapter._ltm_block_inflight == {}
+    mm.close()
+
+
+def test_ltm_block_previews_on_different_channels_do_not_supersede():
+    retrieve, state = _gated_retrieve()
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=retrieve)
+
+    async def run():
+        async with _asgi_client(adapter) as client:
+            a = asyncio.create_task(_get(client, "q", channel="chan-a"))
+            b = asyncio.create_task(_get(client, "q", channel="chan-b"))
+            await _until(lambda: len(state["started"]) == 2)
+            state["release"].set()
+            return await a, await b
+
+    ra, rb = asyncio.run(run())
+    assert state["cancelled"] == []
+    assert ra.json() == rb.json() == {"block": "<memory>q</memory>"}
+    mm.close()
+
+
+def test_ltm_block_empty_query_is_never_superseded():
+    # Navigation/LTM-toggle loads send no query: they are one-shots, and a
+    # draft preview arriving meanwhile must not blank the panel's block.
+    retrieve, state = _gated_retrieve()
+    adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=retrieve)
+
+    async def run():
+        async with _asgi_client(adapter) as client:
+            nav = asyncio.create_task(_get(client, ""))
+            await _until(lambda: state["started"] == [""])
+            preview = asyncio.create_task(_get(client, "draft"))
+            await _until(lambda: len(state["started"]) == 2)
+            state["release"].set()
+            return await nav, await preview
+
+    rn, rp = asyncio.run(run())
+    assert state["cancelled"] == []
+    assert rn.json() == {"block": "<memory></memory>"}
+    assert rp.json() == {"block": "<memory>draft</memory>"}
+    mm.close()
+
+
 # -------- Phase 2.3b → D: SSE derpr frame + version endpoints --------
 
 def test_stream_emits_derpr_frame_before_done_with_assistant_id():
