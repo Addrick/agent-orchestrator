@@ -78,7 +78,7 @@ def wired_system():
 
     # DP-456 stagr setup-VM tools (behind the "stagr" binding)
     from src.stagr import StagrIntegration
-    chat_system.register_service(StagrIntegration())
+    chat_system.register_service(StagrIntegration(memory_manager=memory_manager))
 
     # DP-268 MCP client subsystem (management tools behind the "mcp" binding)
     from src.tools.mcp_client import MCPClientManager

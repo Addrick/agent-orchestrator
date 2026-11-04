@@ -424,8 +424,10 @@ async def main() -> None:
     # on the setup VM (a second opencode server) plus gated transfers into and out
     # of codr's sandbox and grants on the egress allowlist, the latter over the
     # same node gate as 7.3. Personas opt in via service_bindings: ["stagr"].
+    # The memory manager lets queue_codr_task see every codr ticket ID already
+    # attempted, so it never hands one out twice (DP-489).
     from src.stagr import StagrIntegration
-    bot.register_service(StagrIntegration())
+    bot.register_service(StagrIntegration(memory_manager=bot.memory_manager))
 
     # 7.4 Register the MCP client subsystem (DP-268). main.py owns the manager
     # (sessions/lifecycle — voice precedent); the integration only registers
