@@ -681,6 +681,7 @@ class ChatSystem:
                     initial_taint_sources=ctx.taint_sources,
                     pending_lookup=_already_pending,
                     resolved_lookup=_already_resolved,
+                    channel=ctx.channel,
                 ):
                     if isinstance(ev, _ApiPayloadEvent):
                         self.turn_persistence.store_api_request(

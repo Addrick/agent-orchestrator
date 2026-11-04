@@ -838,6 +838,15 @@ class MemoryManager:
             conn.commit()
             return int(cursor.lastrowid) if cursor.lastrowid is not None else None
 
+    def get_interaction_by_platform_id(self, platform_message_id: str) -> Optional[Dict[str, Any]]:
+        """The row stored under `platform_message_id` (unique), or None."""
+        with self._lock:
+            row = self._get_connection().execute(
+                "SELECT interaction_id, content, reasoning_content, tool_context FROM User_Interactions"
+                " WHERE platform_message_id = ?", (platform_message_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def update_platform_message_id(self, interaction_id: int, platform_message_id: str) -> None:
         with self._lock:
             conn = self._get_connection()

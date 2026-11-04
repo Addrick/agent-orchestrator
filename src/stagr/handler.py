@@ -54,7 +54,7 @@ import aiohttp
 
 from config import global_config
 from src.engine.providers.opencode import (
-    OpencodeClient, auth_headers, open_auto, session_title, workspace_directory, workspace_held, workspace_lock,
+    OpencodeClient, auth_headers, open_auto, persona_sessions, workspace_directory, workspace_held, workspace_lock,
 )
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
@@ -300,11 +300,10 @@ class StagrToolHandler:
         status = await client.request("GET", "/session/status") or {}
         if not all((v or {}).get("type", "idle") == "idle" for v in status.values()):
             return False
-        title = session_title(CODR_PERSONA)
-        for s in await client.request("GET", "/session") or []:
-            if s.get("title") == title and not s.get("parentID"):
-                if any(open_auto(m) is not None for m in await client.turn_messages(str(s["id"]))):
-                    return False
+        # codr's own session and each ticket's (DP-484).
+        for s in persona_sessions(await client.request("GET", "/session") or [], CODR_PERSONA):
+            if any(open_auto(m) is not None for m in await client.turn_messages(str(s["id"]))):
+                return False
         return True
 
     @staticmethod

@@ -216,6 +216,7 @@ const SOURCE_LABEL: Record<ChannelSource, string> = {
   dsc: 'Discord',
   zmd: 'Zammad',
   gml: 'Gmail',
+  tsk: 'codr tickets',
 }
 
 export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
@@ -230,6 +231,7 @@ export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
         const item: ChannelItem = {
           id: `${c.channel}:${c.server_id ?? ''}`,
           channel: c.channel,
+          label: c.label || c.channel,
           source: src,
           preview: c.count ? `${c.count} msgs` : 'no history yet',
         }
@@ -237,7 +239,7 @@ export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
         list.push(item)
         bySource.set(src, list)
       }
-      const order: ChannelSource[] = ['web', 'dsc', 'zmd', 'gml']
+      const order: ChannelSource[] = ['web', 'tsk', 'dsc', 'zmd', 'gml']
       return order
         .filter((s) => bySource.has(s))
         .map((s) => ({ group: SOURCE_LABEL[s], items: bySource.get(s)! }))

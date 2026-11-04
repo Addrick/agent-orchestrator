@@ -58,7 +58,7 @@
         },
         "codr": {
             "persona": "codr",
-            "schedule": {"interval": 30},
+            "schedule": {"interval": 10},
             "auto_start": false,
             "notification_target": {"channel": "discord_channel", "recipient": "1562589289332609075"},
             "max_attempts": 3,

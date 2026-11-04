@@ -49,6 +49,8 @@ class FakeOpencode:
         stored = [{"id": f"prt_{next(self._ids)}", "sessionID": sid, "messageID": mid, **p} for p in parts]
         message = {"info": {"id": mid, "role": role, **info}, "parts": stored}
         self.messages[sid].append(message)
+        if sid in self.sessions:        # like opencode: a new message touches its session
+            self.sessions[sid]["time"]["updated"] = next(self._ids)
         return message
 
     def app(self) -> web.Application:
@@ -178,8 +180,10 @@ def _history(*turns):
     ], "current_message": {"text": "", "image_url": None}}
 
 
-async def _generate(provider, history, *, request_id="req-1", model="opencode", persona="codr"):
+async def _generate(provider, history, *, request_id="req-1", model="opencode", persona="codr", channel=None):
     config = {"model_name": model, "persona_name": persona, "request_id": request_id}
+    if channel is not None:
+        config["channel"] = channel
     return await provider.generate(config, history, None)
 
 
@@ -453,3 +457,45 @@ async def test_read_file_returns_any_file_byte_for_byte(fake, tmp_path):
         assert await client.read_file("out.bundle") == binary
         assert await client.read_file("notes.md") == text
     assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.md", "out.bundle"]
+
+
+# --- DP-484: a ticket's channel talks to the ticket's session ------------------
+
+
+def test_ticket_channels_map_to_ticket_sessions():
+    assert opencode.channel_ticket("task:CD-001") == "CD-001"
+    assert opencode.channel_ticket("task:") is None and opencode.channel_ticket("discord_123") is None
+    assert opencode.chat_session_title("codr", "task:CD-001") == "derpr:codr:CD-001"
+    assert opencode.chat_session_title("codr", "discord_123") == "derpr:codr"
+    sessions = [{"id": "a", "title": "derpr:codr"}, {"id": "b", "title": "derpr:codr:CD-001"},
+                {"id": "c", "title": "derpr:codrx"}, {"id": "d", "title": "derpr:codr:CD-001", "parentID": "b"}]
+    assert [s["id"] for s in opencode.persona_sessions(sessions, "codr")] == ["a", "b"]
+
+
+async def test_a_message_in_a_tickets_channel_goes_into_its_running_turn(fake):
+    provider = OpencodeProvider(TextEngine())
+    await _generate(provider, _history(("user", "hi")), request_id="a")          # codr's own session
+    ticket = f"ses_{len(fake.sessions)}t"
+    fake.sessions[ticket] = {"id": ticket, "directory": f"{ROOT}/codr", "title": "derpr:codr:CD-001",
+                             "time": {"created": 1, "updated": 9}}
+    fake.messages[ticket] = []
+    _auto_turn(fake, ticket)
+    fake.busy.add(ticket)
+
+    result, _ = await _generate(provider, _history(("user", "use sqlite")), request_id="b", channel="task:CD-001")
+    assert result["content"] == opencode.INJECTED_ACK
+    assert fake.messages[ticket][-1]["parts"][0]["text"] == "User: use sqlite"
+
+    # Any other channel (Discord) is an ordinary turn in codr's own session,
+    # even with the ticket running: it never folds into the ticket.
+    result, _ = await _generate(provider, _history(("user", "status?")), request_id="c", channel="discord_1")
+    assert result["content"] == "done."
+    assert len(fake.messages[ticket]) == 3
+
+
+async def test_a_message_in_an_idle_tickets_channel_is_a_turn_in_its_session(fake):
+    provider = OpencodeProvider(TextEngine())
+    result, _ = await _generate(provider, _history(("user", "why did it fail?")), channel="task:CD-002")
+    assert result["content"] == "done."
+    (sid,) = [s for s in fake.sessions if fake.sessions[s]["title"] == "derpr:codr:CD-002"]
+    assert fake.messages[sid][0]["parts"][0]["text"] == "User: why did it fail?"

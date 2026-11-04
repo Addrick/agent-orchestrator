@@ -1990,6 +1990,24 @@ def test_channels_endpoint_groups_by_source_and_injects_web_ui():
     mm.close()
 
 
+def test_a_codr_tickets_channel_is_grouped_and_labelled_by_its_title(tmp_path, monkeypatch):
+    """DP-484: `task:<ticket>` channels get their own source and a
+    `CD-NNN · title` label from the queue; one whose folder is gone keeps none."""
+    (tmp_path / "CD-001").mkdir()
+    (tmp_path / "CD-001" / "TASK.md").write_text("title: csv stats\nproject: tools\n\nBuild it.")
+    monkeypatch.setattr(global_config, "CODR_TASKS_DIR", tmp_path)
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    _seed_channel(mm, "test_persona", "task:CD-001", "agent:codr", 1)
+    _seed_channel(mm, "test_persona", "task:CD-002", "agent:codr", 1, base_offset=50)
+    with TestClient(adapter.app) as client:
+        by_chan = {c["channel"]: c for c in client.get("/api/v1/channels?persona=test_persona").json()["channels"]}
+    assert by_chan["task:CD-001"]["source"] == "tsk"
+    assert by_chan["task:CD-001"]["label"] == "CD-001 · csv stats"
+    assert by_chan["task:CD-002"]["label"] is None
+    assert by_chan["web_ui"].get("label") is None
+    mm.close()
+
+
 def test_transcript_channel_scoping_isolates_per_channel():
     # CHANNEL_ISOLATED persona: ?channel= must return only that channel's rows.
     adapter, mm, _ = _make_adapter_with_seeded_db(context_length=20)

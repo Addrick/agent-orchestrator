@@ -39,6 +39,11 @@ const newRunId = (): string =>
 // focus / channel switch.
 type ResumeMode = 'drop' | 'busy' | 'check'
 
+// A codr ticket's channel (DP-484) and how often an open one is re-read. The
+// agent mirrors the ticket's session once per tick, so faster buys nothing.
+const TICKET_CHANNEL_PREFIX = 'task:'
+const TICKET_POLL_MS = 5000
+
 // localStorage key for the last-selected persona. Client-side only — the
 // engine's PUT /api/v1/model active persona is runtime routing state, not a
 // persisted setting, and resets on restart (intentionally not duplicated
@@ -403,6 +408,28 @@ export function usePortalStore() {
       document.removeEventListener('visibilitychange', onFocus)
     }
   }, [])
+
+  // DP-484: a codr ticket's channel (`task:<ticket>`) is written by the codr
+  // agent as the ticket runs, not by a turn this page streams, so while one
+  // is open and visible its transcript is re-read every few seconds.
+  useEffect(() => {
+    if (!activeChannel.startsWith(TICKET_CHANNEL_PREFIX)) return
+    const t = setInterval(() => {
+      if (document.visibilityState !== 'visible' || streamingRef.current) return
+      const p = activePersonaRef.current
+      const ch = activeChannelRef.current
+      api.getTranscript(p, undefined, ch).then(
+        (cs) => {
+          if (p !== activePersonaRef.current || ch !== activeChannelRef.current
+            || streamingRef.current) return
+          chunksRef.current = cs
+          setChunks(cs)
+        },
+        () => {}, // the next tick tries again
+      )
+    }, TICKET_POLL_MS)
+    return () => clearInterval(t)
+  }, [activeChannel])
 
   const refreshPersona = useCallback(async (p: string) => {
     try {

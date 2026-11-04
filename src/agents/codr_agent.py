@@ -1,14 +1,16 @@
 # src/agents/codr_agent.py
 """codr agent (DP-449): lets the opencode persona `codr` work on its own.
 
-Each tick looks at codr's one opencode session (the same one chat uses,
-`providers/opencode`) and does at most one of:
+Each ticket runs in its own opencode session, `derpr:codr:<ticket>` (DP-484);
+codr's own session `derpr:codr` is chat's (`providers/opencode`). Each tick
+reads those sessions (`_scan`) and does at most one of:
 
   - relay: every completed `notify_adam` tool call not yet in the action log
     is logged, then posted to the configured channel (rate-limited) and
     stored as codr's reply in its latest conversation;
-  - watch: a turn this agent started is still running, so check it for loops,
-    a stall or an overrun, and nudge or abort it;
+  - watch: a turn this agent started is still running, so copy its steps
+    into the ticket's channel (`codr_transcript`) and check it for loops, a
+    stall or an overrun, and nudge or abort it;
   - finish: that turn has ended, so run the task's check in the ticket's
     worktree, merge the ticket branch into its project on a pass, record the
     attempt and post the result;
@@ -41,6 +43,7 @@ import tarfile
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
@@ -53,11 +56,12 @@ from src.clients.notification import NotificationRouter
 from src.generation_events import ResponseType
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
-from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context
+from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header
+from src.agents.codr_transcript import TranscriptMirror
 from src.engine.providers.opencode import (
     AUTO_FIELD, INJECTED_FIELD, OpencodeClient, auth_headers, current_turn_start,
-    ensure_opencode_supported, message_meta, open_auto, opencode_model, part_meta, session_title,
-    turn_end, turn_finished, workspace_directory, workspace_lock,
+    ensure_opencode_supported, message_meta, open_auto, opencode_model, part_meta, persona_sessions,
+    session_title, ticket_channel, ticket_session_title, turn_end, turn_finished, workspace_directory, workspace_lock,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,10 @@ _MERGED_MARK = "__DERPR_MERGED="
 _CONFLICT_MARK = "__DERPR_CONFLICT"
 _MAIN_MARK = "__DERPR_MAIN="
 _NOTED_MARK = "__DERPR_NOTED"
+_FILE_MARK = "__DERPR_FILE="
+_FILE_END = "__DERPR_FILE_END"
+# Per memory file in a ticket's first prompt: the index files are meant to be short.
+CONTEXT_FILE_CHARS = 12000
 # Commits DERPR makes in codr's repos carry its own name, so `git log` tells
 # them apart from codr's.
 _GIT_AS_DERPR = "git -c user.name=DERPR -c user.email=derpr@codr.local"
@@ -133,7 +141,6 @@ class CodrTask:
 # but it names a worktree and the branch `ticket/<id>`, so it must be a valid
 # git ref component too.
 BRANCH_SAFE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_HEADER_LINE = re.compile(r"([a-z][a-z_]*):[ \t]*(.*?)\s*")
 
 
 def default_project(ticket_id: str) -> str:
@@ -147,28 +154,6 @@ def _ticket_id_error(ticket_id: str) -> Optional[str]:
         return (f"the folder name {ticket_id!r} cannot be a git branch name: use letters, digits, "
                 "'.', '_' and '-', starting with a letter or digit")
     return None
-
-
-def parse_header(text: str) -> Tuple[Dict[str, str], str]:
-    """(header, ticket text). The header is the run of `key: value` lines at
-    the top, ended by the first blank line or the first line that is not
-    `key: value` (the pre-DP-488 form was one `max_attempts: N` line with the
-    text right under it). No such first line = no header."""
-    header: Dict[str, str] = {}
-    lines = text.split("\n")
-    i = 0
-    while i < len(lines):
-        match = _HEADER_LINE.fullmatch(lines[i])
-        if not match:
-            break
-        key, value = match.groups()
-        if key in header:
-            raise ValueError(f"`{key}:` appears twice in the header")
-        header[key] = value
-        i += 1
-    if i < len(lines) and header and not lines[i].strip():
-        i += 1
-    return header, "\n".join(lines[i:])
 
 
 def _ticket_fields(ticket_id: str, header: Dict[str, str], default_attempts: int) -> Dict[str, Any]:
@@ -676,6 +661,28 @@ def ticket_note_script(task_id: str, line: str) -> str:
     ]) + "\n"
 
 
+def context_files(task: CodrTask) -> List[str]:
+    """The memory files a ticket's first prompt carries (DP-484): the index,
+    the project's note and the tickets' overview."""
+    return ["memory/MEMORY.md", f"memory/projects/{task.project_name}.md", "memory/tickets/_overview.md"]
+
+
+def context_script(task: CodrTask) -> str:
+    """Bash printing each of `context_files` that exists, between markers."""
+    lines = []
+    for path in context_files(task):
+        q = shlex.quote(path)
+        lines += [f"if [ -f {q} ]; then echo {shlex.quote(_FILE_MARK + path)}; "
+                  f"head -c {CONTEXT_FILE_CHARS} -- {q}; echo; echo {_FILE_END}; fi"]
+    return "\n".join(lines) + "\n"
+
+
+def parse_context(output: str) -> Dict[str, str]:
+    """{path: content} from `context_script`'s output."""
+    found = re.findall(rf"^{_FILE_MARK}(.+?)\n(.*?)\n?{_FILE_END}$", output, flags=re.M | re.S)
+    return {path: body.strip("\n") for path, body in found}
+
+
 def parse_check(output: str) -> Tuple[bool, str]:
     """(passed, output without the exit marker). No marker = failed."""
     match = re.search(rf"{_EXIT_MARK}(\d+)\s*$", output)
@@ -709,6 +716,10 @@ class CodrAgent(Agent):
         self._dropped = 0
         self._undelivered = 0
         self._progress: Tuple[Any, float] = (None, 0.0)
+        self.mirror = TranscriptMirror(chat_system.turn_persistence, self.persona_name)
+        # Sessions seen idle with no open task turn, by their `time.updated`:
+        # not read again until they change (DP-484, one session per ticket).
+        self._settled: Dict[str, Any] = {}
 
     # -- plumbing
 
@@ -757,32 +768,75 @@ class CodrAgent(Agent):
 
     # -- the tick
 
+    def _ticket_of(self, session: Dict[str, Any]) -> Optional[str]:
+        """The ticket a session of this persona belongs to; None for its own."""
+        title, own = str(session.get("title") or ""), session_title(self.persona_name)
+        return title[len(own) + 1:] if title.startswith(f"{own}:") else None
+
     async def deploy(self) -> None:
+        """One tick. Each ticket has its own session (DP-484); the persona's
+        own session is chat's, and holds the task turns started before
+        that. Every one of them is read, except one already seen idle with no
+        open task turn and not changed since (`_settled`). One task turn is
+        open at a time."""
         ensure_opencode_supported()
         async with aiohttp.ClientSession(headers=auth_headers()) as http:
             client = OpencodeClient(http, self.directory)
-            sid = await client.ensure_session(self.root, self.slug, session_title(self.persona_name))
+            await client.ensure_session(self.root, self.slug, session_title(self.persona_name))
             if not self._workspace_synced:
                 await self._sync_workspace(client)
-            msgs = await client.turn_messages(sid)
-            await self._relay(msgs)
-
-            start = self._open_turn(msgs)
-            if start is not None:
+            status = await client.request("GET", "/session/status") or {}
+            busy = {sid for sid, st in status.items() if (st or {}).get("type", "idle") != "idle"}
+            found = await self._scan(client, busy)
+            if found is not None:
+                sid, ticket, msgs, start = found
                 auto = open_auto(msgs[start]) or {}
                 # A later turn (a chat message sent between ticks) means this one ended.
                 end = turn_end(msgs, start)
                 if end < len(msgs) or turn_finished(msgs, start):
-                    await self._finish(client, msgs[:end], start, auto)
+                    await self._finish(client, sid, ticket, msgs[:end], start, auto)
                 else:
+                    if ticket is not None:
+                        await self._mirror(client, sid, ticket, msgs)
                     await self._watch(client, sid, msgs, start, auto)
                 return
 
-            busy = await client.is_busy(sid)
             if self._dispose_pending and not busy:
                 await self._dispose(client)
             if not busy and self.cfg["start_tasks"]:
-                await self._start_next(client, sid)
+                await self._start_next(client)
+
+    async def _scan(self, client: OpencodeClient, busy: Set[str]
+                    ) -> Optional[Tuple[str, Optional[str], List[Dict[str, Any]], int]]:
+        """Read each of the persona's sessions that is busy or changed since
+        it was last seen settled, relay its `notify_adam` calls, and return
+        the open task turn (session, ticket, messages, start index), if any.
+        Newest first: if two sessions somehow both hold an open turn, the
+        older one waits for a later tick."""
+        sessions = persona_sessions(await client.request("GET", "/session") or [], self.persona_name)
+        found = None
+        for s in sorted(sessions, key=lambda s: -int((s.get("time") or {}).get("updated") or 0)):
+            sid, stamp = str(s["id"]), (s.get("time") or {}).get("updated")
+            if sid not in busy and stamp is not None and self._settled.get(sid) == stamp:
+                continue
+            ticket = self._ticket_of(s)
+            msgs = await client.turn_messages(sid)
+            await self._relay(msgs, ticket)
+            start = self._open_turn(msgs)
+            if start is None and sid not in busy:
+                self._settled[sid] = stamp
+            elif start is not None and found is None:
+                found = (sid, ticket, msgs, start)
+        return found
+
+    async def _mirror(self, client: OpencodeClient, sid: str, ticket: str,
+                      msgs: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Copy the ticket's session into its channel. Best effort: the
+        transcript must never stop the agent from watching or finishing."""
+        try:
+            await self.mirror.sync(client, sid, ticket, msgs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("codr agent: could not mirror %s into its channel: %r", ticket, e)
 
     async def _sync_workspace(self, client: OpencodeClient) -> None:
         out = await client.run_shell(sync_script(workspace_files(self.cfg)))
@@ -833,7 +887,7 @@ class CodrAgent(Agent):
         rows = self.memory_manager.get_agent_actions(self.agent_name, limit=2000, action_type=RELAY_ACTION)
         return {str(r.get("trigger_context")) for r in rows}
 
-    async def _relay(self, msgs: List[Dict[str, Any]]) -> None:
+    async def _relay(self, msgs: List[Dict[str, Any]], ticket: Optional[str] = None) -> None:
         """Post each `notify_adam` call not relayed yet. Which ones were is
         kept in the action log, not on the part: opencode sends an assistant
         part's metadata to the model as provider metadata, and a foreign key
@@ -862,7 +916,8 @@ class CodrAgent(Agent):
                     continue
                 # Whole, here and in `_post`: the Discord client splits long
                 # posts (DP-485). Only the action-log copy is capped, to fit its row.
-                if await self._post(f"codr: {text}"):
+                prefix = f"codr [{ticket}]" if ticket else "codr"
+                if await self._post(f"{prefix}: {text}"):
                     await self._commit_reply(text)
                 else:
                     self.memory_manager.update_agent_action_outcome(row, "failed")
@@ -892,16 +947,16 @@ class CodrAgent(Agent):
 
     # -- start
 
-    async def _start_next(self, client: OpencodeClient, sid: str) -> None:
+    async def _start_next(self, client: OpencodeClient) -> None:
         """Start the oldest open ticket (`queue_states`), after posting, once
         each, the tickets that were skipped or will not start."""
         tasks, errors = load_tickets(global_config.CODR_TASKS_DIR, int(self.cfg["max_attempts"]))
-        for task_id, error in errors.items():
-            await self._notice_once(task_id, f"skipped: {error}")
         attempts = self._all_attempts()
         # Every attempted ticket, queued or not: a passed one whose folder is gone still counts.
         states = queue_states(tasks, {tid: [str(a.get("outcome")) for a in rows]
                                       for tid, rows in attempts.items()})
+        for task_id, error in errors.items():
+            await self._notice_once(task_id, f"skipped: {error}")
         for task in tasks:
             state, why = states[task.id]
             if state in NOTICE_STATES:
@@ -909,12 +964,15 @@ class CodrAgent(Agent):
         for task in tasks:
             if states[task.id][0] == OPEN:
                 done = attempts.get(task.id, [])
-                if not await self._start(client, sid, task, len(done) + 1, done[-1] if done else None):
+                if not await self._start(client, task, len(done) + 1, done[-1] if done else None):
                     return
                 # Its project could not be prepared: try the next open ticket
                 # rather than stall the whole queue behind it.
 
-    def _task_prompt(self, task: CodrTask, attempt: int, previous: Optional[Dict[str, Any]]) -> str:
+    def _task_prompt(self, task: CodrTask, attempt: int, previous: Optional[Dict[str, Any]],
+                     context: Optional[Dict[str, str]] = None) -> str:
+        """The prompt that starts an attempt. `context` (the first attempt in
+        the ticket's session only) holds the memory files it carries."""
         title = f" {task.title}" if task.title else ""
         lines = [
             f"[Ticket `{task.id}`{title}, attempt {attempt} of {task.max_attempts}, "
@@ -925,7 +983,8 @@ class CodrAgent(Agent):
             f"Work only in your worktree `{task.worktree}/` (branch `{task.branch}`, cut from the main "
             f"branch of `{task.project_dir}/`), and commit there. Follow `AGENTS.md`.",
             f"Your notes on this ticket go in `memory/tickets/{task.id}.md`: what you tried, what "
-            "happened, what you decided. Read it, and `memory/MEMORY.md`, before you start.",
+            "happened, what you decided. Read it before you start. This session holds this ticket only; "
+            "earlier tickets, other projects and the rest of your notes are in `memory/` when you need them.",
             f"`{NOTIFY_TOOL}` tells Adam something now without ending your turn. Your final reply is not "
             f"posted, so when you are done, tell Adam with `{NOTIFY_TOOL}` what you did and anything he "
             f"should know, then end your turn. DERPR then runs its own check in `{task.worktree}/`; you "
@@ -933,6 +992,9 @@ class CodrAgent(Agent):
             "For an independent subtask you can use the `pool` subagent (task tool, background if you "
             "want to keep working).",
         ]
+        for path in context_files(task):
+            if context and context.get(path):
+                lines += ["", f"`{path}`:", "```", context[path], "```"]
         if previous:
             lines += self._previous_lines(task, previous)
         return "\n".join(lines)
@@ -955,11 +1017,12 @@ class CodrAgent(Agent):
             lines += ["Check output (tail):", "```", detail["check_tail"], "```"]
         return lines
 
-    async def _start(self, client: OpencodeClient, sid: str, task: CodrTask, attempt: int,
+    async def _start(self, client: OpencodeClient, task: CodrTask, attempt: int,
                      previous: Optional[Dict[str, Any]]) -> bool:
-        """Start `task`. True only when its project could not be prepared, so
-        the caller may try the next open ticket; False once it started, or
-        when nothing can start this tick (busy, locked, no persona)."""
+        """Start `task` in its own session (DP-484), which its retries
+        continue. True only when its project could not be prepared, so the
+        caller may try the next open ticket; False once it started, or when
+        nothing can start this tick (busy, locked, no persona)."""
         persona = self.chat_system.personas.get(self.persona_name)
         if persona is None:
             logger.error("codr agent: persona %r not found; not starting tasks.", self.persona_name)
@@ -968,6 +1031,7 @@ class CodrAgent(Agent):
         if lock.locked():
             return False            # a chat turn is starting or running; next tick
         async with lock:
+            sid = await client.find_or_create_session(ticket_session_title(self.persona_name, task.id))
             msgs = await client.turn_messages(sid)
             start = current_turn_start(msgs)
             if await client.is_busy(sid) or (start is not None and not turn_finished(msgs, start)
@@ -980,8 +1044,14 @@ class CodrAgent(Agent):
                 # in the project's place needs a human.
                 await self._notice_once(task.id, f"could not start: {e}")
                 return True
+            # Only the ticket's first prompt carries the memory files: a
+            # retry's session already holds them, or its compaction summary
+            # does. (Adam may have talked in the channel before it started.)
+            first = not any(message_meta(m, AUTO_FIELD) for m in msgs)
+            context = parse_context(await client.run_shell(context_script(task))) if first else None
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
-            await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous), meta)
+            await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous, context), meta)
+            await self._mirror(client, sid, task.id)
         logger.info("codr agent: started task %s attempt %d", task.id, attempt)
         return False
 
@@ -1072,8 +1142,12 @@ class CodrAgent(Agent):
 
     # -- finish
 
-    async def _finish(self, client: OpencodeClient, msgs: List[Dict[str, Any]],
-                      start: int, auto: Dict[str, Any]) -> None:
+    async def _finish(self, client: OpencodeClient, sid: str, ticket: Optional[str],
+                      msgs: List[Dict[str, Any]], start: int, auto: Dict[str, Any]) -> None:
+        if ticket is not None:
+            # The turn's last steps, before its result is posted (and the
+            # catch-up for a turn that ended while DERPR was down).
+            await self._mirror(client, sid, ticket, msgs)
         task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
         final = next((m for m in reversed(msgs[start + 1:]) if _role(m) == "assistant"), {})
         reply = "\n".join(p.get("text", "") for p in final.get("parts", [])
@@ -1171,4 +1245,20 @@ class CodrAgent(Agent):
             line += f" ({self._undelivered} notify_adam message(s) failed to post)"
             self._undelivered = 0
         await self._post(line)
+        self._channel_note(task_id, auto, line, detail)
         logger.info("codr agent: task %s attempt %s -> %s", task_id, auto.get("attempt"), outcome)
+
+    def _channel_note(self, task_id: str, auto: Dict[str, Any], line: str, detail: Dict[str, Any]) -> None:
+        """The attempt's result in the ticket's channel (DP-484), under the
+        turn it closes, with the check output when it failed."""
+        body = line
+        if detail.get("check_tail") and not detail.get("merged"):
+            body += f"\n\nCheck output (tail):\n```\n{detail['check_tail']}\n```"
+        try:
+            self.chat_system.turn_persistence.upsert_keyed_row(
+                platform_message_id=f"codr-attempt:{task_id}:{auto.get('attempt')}",
+                persona_name=self.persona_name, user_identifier=f"agent:{self.agent_name}",
+                channel=ticket_channel(task_id), role="assistant", author_name="DERPR",
+                content=body, timestamp=datetime.now(timezone.utc))
+        except Exception as e:  # noqa: BLE001 — the attempt is already recorded and posted
+            logger.warning("codr agent: attempt note for %s not stored in its channel: %r", task_id, e)
