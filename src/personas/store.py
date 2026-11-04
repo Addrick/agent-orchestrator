@@ -104,6 +104,25 @@ def save_personas_to_file(
     logger.debug(f"Updated persona save to {save_file}.")
 
 
+def _overridden_keys(persona: Any) -> Dict[str, Any]:
+    """Optional keys written only when set, so an unset persona keeps
+    following the global default rather than freezing today's value, and old
+    save files round-trip to the same on-disk shape. DP-428 max_tool_calls ·
+    DP-491 LTM recall knobs · DP-255 Hindsight retain-tuning knobs."""
+    candidates = {
+        "max_tool_calls": persona.get_max_tool_calls(),
+        "ltm_max_items": persona.get_ltm_max_items(),
+        "ltm_max_tokens": persona.get_ltm_max_tokens(),
+        "ltm_budget": persona.get_ltm_budget(),
+        "retain_mission": persona.get_retain_mission(),
+        "reflect_mission": persona.get_reflect_mission(),
+        "observations_mission": persona.get_observations_mission(),
+        "enable_observations": persona.get_enable_observations(),
+        "disposition": persona.get_disposition(),
+    }
+    return {k: v for k, v in candidates.items() if v is not None}
+
+
 def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Convert a dictionary of Persona objects to a list of dictionaries for JSON serialization.
 
@@ -138,31 +157,7 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
         # non-empty so untouched personas keep their on-disk shape.
         if persona.get_explicit_overrides():
             persona_json["explicit_overrides"] = persona.get_explicit_overrides()
-        # DP-428: written only when overridden, so an unset persona keeps
-        # following MAX_TOOL_CALLS rather than freezing today's value.
-        if persona.get_max_tool_calls() is not None:
-            persona_json["max_tool_calls"] = persona.get_max_tool_calls()
-        # DP-491: LTM recall knobs, written only when overridden (same reason).
-        for key, value in (
-            ("ltm_max_items", persona.get_ltm_max_items()),
-            ("ltm_max_tokens", persona.get_ltm_max_tokens()),
-            ("ltm_budget", persona.get_ltm_budget()),
-        ):
-            if value is not None:
-                persona_json[key] = value
-        # DP-255: Hindsight retain-tuning knobs. Only persist when set so old
-        # save files (and personas that never tuned them) stay compact and
-        # round-trip to the same on-disk shape.
-        if persona.get_retain_mission() is not None:
-            persona_json["retain_mission"] = persona.get_retain_mission()
-        if persona.get_reflect_mission() is not None:
-            persona_json["reflect_mission"] = persona.get_reflect_mission()
-        if persona.get_observations_mission() is not None:
-            persona_json["observations_mission"] = persona.get_observations_mission()
-        if persona.get_enable_observations() is not None:
-            persona_json["enable_observations"] = persona.get_enable_observations()
-        if persona.get_disposition() is not None:
-            persona_json["disposition"] = persona.get_disposition()
+        persona_json.update(_overridden_keys(persona))
         # DP-330: written whenever the field was DECLARED, including as an
         # explicit `[]`. Keying off truthiness instead erased the shipped
         # `"origin_allowlist": []` from a persona the operator had not filled

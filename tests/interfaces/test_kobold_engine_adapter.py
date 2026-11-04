@@ -1454,6 +1454,10 @@ def test_persona_ltm_knobs_get_and_patch():
             "ltm_max_items": 0, "ltm_max_tokens": 5, "ltm_budget": "turbo",
         })
         assert sorted(r.json()["rejected_fields"]) == ["ltm_budget", "ltm_max_items", "ltm_max_tokens"]
+        # rejected = unchanged: a typo does not wipe the saved override
+        assert persona.get_effective_ltm_max_items() == 8
+        assert persona.get_ltm_max_tokens() == 3000
+        assert persona.get_ltm_budget() == "low"
 
         r = client.patch("/api/v1/persona/test_persona", json={
             "ltm_max_items": None, "ltm_max_tokens": None, "ltm_budget": None,

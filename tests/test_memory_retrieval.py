@@ -314,6 +314,29 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
 
 @pytest.mark.asyncio
 @patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_retrieve_memory_block_unset_persona_uses_global_k(chat_system_with_memory, monkeypatch):
+    """DP-491: a real persona with no override recalls with the global
+    MEMORY_MAX_SUMMARIES_IN_CONTEXT, and leaves max_tokens/budget to the backend."""
+    from config import global_config
+    from src.persona import Persona
+    system, mm, emb_service = chat_system_with_memory
+    monkeypatch.setattr(global_config, 'MEMORY_MAX_SUMMARIES_IN_CONTEXT', 3)
+    system.memory_backend.recall = AsyncMock(return_value=[])
+    persona = Persona(persona_name="plain", model_name="m", prompt="p")
+
+    await system.request_builder.retrieve_memory_block(
+        persona, "user1", "chan", None, [{"role": "user", "content": "Hello"}],
+    )
+
+    kwargs = system.memory_backend.recall.call_args.kwargs
+    assert kwargs['k'] == 3
+    assert kwargs['max_tokens'] is None
+    assert kwargs['budget'] is None
+    assert kwargs['include_ambient'] is True
+
+
+@pytest.mark.asyncio
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
 async def test_retrieve_memory_block_ambient_tag(chat_system_with_memory, mock_persona):
     """Ambient summaries are tagged in the formatted block."""
     system, mm, emb_service = chat_system_with_memory

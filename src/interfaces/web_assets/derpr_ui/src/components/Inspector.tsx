@@ -402,8 +402,8 @@ function PersonaPane({ store }: { store: PortalStore }) {
             min={100}
             max={32000}
             value={buf.ltm_max_tokens}
-            placeholder="items × 500"
-            title="Hindsight only: token cap for the recalled memories (100-32000). Empty = ltm_max_items × 500."
+            placeholder="default"
+            title="Hindsight only: token cap for the recalled memories (100-32000). Empty = scales with ltm_max_items."
             onChange={(e) => set('ltm_max_tokens', e.target.value)}
           />
         </Cell>
@@ -414,9 +414,6 @@ function PersonaPane({ store }: { store: PortalStore }) {
             onChange={(e) => set('ltm_budget', e.target.value)}
           >
             <option value="">server default</option>
-            {buf.ltm_budget && !LTM_BUDGETS.includes(buf.ltm_budget) && (
-              <option value={buf.ltm_budget}>{buf.ltm_budget}</option>
-            )}
             {LTM_BUDGETS.map((b) => (
               <option key={b} value={b}>
                 {b}

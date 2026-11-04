@@ -1042,9 +1042,9 @@ class HindsightBackend(MemoryBackend):
         ] or None
         # 0.6.1 recall is budget-driven (no `k`). Translate the caller's `k`
         # into a soft token cap; slice the result list to honor `k` post-hoc.
-        # Cheap heuristic: ~500 tokens/hit max. Caller can override via max_tokens.
+        # Cheap heuristic: LTM_TOKENS_PER_ITEM (500) tokens/hit max. Caller can override via max_tokens.
         if max_tokens is None:
-            max_tokens = k * 500
+            max_tokens = k * global_config.LTM_TOKENS_PER_ITEM
         client = self._get_client()
         try:
             results = await client.arecall(
