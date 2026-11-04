@@ -12,7 +12,7 @@ test_startup_wiring.py) should keep exercising bootstrap too.
 """
 
 from typing import Any, Dict, Optional, Set
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, NonCallableMock
 
 from src.bootstrap import build_tool_manager
 from src.chat_system import ChatSystem
@@ -72,6 +72,19 @@ def offer_tools(chat_system: ChatSystem, persona_name: str, *names: str) -> None
     persona.set_service_bindings(bindings)
 
 
+def stub_retain_window(memory_manager: Any) -> None:
+    """Give a mocked MemoryManager the DP-495 window state of an empty scope
+    (start and floor at id 0, nothing in flight, no block cut). A spec'd
+    MagicMock otherwise returns a MagicMock that cannot unpack into
+    `(start_id, floor_id)`. No-op on a real MemoryManager."""
+    if not isinstance(memory_manager, NonCallableMock):
+        return
+    if not isinstance(memory_manager.retain_window.return_value, tuple):
+        memory_manager.retain_window.return_value = (0, 0)
+        memory_manager.cut_retain_block.return_value = None
+        memory_manager.scope_max_id.return_value = None
+
+
 def make_chat_system(
     memory_manager: Optional[Any] = None,
     text_engine: Optional[Any] = None,
@@ -93,6 +106,7 @@ def make_chat_system(
     if memory_manager is None:
         memory_manager = MagicMock(spec=MemoryManager)
         memory_manager.backend = MagicMock()
+    stub_retain_window(memory_manager)
     if text_engine is None:
         text_engine = MagicMock(spec=TextEngine)
     if personas is None:

@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from config import global_config
+
 from memory.memory_manager import MemoryManager
 from src.chat_system import ChatSystem
 from src.memory.backend.hindsight import HindsightBackend
@@ -101,8 +103,12 @@ async def test_startup_passes_configured_missions_to_ensure_bank() -> None:
     assert kwargs["enable_observations"] is True
     assert kwargs["observations_mission"] == "obs-sage"
 
-    # disposition patched live with disposition_* keys.
-    client.apatch_bank_config.assert_awaited_once_with("sage", {"disposition_skepticism": 4})
+    # DP-495: the retain chunk size, then disposition with disposition_* keys,
+    # both through the live PATCH path.
+    assert [c.args for c in client.apatch_bank_config.await_args_list] == [
+        ("sage", {"retain_chunk_size": global_config.HINDSIGHT_RETAIN_CHUNK_SIZE}),
+        ("sage", {"disposition_skepticism": 4}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -123,4 +129,25 @@ async def test_startup_unset_missions_pass_none() -> None:
     assert kwargs["reflect_mission"] is None
     assert kwargs["enable_observations"] is None
     assert kwargs["observations_mission"] is None
-    client.apatch_bank_config.assert_not_awaited()
+    # Only the DP-495 chunk size: no disposition patch when none is set.
+    client.apatch_bank_config.assert_awaited_once_with(
+        "plain", {"retain_chunk_size": global_config.HINDSIGHT_RETAIN_CHUNK_SIZE},
+    )
+
+
+@pytest.mark.asyncio
+async def test_startup_survives_a_refused_chunk_size() -> None:
+    """DP-495: Hindsight refuses a retain_chunk_size not below its server's
+    RETAIN_MAX_COMPLETION_TOKENS. That must not stop the disposition patch."""
+    backend = MagicMock(spec=HindsightBackend)
+    backend.ensure_bank = AsyncMock()
+    client = MagicMock()
+    client.apatch_bank_config = AsyncMock(side_effect=[RuntimeError("400"), None])
+    backend._get_client = MagicMock(return_value=client)
+
+    system = _make_system(backend, {"sage": _persona_tuned("sage")})
+    await system.startup()
+
+    assert client.apatch_bank_config.await_args_list[-1].args == (
+        "sage", {"disposition_skepticism": 4},
+    )

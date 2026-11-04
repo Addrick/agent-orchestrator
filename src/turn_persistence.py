@@ -10,19 +10,26 @@ these happen; this module owns *how* and holds the cache state.
 """
 
 import asyncio
+import json
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
-from config.global_config import MAX_CACHED_API_REQUESTS
+from config.global_config import (
+    HINDSIGHT_RETAIN_CHUNK_SIZE, MAX_CACHED_API_REQUESTS, RETAIN_CONTEXT_TAIL_CHARS,
+)
 from src.generation_events import ResponseType
-from src.memory.backend.base import SESSION_GAP_SECONDS, MemoryBackend
+from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
+from src.memory.retain_blocks import block_document_id, scope_from_row, split_block
 from src.memory.scope_tags import build_scope_tags
-from src.persona import MemoryMode
 from src.security.scrubber import get_scrubber
 from src.utils.timeutil import to_local, to_utc
+
+# Turns read back for a block's leading `context`; RETAIN_CONTEXT_TAIL_CHARS
+# then keeps the last of them that fit.
+_CONTEXT_TURNS = 12
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +38,7 @@ def format_retained_turn(role: str, speaker: str, content: str,
                          timestamp: datetime) -> str:
     """The text Hindsight extracts from for one turn (DP-402).
 
-    Turns in a channel append into one document, so each carries its speaker.
+    A block holds many turns in one document (DP-495), so each carries its speaker.
     Only user turns carry a time, rendered in LOCAL_TZ: timestamps beside the
     model's own words trip it up, and the user stamp already dates the
     exchange.
@@ -42,27 +49,6 @@ def format_retained_turn(role: str, speaker: str, content: str,
     # Reasoning is never retained (DP-252 contract): it lives in
     # `reasoning_content`, never in `content` (DP-434).
     return f"{speaker}: {content.strip()}"
-
-
-def _retain_kwargs(*, persona_name: str, role: str, speaker: str, content: str,
-                   user_identifier: str, channel: str, server_id: Optional[str],
-                   timestamp: datetime, interaction_id: int,
-                   untrusted: bool) -> Dict[str, Any]:
-    """The `MemoryBackend.retain_turn*` arguments for one chat turn: the
-    DP-402 header, UTC time, scope tags and interaction id, shared by the
-    eager (`retain_turn_safe`) and deferred (DP-423 flush) paths."""
-    return {
-        "bank_id": persona_name,
-        "role": role,
-        "content": format_retained_turn(role, speaker, content, timestamp),
-        "timestamp": to_utc(timestamp),
-        "scope_tags": build_scope_tags(
-            channel=channel, server_id=server_id, user_identifier=user_identifier,
-        ),
-        "source_persona": persona_name,
-        "untrusted": untrusted,
-        "metadata": {"interaction_id": str(interaction_id)},
-    }
 
 
 class TurnPersistence:
@@ -77,8 +63,8 @@ class TurnPersistence:
         # first iteration of each turn). last_api_requests keeps only the final
         # payload for back-compat; this preserves the whole loop for dump_history.
         self.last_api_iterations: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(dict)
-        # DP-423 deferred-retain flushes: serialized, and run as tasks so a
-        # slow backend never holds up a turn.
+        # DP-495 block sends and completion polls: serialized, and run as
+        # tasks so a slow backend never holds up a turn.
         self._flush_lock = asyncio.Lock()
         self._flush_tasks: Set["asyncio.Task[None]"] = set()
 
@@ -289,58 +275,6 @@ class TurnPersistence:
             logger.error(f"Assistant log_message failed: {e}", exc_info=True)
             return None
 
-    async def rebuild_session_safe(
-        self,
-        *,
-        persona_name: str,
-        channel: str,
-        user_identifier: str,
-        server_id: Optional[str],
-        retried_id: int,
-        retried_text: str,
-        untrusted: bool,
-    ) -> None:
-        """Replace the session's Hindsight document with the canonical
-        conversation after a retry (DP-409).
-
-        Appending the regenerated reply would leave the discarded attempt's
-        facts recallable. The DB row already holds the new version, so the
-        transcript is re-rendered from it — except the retried turn itself,
-        which takes `retried_text` so DP-335's footer stays out exactly as on
-        the normal retain path. No open document → plain append, as before.
-        """
-        scope_tags = build_scope_tags(
-            channel=channel, server_id=server_id, user_identifier=user_identifier,
-        )
-        try:
-            since = await self.memory_backend.session_start(persona_name, scope_tags)
-            turns = (
-                self.memory_manager.get_session_turns(persona_name, channel, since)
-                if since is not None else []
-            )
-            if turns:
-                blocks = []
-                for t in turns:
-                    role = (t["author_role"] or "").lower()
-                    content = retried_text if t["interaction_id"] == retried_id else t["content"]
-                    speaker = t["author_name"] or t["user_identifier"] or "Unknown"
-                    blocks.append(format_retained_turn(role, speaker, content, t["timestamp"]))
-                if await self.memory_backend.replace_session(
-                    persona_name, "\n\n".join(blocks),
-                    scope_tags=scope_tags, source_persona=persona_name,
-                    untrusted=untrusted, timestamp=datetime.now(timezone.utc),
-                    metadata={"interaction_id": str(retried_id)},
-                ):
-                    return
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Session rebuild failed, appending retried turn: {e}")
-        await self.retain_turn_safe(
-            persona_name=persona_name, role="assistant", speaker=persona_name,
-            content=retried_text, user_identifier=user_identifier, channel=channel,
-            server_id=server_id, timestamp=datetime.now(timezone.utc),
-            interaction_id=retried_id, untrusted=untrusted,
-        )
-
     def upsert_keyed_row(
             self,
             *,
@@ -388,12 +322,14 @@ class TurnPersistence:
         retain_text: Optional[str] = None,
         source_content: Optional[str] = None,
     ) -> None:
-        """Queue a turn for retain once it leaves the history window (DP-423).
+        """Queue a turn for retain with the block that cuts it (DP-423, DP-495).
 
-        While a turn is in the window the model reads it verbatim, so
+        While a turn is in the prompt the model reads it verbatim, so
         retaining it too would make recall hand it back a second time. The
-        queue is durable; `schedule_flush` drains it.
-        `retain_text` (DP-335) replaces the row's content at flush time only
+        queue is durable; a block cut collects it and `schedule_flush`
+        sends the block. Re-queueing a turn whose block was already sent (a
+        retried reply) rebuilds that block's document (DP-409).
+        `retain_text` (DP-335) replaces the row's content at send time only
         while the row still holds `source_content`.
         """
         try:
@@ -409,8 +345,9 @@ class TurnPersistence:
                                   written_text: str) -> None:
         """Unqueue a retried reply whose row this attempt overwrote with text
         that is never retained (errored, cancelled, footer-only, not an LLM
-        reply). A fresh turn like that is never queued; left queued, the flush
-        would retain the new text under the discarded attempt's trust bit.
+        reply). A fresh turn like that is never queued; left queued, the send
+        would retain the new text under the discarded attempt's trust bit. A
+        block already sent with it is rebuilt without it.
         No-op unless `row_id` is the retried row and `written_text` (what
         `commit_or_update_assistant` wrote over it) is non-empty."""
         if row_id is None or row_id != retry_assistant_id or not written_text.strip():
@@ -420,209 +357,184 @@ class TurnPersistence:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"discard_pending_retain failed (interaction {row_id}): {e}")
 
-    def is_retain_pending(self, interaction_id: int) -> bool:
-        try:
-            return self.memory_manager.is_retain_pending(interaction_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"is_retain_pending failed (interaction {interaction_id}): {e}")
-            return False
-
-    def schedule_flush(
-        self,
-        *,
-        persona_name: Optional[str] = None,
-        memory_mode: Optional[MemoryMode] = None,
-        channel: str = "",
-        user_identifier: str = "",
-        server_id: Optional[str] = None,
-        oldest_window_id: Optional[int] = None,
-        current_id: Optional[int] = None,
-    ) -> None:
-        """Run the DP-423 flushes in the background: the idle sweep, then
-        (given a persona) the eviction flush for this request's window.
+    def schedule_flush(self) -> None:
+        """Send queued blocks and poll sent ones, in the background (DP-495).
 
         Background because delivery is confirmed: a down Hindsight would
-        otherwise stall the user's turn for the HTTP timeout. Flushes are
-        serialized by `_flush_lock`, so turns still reach the backend in
-        queue order. The request's own (persona, channel) is never idle-cut:
-        a retry logs no new row, so it would otherwise flush the very reply
-        it is regenerating.
+        otherwise stall the user's turn for the HTTP timeout. Runs after every
+        turn (so a block cut by this request goes out at once, and a refused
+        one is retried) and from ChatSystem's maintenance loop.
         """
-        active = (persona_name, channel) if persona_name is not None else None
-
         async def run() -> None:
-            await self.flush_idle_sessions(active=active)
-            if persona_name is not None and memory_mode is not None:
-                await self.flush_evicted(
-                    persona_name=persona_name, memory_mode=memory_mode,
-                    channel=channel, user_identifier=user_identifier,
-                    server_id=server_id, oldest_window_id=oldest_window_id,
-                    current_id=current_id,
-                )
+            await self.flush_blocks()
+            await self.poll_blocks()
 
-        task = asyncio.get_running_loop().create_task(run(), name="dp423-retain-flush")
+        task = asyncio.get_running_loop().create_task(run(), name="dp495-retain-flush")
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
 
     async def drain_flushes(self) -> None:
         """Await every scheduled flush (tests). Shutdown does not drain:
-        the queue is durable, so an interrupted flush is redone on boot."""
+        the queue is durable, so an interrupted send is redone later."""
         while self._flush_tasks:
             await asyncio.gather(*list(self._flush_tasks), return_exceptions=True)
 
-    async def flush_retains(self, **filters: Any) -> int:
-        """Retain queued turns matching `filters` (see
-        `MemoryManager.pending_retains`), oldest first; returns how many
-        the backend accepted.
-
-        A turn leaves the queue only once the backend confirmed it, so one
-        dropped while Hindsight (or its kobold) is down is retried by a
-        later flush. Each turn keeps its own timestamp, so the doc-scope
-        store cuts documents at the same idle gaps it would have cut them
-        live.
-        """
+    async def flush_blocks(self) -> int:
+        """Send every queued block, oldest first; returns how many the
+        backend accepted. Serialized by `_flush_lock`. A block leaves the
+        queue only once the backend accepted it, so one refused while
+        Hindsight is down is sent again by a later flush."""
         async with self._flush_lock:
             try:
-                rows = self.memory_manager.pending_retains(**filters)
+                blocks = self.memory_manager.retain_blocks(statuses=("queued",))
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"Pending retain flush failed ({filters}): {e}")
+                logger.warning(f"Retain block flush failed: {e}")
                 return 0
-            done = [r for r in rows if r["skip"]]
-            sendable = [r for r in rows if not r["skip"]]
-            # gather starts every delivery before awaiting any, so they all
-            # land on the backend's FIFO in order and share a drain tick.
-            results = await asyncio.gather(*(self._deliver(r) for r in sendable))
-            done += [r for r, ok in zip(sendable, results) if ok]
-            if done:
+            sent = 0
+            for block in blocks:
                 try:
-                    self.memory_manager.delete_pending_retains(done)
+                    sent += await self._deliver_block(block)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Pending retain dequeue failed: {e}")
-            if not all(results):
-                logger.info(
-                    f"Retain flush: {results.count(False)} of {len(results)} turns "
-                    "not accepted; they stay queued for the next flush"
-                )
-            return sum(results)
+                    logger.warning(f"Retain block {block['block_id']} not sent: {e}")
+            return sent
 
-    async def _deliver(self, r: Dict[str, Any]) -> bool:
-        persona_name = r["persona_name"]
-        role = (r["author_role"] or "").lower()
-        speaker = (
-            persona_name if role == "assistant"
-            else r["author_name"] or r["user_identifier"] or "Unknown"
-        )
-        try:
-            return await self.memory_backend.retain_turn_confirmed(**_retain_kwargs(
-                persona_name=persona_name, role=role, speaker=speaker,
-                content=r["text"], user_identifier=r["user_identifier"],
-                channel=r["channel"], server_id=r["server_id"],
-                timestamp=r["timestamp"], interaction_id=r["interaction_id"],
-                untrusted=r["untrusted"],
-            ))
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"retain_turn_confirmed failed ({role} turn): {e}")
-            return False
-
-    async def flush_idle_sessions(self, now: Optional[datetime] = None, *,
-                                  active: Optional[Tuple[str, str]] = None) -> int:
-        """Retain every queued turn of a conversation that stopped: any
-        (persona, channel) with no turn in SESSION_GAP_SECONDS — the gap
-        that opens a new Hindsight document.
-
-        Without it a conversation shorter than the window would never be
-        pushed out, and never remembered. Its turns may still be in the
-        window if the conversation is picked up again; that brief overlap
-        is accepted so the window keeps priority (DP-423). Lazy sweep on
-        every turn plus a boot pass in `main` (the DP-319 pairing).
-        `active` is the (persona, channel) the calling request is in, which
-        is skipped whatever its last row's age.
-        """
-        now = now or datetime.now(timezone.utc)
-        try:
-            scopes = self.memory_manager.idle_retain_scopes(
-                now - timedelta(seconds=SESSION_GAP_SECONDS)
+    def _render(self, persona_name: str, rows: List[Dict[str, Any]],
+                text_key: str) -> List[str]:
+        out = []
+        for r in rows:
+            role = (r["author_role"] or "").lower()
+            speaker = (
+                persona_name if role == "assistant"
+                else r["author_name"] or r["user_identifier"] or "Unknown"
             )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Idle retain sweep failed: {e}")
-            return 0
-        sent = 0
-        for persona_name, channel in scopes:
-            if (persona_name, channel) == active:
-                continue
-            sent += await self.flush_retains(persona_name=persona_name, channel=channel)
-        return sent
+            out.append(format_retained_turn(role, speaker, r[text_key] or "", r["timestamp"]))
+        return out
 
-    async def flush_evicted(
-        self,
-        *,
-        persona_name: str,
-        memory_mode: MemoryMode,
-        channel: str,
-        user_identifier: str,
-        server_id: Optional[str],
-        oldest_window_id: Optional[int],
-        current_id: Optional[int],
-    ) -> int:
-        """Retain the queued turns this request's history window pushed out.
+    async def _deliver_block(self, block: Dict[str, Any]) -> bool:
+        """Send one block as its Hindsight document(s), `replace` mode.
 
-        Interaction ids are insertion-ordered, so every turn the window
-        covers with an id below the window's smallest is out of it. "Covers" is
-        the memory mode's scope, mirroring `RequestBuilder.fetch_raw_history`
-        — a narrower flush strands turns another channel evicted, a wider
-        one retains turns still in someone else's window. An empty window
-        (`ticket` mode, a window of 0) evicts everything before the current
-        turn.
+        The turns are read as they stand now (edits and deletes honoured),
+        each with its DP-402 header, concatenated in order. A block larger
+        than the bank's chunk size goes as consecutive parts; every part (and
+        a whole block) carries the turns before it as labelled background.
+        Documents a rebuild no longer produces are deleted.
         """
-        before_id = oldest_window_id if oldest_window_id is not None else current_id
-        if before_id is None:
-            return 0
-        if memory_mode == MemoryMode.GLOBAL:
-            scope: Dict[str, Any] = {}
-        elif memory_mode == MemoryMode.PERSONAL:
-            scope = {"user_identifier": user_identifier}
-        elif memory_mode == MemoryMode.SERVER_WIDE:
-            scope = {"server_id": server_id}
-        elif memory_mode == MemoryMode.TICKET_ISOLATED:
-            scope = {"channel": channel}
-        else:
-            # get_channel_history matches a falsy server_id as IS NULL.
-            scope = {"channel": channel, "server_id": server_id or None}
-        return await self.flush_retains(
-            persona_name=persona_name, before_id=before_id, **scope,
+        persona = block["persona_name"]
+        scope = scope_from_row(block)
+        members = self.memory_manager.retain_block_members(int(block["block_id"]))
+        sendable = [m for m in members if not m["skip"]]
+        old_ids: List[str] = json.loads(block["document_ids"] or "[]")
+
+        new_ids: List[str] = []
+        ops: List[str] = []
+        first_ts: Optional[datetime] = None
+        untrusted = bool(block["untrusted"]) or any(m["untrusted"] for m in sendable)
+        if sendable:
+            stored = self.memory_manager.parse_stored_ts(block["first_ts"]) \
+                if block["first_ts"] else None
+            first_ts = stored or sendable[0]["timestamp"]
+            turns = self._render(persona, sendable, "text")
+            prior = self._render(
+                persona,
+                self.memory_manager.turns_before(
+                    scope, sendable[0]["interaction_id"], _CONTEXT_TURNS,
+                ),
+                "content",
+            )
+            parts = split_block(
+                turns, HINDSIGHT_RETAIN_CHUNK_SIZE, prior=prior,
+                tail_chars=RETAIN_CONTEXT_TAIL_CHARS,
+            )
+            seq = int(block["seq"] or 0)
+            tags = self._block_tags(persona, sendable)
+            items = []
+            for n, part in enumerate(parts):
+                doc_id = block_document_id(
+                    persona, block["scope_key"], seq, first_ts,
+                    part=n + 1 if len(parts) > 1 else None,
+                )
+                new_ids.append(doc_id)
+                items.append({
+                    "document_id": doc_id,
+                    "content": part["content"],
+                    "context": part["context"],
+                    "tags": tags,
+                    "untrusted": untrusted,
+                    "timestamp": to_utc(sendable[part["start"]]["timestamp"]),
+                    "metadata": {
+                        "block": f"b{seq:04d}",
+                        "interaction_ids": f"{sendable[0]['interaction_id']}-"
+                                           f"{sendable[-1]['interaction_id']}",
+                    },
+                })
+            accepted = await self.memory_backend.retain_block(
+                persona, items, request_id=str(block["request_id"]),
+            )
+            if accepted is None:
+                logger.info(
+                    f"Retain block {block['block_id']} ({persona}:{block['scope_key']}) "
+                    "not accepted; it stays queued and in the prompt"
+                )
+                return False
+            ops = accepted
+        for stale in (d for d in old_ids if d not in new_ids):
+            try:
+                await self.memory_backend.delete_document(persona, stale)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not delete superseded block document {stale}: {e}")
+        self.memory_manager.mark_retain_block_sent(
+            block, members=members, op_ids=ops, document_ids=new_ids,
+            first_ts=first_ts, untrusted=untrusted,
         )
+        return True
 
-    async def retain_turn_safe(
-        self,
-        *,
-        persona_name: str,
-        role: str,
-        speaker: str,
-        content: str,
-        user_identifier: str,
-        channel: str,
-        server_id: Optional[str],
-        timestamp: datetime,
-        interaction_id: int,
-        untrusted: bool,
-    ) -> None:
-        """Fire-and-forget wrapper around backend.retain_turn.
+    @staticmethod
+    def _block_tags(persona: str, rows: List[Dict[str, Any]]) -> List[str]:
+        """Scope tags of every turn in the block (a block can span users,
+        channels or servers, depending on the memory mode), so recall scoped
+        to any of them still finds it."""
+        tags: List[str] = []
+        for r in rows:
+            for t in build_scope_tags(channel=r["channel"], server_id=r["server_id"],
+                                      user_identifier=r["user_identifier"]):
+                if t not in tags:
+                    tags.append(t)
+        return tags + [f"persona:{persona}"]
 
-        The Hindsight backend's retain_turn enqueues into a per-bank
-        asyncio.Queue and returns immediately; sqlite_legacy is a noop. We
-        still wrap in try/except so a backend hiccup never derails the user
-        turn — alpha system, retain failures are logged + dropped.
-
-        `content` is the bare turn; the speaker/time header is added here so
-        every caller retains the same shape (DP-402). The DB row and prompt
-        history keep the bare text.
-        """
-        try:
-            await self.memory_backend.retain_turn(**_retain_kwargs(
-                persona_name=persona_name, role=role, speaker=speaker,
-                content=content, user_identifier=user_identifier,
-                channel=channel, server_id=server_id, timestamp=timestamp,
-                interaction_id=interaction_id, untrusted=untrusted,
-            ))
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"retain_turn dropped ({role} turn): {e}")
+    async def poll_blocks(self) -> int:
+        """Ask the backend how each sent block's extraction stands; a
+        completed block is marked done and leaves the prompt on the next
+        request. Returns how many completed."""
+        async with self._flush_lock:
+            try:
+                blocks = self.memory_manager.retain_blocks(statuses=("sent",))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Retain block poll failed: {e}")
+                return 0
+            done = 0
+            for block in blocks:
+                block_id = int(block["block_id"])
+                try:
+                    status = await self.memory_backend.retain_status(
+                        block["persona_name"], json.loads(block["op_ids"] or "[]"),
+                        json.loads(block["document_ids"] or "[]"),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.info(f"Retain block {block_id} poll failed: {e}")
+                    continue
+                if status == "completed":
+                    self.memory_manager.set_retain_block_status(block_id, "done", expect="sent")
+                    done += 1
+                elif status == "failed":
+                    # Hindsight gave up (its own retries exhausted) or an
+                    # operator cancelled it. Leave the prompt: holding it
+                    # forever would only push the prompt to the fallback cut.
+                    logger.warning(
+                        f"Retain block {block_id} ({block['persona_name']}:{block['scope_key']}) "
+                        "failed or was cancelled in Hindsight; it leaves the prompt unretained"
+                    )
+                    self.memory_manager.set_retain_block_status(block_id, "failed", expect="sent")
+                elif status == "lost":
+                    logger.warning(f"Retain block {block_id} unknown to Hindsight; sending it again")
+                    self.memory_manager.requeue_retain_block(block_id)
+            return done

@@ -5,7 +5,7 @@
 
 import pytest
 from datetime import datetime
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, AsyncMock, MagicMock, ANY
 
 from src.chat_system import ChatSystem, ResponseType
 from src.clients.zammad_service import ZammadIntegration
@@ -28,7 +28,9 @@ async def test_dynamic_context_ignores_dev_commands(mocked_chat_system):
         with patch.object(memory_manager, 'get_channel_history',
                           wraps=memory_manager.get_channel_history) as mock_get_history:
             await chat_system.generate_response("test_persona", "user1", "channel", "second message")
-            mock_get_history.assert_called_with("channel", "test_persona", None, 2)
+            # DP-495: the hello window (2) plus the one row that tells whether
+            # it binds, read from the scope's window floor.
+            mock_get_history.assert_called_with("channel", "test_persona", None, 3, min_id=ANY)
 
 
 @pytest.mark.asyncio
@@ -74,7 +76,8 @@ async def test_persona_context_length_is_capped_by_history_limit(mocked_chat_sys
                       wraps=memory_manager.get_channel_history) as mock_get_history:
         await chat_system.generate_response("capped_persona", "user1", "any", "test", history_limit=5)
         mock_get_history.assert_called_once()
-        assert mock_get_history.call_args[0][3] == 5
+        # DP-495: the cap plus one probe row that tells whether the cap binds.
+        assert mock_get_history.call_args[0][3] == 6
 
 
 @pytest.mark.asyncio

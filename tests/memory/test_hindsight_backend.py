@@ -957,58 +957,115 @@ def test_hindsight_api_error_is_memory_backend_error():
     assert str(e4) == "Hindsight API Error 422: bad metadata"
 
 
-# --- DP-423: delivery-confirmed retain ---
-
-def _turn_kwargs(content: str, channel: str = "c1") -> Dict[str, Any]:
-    return dict(
-        bank_id="alice", role="user", content=content,
-        timestamp=datetime.now(timezone.utc),
-        scope_tags=[f"channel:{channel}"], source_persona="alice",
-    )
+# ---------- DP-495: block retain ----------
 
 
-@pytest.mark.asyncio
-async def test_retain_turn_confirmed_resolves_on_post_outcome(backend: HindsightBackend) -> None:
-    """True once the POST carrying the turn succeeded, False when its batch
-    was dropped — the deferred-retain queue keys its dequeue on this."""
-    async def flaky(bank_id: str, items, async_=True) -> Dict[str, Any]:
-        if any(it["content"] == "boom" for it in items):
-            raise httpx.ConnectError("kobold offline")
-        return {"id": "ok"}
-
-    client = backend._get_client()
-    with patch.object(client, "aretain", side_effect=flaky):
-        assert await backend.retain_turn_confirmed(**_turn_kwargs("fine")) is True
-        assert await backend.retain_turn_confirmed(**_turn_kwargs("boom")) is False
-        # The worker survived the drop and keeps confirming.
-        assert await backend.retain_turn_confirmed(**_turn_kwargs("fine again")) is True
-        await backend.aclose()
+def _block_item(doc: str = "p:c1:b0001:2026-11-02T00:34Z", **kw: Any) -> Dict[str, Any]:
+    item = {
+        "document_id": doc, "content": "[2026-11-01 20:34] Adam: hi\n\np: hello",
+        "context": "Earlier in this conversation (context only, do not extract facts from it):\nx",
+        "tags": ["channel:c1", "persona:p"], "untrusted": False,
+        "timestamp": datetime(2026, 11, 2, 0, 34, tzinfo=timezone.utc),
+        "metadata": {"block": "b0001"},
+    }
+    item.update(kw)
+    return item
 
 
 @pytest.mark.asyncio
-async def test_retain_turn_confirmed_per_item_across_split_posts(backend: HindsightBackend) -> None:
-    """One drained batch can become several POSTs (one item per document per
-    POST). A turn whose POST landed is confirmed even if a later POST of the
-    same batch fails — else it would be re-sent and appended twice."""
-    posts: List[List[str]] = []
-
-    async def second_post_fails(bank_id: str, items, async_=True) -> Dict[str, Any]:
-        posts.append([it["content"] for it in items])
-        if len(posts) == 2:
-            raise httpx.ConnectError("kobold offline")
-        return {"id": "ok"}
-
+async def test_retain_block_posts_replace_items_with_context_and_operation_id(
+        backend: HindsightBackend) -> None:
+    """DP-495: one POST per block, async, with the client's operation id;
+    every part replaces its own document (never append), carries the
+    labelled `context`, and the trust tag. Returns the operation ids."""
     client = backend._get_client()
-    with patch.object(client, "aretain", side_effect=second_post_fails):
-        # Same document twice → split into two POSTs within one drain tick.
-        results = await asyncio.gather(
-            backend.retain_turn_confirmed(**_turn_kwargs("first")),
-            backend.retain_turn_confirmed(**_turn_kwargs("second")),
+    with patch.object(client, "aretain", new=AsyncMock(
+            return_value={"operation_id": "op-1"})) as post:
+        ops = await backend.retain_block(
+            "p", [_block_item(), _block_item("p:c1:b0001p2:2026-11-02T00:34Z", untrusted=True)],
+            request_id="5f0c9a8e-0000-4000-8000-000000000001",
         )
-        await backend.aclose()
+    assert ops == ["op-1"]
+    kwargs = post.await_args.kwargs
+    assert kwargs["async_"] is True
+    assert kwargs["operation_id"] == "5f0c9a8e-0000-4000-8000-000000000001"
+    first, second = kwargs["items"]
+    assert first["update_mode"] == second["update_mode"] == "replace"
+    assert first["document_id"] == "p:c1:b0001:2026-11-02T00:34Z"
+    assert first["context"].startswith("Earlier in this conversation (context only")
+    assert TRUSTED_TAG in first["tags"] and UNTRUSTED_TAG in second["tags"]
+    assert first["timestamp"] == "2026-11-02T00:34:00+00:00"
 
-    assert posts == [["first"], ["second"]]
-    assert results == [True, False]
+
+@pytest.mark.asyncio
+async def test_retain_block_not_accepted_returns_none(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(client, "aretain", new=AsyncMock(side_effect=httpx.ConnectError("down"))):
+        assert await backend.retain_block("p", [_block_item()], request_id="r") is None
+    with patch.object(client, "aretain", new=AsyncMock(side_effect=HindsightAPIError(500, "x"))):
+        assert await backend.retain_block("p", [_block_item()], request_id="r") is None
+
+
+@pytest.mark.asyncio
+async def test_retain_block_prefers_operation_ids(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(client, "aretain", new=AsyncMock(
+            return_value={"operation_id": "a", "operation_ids": ["a", "b"]})):
+        assert await backend.retain_block("p", [_block_item()], request_id="r") == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_aretain_sends_operation_id_only_when_given() -> None:
+    client = HindsightRESTClient(base_url="http://stub")
+    captured: List[Dict[str, Any]] = []
+
+    async def fake_request(method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
+        captured.append(kwargs["json"])
+        return {}
+
+    with patch.object(client, "_request", side_effect=fake_request):
+        await client.aretain("b", [], operation_id="u-1")
+        await client.aretain("b", [])
+    assert captured[0]["operation_id"] == "u-1"
+    assert "operation_id" not in captured[1]
+
+
+@pytest.mark.parametrize("statuses, docs_present, expected", [
+    (["completed"], True, "completed"),
+    (["completed", "processing"], True, "pending"),
+    (["pending"], True, "pending"),
+    (["failed"], True, "failed"),
+    (["cancelled"], True, "failed"),
+    # Pruned after completion: the documents settle it.
+    (["not_found"], True, "completed"),
+    (["not_found"], False, "lost"),
+])
+@pytest.mark.asyncio
+async def test_retain_status(backend: HindsightBackend, statuses, docs_present, expected) -> None:
+    client = backend._get_client()
+    ops = iter(statuses)
+
+    async def get_op(bank_id: str, op_id: str, **_: Any) -> Dict[str, Any]:
+        return {"operation_id": op_id, "status": next(ops)}
+
+    async def get_doc(bank_id: str, doc_id: str) -> Dict[str, Any]:
+        if not docs_present:
+            raise HindsightAPIError(404, "not found")
+        return {"id": doc_id}
+
+    with patch.object(client, "aget_operation", side_effect=get_op), \
+            patch.object(client, "aget_document", side_effect=get_doc):
+        got = await backend.retain_status(
+            "p", [f"op{i}" for i in range(len(statuses))], ["p:c1:b0001:2026-11-02T00:34Z"],
+        )
+    assert got == expected
+
+
+@pytest.mark.asyncio
+async def test_retain_status_unknown_when_hindsight_unreachable(backend: HindsightBackend) -> None:
+    client = backend._get_client()
+    with patch.object(client, "aget_operation", side_effect=httpx.ConnectError("down")):
+        assert await backend.retain_status("p", ["op"], ["d"]) == "unknown"
 
 
 def test_doc_scope_out_of_order_turn_does_not_rewind_session(tmp_path) -> None:

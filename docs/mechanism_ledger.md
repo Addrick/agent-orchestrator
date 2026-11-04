@@ -108,6 +108,17 @@ probe, not a regeneration. What it found, none of it yet folded into the tables 
 - DP-424, 425 and 428 add nothing that defers, retries or resumes; DP-421's unit guard is
   host-side, outside this ledger's `src/` scope.
 
+**DP-495 note (2026-11-04, hand-written — no regenerator exists).** DP-423's queue row above is
+replaced. Trigger: a block cut (90 % watermark on a fresh message, a binding count cap, 48 h idle)
+or the 72 h final block; store: `Pending_Retain` (+ `block_id`, `sent_generation`), `Retain_Window`
+(pinned start, block counter), `Retain_Block` (status, `request_id`, `op_ids`); idempotency: the
+block's `request_id` is Hindsight's `operation_id` (a resubmit returns the original op) and members
+are marked sent at the generation read; resumer: `TurnPersistence.flush_blocks` (after every turn
+and from `ChatSystem.run_retain_maintenance`, whose first pass is the boot pass) and
+`poll_blocks` (operation status → `done`, the block leaves the prompt); gate: none. The poller's
+nearest shape is the `CodrAgent` tick (poll a remote's durable record on an interval); recorded
+`unreviewed` in `capability_map.md` *Hold local state until a remote service finishes accepted work*.
+
 ---
 
 ## A · Work that outlives the turn that started it

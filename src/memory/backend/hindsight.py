@@ -93,11 +93,16 @@ class HindsightRESTClient:
         items: List[Dict[str, Any]],
         *,
         async_: bool = True,
+        operation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        # Upstream RetainRequest: {items: [MemoryItem...], async: bool}.
-        # MemoryItem fields used here: content, tags, document_id, timestamp,
-        # metadata, update_mode. Server chunks per bank `retain_chunk_size`.
+        # Upstream RetainRequest: {items: [MemoryItem...], async: bool,
+        # operation_id}. MemoryItem fields used here: content, context, tags,
+        # document_id, timestamp, metadata, update_mode. Server chunks per
+        # bank `retain_chunk_size`. A caller-chosen `operation_id` (a UUID,
+        # 1.2.0) makes a resubmit return the original operation, no new work.
         payload: Dict[str, Any] = {"items": items, "async": async_}
+        if operation_id is not None:
+            payload["operation_id"] = operation_id
         return await self._request(
             "POST", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/memories", json=payload
         )
@@ -327,19 +332,6 @@ def _read_untrusted(tags: List[str]) -> bool:
 _STOP = object()
 
 
-class _Tracked:
-    """A queued retain item whose caller awaits delivery (DP-423).
-
-    The worker resolves `future` True once the POST carrying `item`
-    succeeded, False when that batch was dropped.
-    """
-    __slots__ = ("item", "future")
-
-    def __init__(self, item: Dict[str, Any], future: "asyncio.Future[bool]") -> None:
-        self.item = item
-        self.future = future
-
-
 class _TrustOverrideStore:
     """Parallel SQLite store for per-unit trust flips (DP-110 option c).
 
@@ -446,6 +438,10 @@ class _TrustOverrideStore:
 class _DocScopeStore:
     """Per-scope rolling document_id state for retain bundling (DP-112).
 
+    Since DP-495 chat turns no longer come through here — each chat block is
+    its own document (`retain_block`). What still rolls into a per-channel
+    document is a retain with no explicit id: agent experiences.
+
     Upstream Hindsight grows conversation memory by retaining items with a
     stable `document_id` and `update_mode="append"`. We need to know two
     things on every retain:
@@ -545,45 +541,6 @@ class _DocScopeStore:
             conn.commit()
             return document_id, "append"
 
-    def current(self, scope_key: str) -> Optional[Tuple[str, datetime, bool]]:
-        """(document_id, session start, untrusted) of the scope's open document.
-
-        The session start is the timestamp `resolve` baked into the id. The
-        untrusted bit is sticky for the session: once any retained turn was
-        tainted, a whole-document rebuild must not launder it (DP-409).
-        """
-        with self._lock:
-            row = self._get().execute(
-                "SELECT document_id, untrusted FROM Doc_Scope WHERE scope_key=?",
-                (scope_key,),
-            ).fetchone()
-        if row is None:
-            return None
-        document_id = str(row["document_id"])
-        prefix = f"{scope_key}:"
-        if not document_id.startswith(prefix):
-            return None
-        try:
-            started = datetime.fromisoformat(document_id[len(prefix):])
-        except ValueError:
-            return None
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-        return document_id, started, bool(row["untrusted"])
-
-    def touch(self, scope_key: str, now: datetime, untrusted: bool) -> None:
-        """Record activity on the open document without cutting a session."""
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-        with self._lock:
-            conn = self._get()
-            conn.execute(
-                "UPDATE Doc_Scope SET last_ts=?, untrusted=MAX(untrusted, ?)"
-                " WHERE scope_key=?",
-                (now.isoformat(), int(untrusted), scope_key),
-            )
-            conn.commit()
-
     def close(self) -> None:
         with self._lock:
             if self._conn is not None:
@@ -672,11 +629,13 @@ class HindsightBackend(MemoryBackend):
 
     @staticmethod
     def _split_by_document_id(batch: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-        """Hindsight 0.6.1 rejects batches whose items share a document_id
-        ("race conditions" guard). Conversational retains intentionally share
-        a doc_id to append turns — so split each drained batch into per-POST
-        groups where each POST has at most one item per document_id. Order
-        within a doc_id is preserved across the resulting POSTs."""
+        """Hindsight rejects an async batch whose items share a document_id
+        (0.6.1; still 1.2.0: `memory_engine.py` "Batch contains duplicate
+        document_ids"). Chat no longer reaches this queue (DP-495 blocks), but
+        retains with no explicit id still share their scope's rolling
+        document (agent experiences, `_DocScopeStore`), so a drained burst is
+        split into per-POST groups with at most one item per document_id.
+        Order within a doc_id is preserved across the resulting POSTs."""
         buckets: List[Dict[str, Dict[str, Any]]] = []
         for item in batch:
             doc_id = item.get("document_id", "")
@@ -695,17 +654,10 @@ class HindsightBackend(MemoryBackend):
         client: HindsightRESTClient,
         bank_id: str,
         items: List[Dict[str, Any]],
-        futures: Dict[int, "asyncio.Future[bool]"],
     ) -> None:
-        """POST one drained batch, confirming each tracked item as soon as
-        the POST carrying it lands — a later POST of the same batch failing
-        must not un-confirm it, or the flush re-sends and appends it twice."""
+        """POST one drained batch, split so no POST repeats a document_id."""
         for sub in self._split_by_document_id(items):
             await client.aretain(bank_id=bank_id, items=sub)
-            for it in sub:
-                fut = futures.get(id(it))
-                if fut is not None and not fut.done():
-                    fut.set_result(True)
 
     async def _worker_loop(self, bank_id: str, q: "asyncio.Queue[Any]") -> None:
         """Drain-on-tick FIFO worker.
@@ -723,11 +675,8 @@ class HindsightBackend(MemoryBackend):
                 q.task_done()
                 return
             batch, done_count, stop_seen = self._drain_batch(q, first)
-            # DP-423: a tracked item's caller learns whether its POST landed.
-            futures = {id(e.item): e.future for e in batch if isinstance(e, _Tracked)}
-            items = [e.item if isinstance(e, _Tracked) else e for e in batch]
             try:
-                await self._post_batch(client, bank_id, items, futures)
+                await self._post_batch(client, bank_id, batch)
             except httpx.ConnectError as e:
                 # Kobold offline / proxy down — expected operational state, log+drop.
                 logger.info("Hindsight retain batch dropped (kobold offline): %s", e)
@@ -736,9 +685,6 @@ class HindsightBackend(MemoryBackend):
             except Exception:  # noqa: BLE001 — worker must never die
                 logger.exception("Hindsight retain worker: unexpected error, dropping batch")
             finally:
-                for fut in futures.values():
-                    if not fut.done():
-                        fut.set_result(False)
                 for _ in range(done_count):
                     q.task_done()
             if stop_seen:
@@ -815,6 +761,7 @@ class HindsightBackend(MemoryBackend):
         timestamp: datetime,
         metadata: Optional[Dict[str, Any]],
         document_id: Optional[str] = None,
+        context: Optional[str] = None,
     ) -> Dict[str, Any]:
         if document_id is not None:
             # Explicit doc_id (e.g. agent-action series) — bypass rolling scope.
@@ -834,6 +781,8 @@ class HindsightBackend(MemoryBackend):
             "mentioned_at": timestamp.isoformat(),
             "event_date": timestamp.isoformat(), # Anchors facts in Hindsight 0.6.1
         }
+        if context:
+            item["context"] = context
         if metadata:
             item["metadata"] = metadata
         return item
@@ -864,29 +813,6 @@ class HindsightBackend(MemoryBackend):
         q = await self._ensure_worker(bank_id)
         await q.put(item)
         return ""
-
-    async def retain_turn_confirmed(
-        self,
-        bank_id: str,
-        role: str,
-        content: str,
-        *,
-        timestamp: datetime,
-        scope_tags: List[str],
-        source_persona: str,
-        untrusted: bool = False,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        # Same FIFO as retain_turn, so ordering and drain-tick coalescing
-        # are unchanged; only the caller waits for the worker's POST.
-        item = self._turn_item(
-            bank_id, role, content, timestamp=timestamp, scope_tags=scope_tags,
-            source_persona=source_persona, untrusted=untrusted, metadata=metadata,
-        )
-        future: "asyncio.Future[bool]" = asyncio.get_running_loop().create_future()
-        q = await self._ensure_worker(bank_id)
-        await q.put(_Tracked(item, future))
-        return await future
 
     def _turn_item(
         self,
@@ -972,46 +898,79 @@ class HindsightBackend(MemoryBackend):
         q = await self._ensure_worker(bank_id)
         await q.put(item)
 
-    async def session_start(
-        self, bank_id: str, scope_tags: List[str],
-    ) -> Optional[datetime]:
-        cur = self._doc_scope.current(self._scope_key(bank_id, scope_tags))
-        return cur[1] if cur else None
-
-    async def replace_session(
+    async def retain_block(
         self,
         bank_id: str,
-        content: str,
+        items: List[Dict[str, Any]],
         *,
-        scope_tags: List[str],
-        source_persona: str,
-        untrusted: bool,
-        timestamp: datetime,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        # DP-409: rewrite the scope's open document whole. Hindsight's
-        # `replace` deletes every fact extracted from the prior text (and the
-        # observations resting only on them) and re-extracts; `append` only
-        # ever adds, so a retried turn's discarded attempt would stay recallable.
-        # Queued on the same FIFO as the appends, so it lands after them.
-        scope_key = self._scope_key(bank_id, scope_tags)
-        cur = self._doc_scope.current(scope_key)
-        if cur is None:
-            return False
-        document_id, _started, was_untrusted = cur
-        tainted = untrusted or was_untrusted
-        self._doc_scope.touch(scope_key, timestamp, tainted)
-        item = self._build_item(
-            bank_id=bank_id, content=content,
-            tags=list(scope_tags) + [
-                f"persona:{source_persona}", _untrusted_tag(tainted),
-            ],
-            scope_tags=scope_tags, timestamp=timestamp, metadata=metadata,
-            document_id=document_id,
+        request_id: str,
+    ) -> Optional[List[str]]:
+        # DP-495: one POST per chat block, straight to the API (not the
+        # fire-and-forget queue: the caller must learn whether it landed and
+        # keep the operation ids). Every part replaces its own document — no
+        # append, so a block never re-stamps or re-extracts another, and a
+        # rebuild (retry) deletes the discarded attempt's facts.
+        payload = [
+            self._build_item(
+                bank_id=bank_id, content=it["content"],
+                tags=list(it["tags"]) + [_untrusted_tag(bool(it.get("untrusted")))],
+                scope_tags=[], timestamp=it["timestamp"], metadata=it.get("metadata"),
+                document_id=it["document_id"], context=it.get("context"),
+            )
+            for it in items
+        ]
+        try:
+            result = await self._get_client().aretain(
+                bank_id=bank_id, items=payload, async_=True, operation_id=request_id,
+            )
+        except (httpx.RequestError, HindsightAPIError) as e:
+            logger.warning("Hindsight block retain not accepted (%s): %s", bank_id, e)
+            return None
+        ops = result.get("operation_ids") or (
+            [result["operation_id"]] if result.get("operation_id") else []
         )
-        q = await self._ensure_worker(bank_id)
-        await q.put(item)
-        return True
+        return [str(o) for o in ops]
+
+    async def retain_status(
+        self,
+        bank_id: str,
+        op_ids: List[str],
+        document_ids: List[str],
+    ) -> str:
+        # A parent operation reports `completed` only once all its children
+        # have (1.2.0 get_operation_status). Hindsight prunes terminal
+        # operations after a retention of days, so `not_found` (or no id to
+        # ask about) is resolved against the documents: present = finished.
+        client = self._get_client()
+        statuses = []
+        try:
+            for op_id in op_ids:
+                op = await client.aget_operation(bank_id, op_id)
+                statuses.append(str(op.get("status") or "unknown"))
+        except (httpx.RequestError, HindsightAPIError) as e:
+            logger.info("Hindsight operation poll failed (%s): %s", bank_id, e)
+            return "unknown"
+        if any(st in ("failed", "cancelled") for st in statuses):
+            return "failed"
+        if any(st in ("pending", "processing") for st in statuses):
+            return "pending"
+        if "not_found" in statuses or not op_ids:
+            return await self._documents_present(bank_id, document_ids)
+        if all(st == "completed" for st in statuses):
+            return "completed"
+        return "unknown"
+
+    async def _documents_present(self, bank_id: str, document_ids: List[str]) -> str:
+        """`completed` when every document exists, `lost` when one is gone."""
+        client = self._get_client()
+        for doc_id in document_ids:
+            try:
+                await client.aget_document(bank_id, doc_id)
+            except HindsightAPIError as e:
+                return "lost" if e.status_code == 404 else "unknown"
+            except httpx.RequestError:
+                return "unknown"
+        return "completed"
 
     async def recall(
         self,

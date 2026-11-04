@@ -25,9 +25,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 # Session cut heuristic: gap between retains in the same scope that starts a
-# new document. >24h idle → new conversation document. Plan §1.4. Also the
-# idle gap after which TurnPersistence flushes a scope's deferred retains
-# (DP-423), so a conversation that stops is cut at the same point.
+# new document. >24h idle → new conversation document. Plan §1.4. Since
+# DP-495 only the non-chat rolling documents (agent experiences) use it: chat
+# is retained in blocks, one document each.
 SESSION_GAP_SECONDS = 24 * 3600
 
 
@@ -299,32 +299,6 @@ class MemoryBackend(ABC):
         """
         raise NotImplementedError("retain_turn lands in Sprint 2 (HindsightBackend)")
 
-    async def retain_turn_confirmed(
-        self,
-        bank_id: str,
-        role: str,
-        content: str,
-        *,
-        timestamp: datetime,
-        scope_tags: List[str],
-        source_persona: str,
-        untrusted: bool = False,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """`retain_turn`, resolving only once the backend has accepted the
-        turn: True when it landed, False when it was dropped (DP-423).
-
-        The deferred-retain queue deletes a turn on True and keeps it for a
-        later retry on False. Default: a backend whose `retain_turn` returns
-        has accepted it (sqlite_legacy's noop, synchronous stores).
-        """
-        await self.retain_turn(
-            bank_id=bank_id, role=role, content=content, timestamp=timestamp,
-            scope_tags=scope_tags, source_persona=source_persona,
-            untrusted=untrusted, metadata=metadata,
-        )
-        return True
-
     async def mark_trusted(
         self,
         bank_id: str,
@@ -492,29 +466,37 @@ class MemoryBackend(ABC):
         """
         raise NotImplementedError("retain_document not implemented on this backend")
 
-    async def session_start(
-        self, bank_id: str, scope_tags: List[str],
-    ) -> Optional[datetime]:
-        """Start of the conversation document `retain_turn` is appending to
-        for this scope, or None when there is none (DP-409). Default: None."""
-        return None
-
-    async def replace_session(
+    async def retain_block(
         self,
         bank_id: str,
-        content: str,
+        items: List[Dict[str, Any]],
         *,
-        scope_tags: List[str],
-        source_persona: str,
-        untrusted: bool,
-        timestamp: datetime,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Replace the scope's open conversation document with `content`
-        (DP-409) — the canonical transcript after a retry. Returns False when
-        the scope has no open document, so the caller falls back to
-        `retain_turn`. Default: False."""
-        return False
+        request_id: str,
+    ) -> Optional[List[str]]:
+        """Retain one chat block (DP-495): `items` are its parts, in order,
+        each `{"document_id", "content", "context", "tags", "untrusted",
+        "timestamp", "metadata"}`, every one replacing its document whole.
+        Backends MUST persist `untrusted` as they do for `retain_turn`.
+
+        Returns the ids to poll with `retain_status` once the backend has
+        accepted the block (empty: nothing to wait for), or None when it was
+        not accepted — the block stays queued and is sent again later.
+        `request_id` (a UUID) makes a resubmit of the same send idempotent.
+        Default: a backend with no extraction to wait for accepts everything.
+        """
+        return []
+
+    async def retain_status(
+        self,
+        bank_id: str,
+        op_ids: List[str],
+        document_ids: List[str],
+    ) -> str:
+        """Where a sent block's extraction stands: `completed`, `pending`,
+        `failed` (gave up — the block leaves the prompt unretained),
+        `lost` (the backend no longer knows the block; send it again) or
+        `unknown` (could not ask; try later). Default: `completed`."""
+        return "completed"
 
     async def delete_bank(self, bank_id: str) -> None:
         """Delete a bank (new-shape).

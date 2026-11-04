@@ -9,8 +9,8 @@
 #      message history that has accumulated the prior iterations' tool calls
 #      and tool results (so the agent "gets proper context at each step").
 #   2. Memory recording — the user turn and the final assistant turn are both
-#      persisted (log_message rows) and, once they leave the window, pushed
-#      through the backend boundary (`retain_turn`, deferred since DP-423),
+#      persisted (log_message rows) and, once their block is cut, pushed
+#      through the backend boundary (`retain_block`, DP-495),
 #      and the assistant row carries the tool-call transcript as tool_context.
 #   3. Clean closure — the per-turn ContextVar is set during the turn and
 #      reset to None afterward, and the stream terminates with exactly one
@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tests.helpers import offer_tools
-from src.memory.backend.base import SESSION_GAP_SECONDS
+from config.global_config import RETAIN_IDLE_FINAL_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, TokenEvent,
     ToolCallResultEvent, ToolCallStartEvent, ResponseType,
@@ -105,8 +105,8 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
 
     # Spy on the backend boundary without breaking its (noop) behavior.
     from unittest.mock import AsyncMock
-    retain_spy = AsyncMock()
-    chat_system.memory_backend.retain_turn = retain_spy  # type: ignore[assignment]
+    retain_spy = AsyncMock(return_value=[])
+    chat_system.memory_backend.retain_block = retain_spy  # type: ignore[assignment]
 
     # Sanity: no turn context leaking in from a previous turn.
     assert get_turn_context() is None
@@ -162,33 +162,30 @@ async def test_tool_loop_context_flow_memory_and_clean_close(mocked_chat_system)
     ctx_tool_ids = [m.get("tool_call_id") for m in tool_ctx if m.get("role") == "tool"]
     assert ctx_tool_ids == ["call_1", "call_2"]
 
-    # DP-423: both turns are still in the window, so nothing is retained yet —
-    # they wait in the queue until evicted or their session goes idle.
+    # DP-495: both turns are still in the prompt, so nothing is retained yet —
+    # they wait in the queue until a block cuts them (here: 72 h idle).
     await chat_system.turn_persistence.drain_flushes()
     assert retain_spy.await_count == 0
-    sent = await chat_system.turn_persistence.flush_idle_sessions(
-        now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
+    await chat_system.retain_maintenance(
+        now=datetime.now(timezone.utc) + timedelta(seconds=RETAIN_IDLE_FINAL_SECONDS + 60),
     )
-    assert sent == 2
-    # Backend boundary received both turns with the right roles + content,
-    # and the assistant turn is marked untrusted=False (no tainting tool ran).
-    assert retain_spy.await_count == 2
-    roles = [c.kwargs["role"] for c in retain_spy.await_args_list]
-    assert roles == ["user", "assistant"]
-    user_retain, assistant_retain = retain_spy.await_args_list
-    # DP-402: turns append into one Hindsight document per channel, so each is
-    # labelled with its speaker; only the user turn carries a time.
+    # Backend boundary received both turns as ONE block document, in order,
+    # marked untrusted=False (no tainting tool ran).
+    assert retain_spy.await_count == 1
+    bank_id, items = retain_spy.await_args.args
+    assert bank_id == "test_persona"
+    assert len(items) == 1
+    user_turn, assistant_turn = items[0]["content"].split("\n\n")
+    # DP-402: each turn is labelled with its speaker; only the user turn
+    # carries a time.
     assert re.fullmatch(
-        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] user-e2e: check the agents",
-        user_retain.kwargs["content"],
+        r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] user-e2e: check the agents", user_turn,
     )
-    assert user_retain.kwargs["bank_id"] == "test_persona"
-    assert assistant_retain.kwargs["content"] == "test_persona: Both agents are healthy."
-    assert assistant_retain.kwargs["untrusted"] is False
-    # The anchor Hindsight dates facts by is aware UTC on both turns — a naive
-    # value reads as UTC downstream and is hours off on a non-UTC host.
-    for call in (user_retain, assistant_retain):
-        assert call.kwargs["timestamp"].utcoffset() == timedelta(0)
+    assert assistant_turn == "test_persona: Both agents are healthy."
+    assert items[0]["untrusted"] is False
+    # The anchor Hindsight dates facts by is aware UTC — a naive value reads
+    # as UTC downstream and is hours off on a non-UTC host.
+    assert items[0]["timestamp"].utcoffset() == timedelta(0)
 
     # --- (3) Clean closure. ---
     # Turn context was live during every model call...

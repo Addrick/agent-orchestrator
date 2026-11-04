@@ -13,7 +13,7 @@ budget allocation) lands here.
 """
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def estimate_tokens(text: str) -> int:
@@ -56,6 +56,11 @@ def _message_tokens(msg: Dict[str, Any]) -> int:
             if isinstance(t, str):
                 total += estimate_tokens(t)
     return total
+
+
+def message_tokens(msg: Dict[str, Any]) -> int:
+    """Public name for one message's estimated token cost (DP-495 cut)."""
+    return _message_tokens(msg)
 
 
 def truncate_messages_to_budget(
@@ -123,6 +128,62 @@ def truncate_messages_to_budget(
         i = end
 
     return kept, dropped
+
+
+def plan_block_cut(
+    rows: Sequence[Tuple[bool, int]],
+    *,
+    budget: Optional[int],
+    fixed_tokens: int = 0,
+    keep_at_most: Optional[int] = None,
+    high: float = 0.9,
+    low: float = 0.5,
+    trigger: bool = True,
+) -> Optional[int]:
+    """How many of the oldest window rows to cut as one block (DP-495).
+
+    `rows` are the prompt's history rows that are not yet in a block, oldest
+    first, each `(starts_turn, tokens)`: `starts_turn` marks a row the remaining
+    window may begin on (a user turn — a row's tool calls and their results are
+    one row, so a row boundary never splits them). `fixed_tokens` is what the
+    prompt carries besides history (the new user message, recalled memory).
+
+    Token watermark: when `fixed + window` exceeds `high` of `budget` (and
+    `trigger` is set — a new user message arrived), cut the fewest rows that
+    bring it to `low` of `budget`. `trigger=False` skips the high check (the
+    48 h idle trim), cutting to `low` only.
+
+    History already cut into a block that Hindsight has not finished with is
+    still shown but not counted: it is on its way out, and counting it would
+    cut a fresh small block every turn while Hindsight is slow — the
+    one-turn retains this exists to end. If it pushes the prompt past the
+    budget, the caller's oldest-first fallback drops it for that request.
+
+    Count cap: `keep_at_most` (the caller passes half a message-count cap
+    that is cutting rows off) cuts the window to at most that many rows, so
+    a cap that binds trims in blocks instead of sliding.
+
+    The cut always ends where the remaining window starts on a turn (or at
+    the end: everything). Returns the row count to cut, or None for no cut.
+    """
+    n = len(rows)
+    if n == 0:
+        return None
+    boundaries = [k for k in range(1, n) if rows[k][0]] + [n]
+    window = sum(t for _, t in rows)
+    suffix = [0] * (n + 1)
+    for k in range(n - 1, -1, -1):
+        suffix[k] = suffix[k + 1] + rows[k][1]
+
+    cut = 0
+    if budget is not None and budget > 0:
+        over = fixed_tokens + window > high * budget
+        target = low * budget
+        if (over or not trigger) and fixed_tokens + window > target:
+            cut = next((k for k in boundaries if fixed_tokens + suffix[k] <= target), n)
+    if keep_at_most is not None and n > keep_at_most:
+        cut = max(cut, next(k for k in boundaries if n - k <= keep_at_most))
+    return cut or None
 
 
 def drop_orphaned_tool_head(
