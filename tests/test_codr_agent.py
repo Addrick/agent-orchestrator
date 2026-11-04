@@ -188,6 +188,7 @@ def test_workspace_files_stop_the_offline_npm_install():
     assert {".opencode/package.json", ".opencode/package-lock.json"} <= set(files)
     config = json.loads(files[".opencode/opencode.json"])
     assert config["provider"]["kcpp-pool"]["options"]["baseURL"] == codr_agent.DEFAULTS["pool_url"]
+    assert config["provider"]["kcpp-pool"]["options"]["headerTimeout"] >= 30 * 60 * 1000  # router holds (DP-490)
     assert "model: kcpp-pool/local" in files[".opencode/agent/pool.md"]
     assert "mkdir -p .opencode .opencode/agent .opencode/node_modules .opencode/tool" in sync_script(files)
 
