@@ -146,6 +146,9 @@ export interface ToolsCatalog {
 // ---- GET /api/v1/session/{persona}/ltm_block ----
 export interface LtmBlockResponse {
   block: string | null
+  // DP-492: a newer draft preview for the same persona+channel cancelled
+  // this one's recall; `block` is null and must not replace the panel.
+  superseded?: boolean
 }
 
 // ---- channel tags (source-agnostic `channel` string) ----

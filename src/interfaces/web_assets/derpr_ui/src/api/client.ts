@@ -59,8 +59,8 @@ let _usingMock = false
 let _liveSeen = false
 export const usingMock = () => _usingMock
 
-async function getJSON<T>(path: string): Promise<T> {
-  const r = await fetch(BASE + path, { headers: { Accept: 'application/json' } })
+async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(BASE + path, { headers: { Accept: 'application/json' }, signal })
   // Any HTTP response proves an engine is answering: from here on a failure is
   // a real outage/error, never a "no backend" dev session — so liveOr must
   // rethrow rather than silently mixing mock fixtures into a live session
@@ -293,18 +293,25 @@ export async function cancelTurn(runId: string): Promise<boolean> {
 }
 
 // ---- ltm -------------------------------------------------------------
+// Throws on a superseded preview (DP-492) so no caller ever mistakes the
+// placeholder null for "no memories".
 export function getLtmBlock(
   persona: string,
   query: string,
   channel?: string,
+  signal?: AbortSignal,
 ): Promise<string | null> {
   const qs = new URLSearchParams({ query })
   if (channel) qs.set('channel', channel)
   return liveOr(
-    async () =>
-      (await getJSON<LtmBlockResponse>(
+    async () => {
+      const r = await getJSON<LtmBlockResponse>(
         `/api/v1/session/${encodeURIComponent(persona)}/ltm_block?${qs}`,
-      )).block,
+        signal,
+      )
+      if (r.superseded) throw new Error('ltm_block preview superseded')
+      return r.block
+    },
     () => MOCK_LTM_BLOCK,
   )
 }
