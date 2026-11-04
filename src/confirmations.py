@@ -20,11 +20,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, AbstractSet, Any, Callable, Dict, List, Optional, Set, Tuple
 
 from config.global_config import (
-    PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW, PARK_ROW_RETENTION,
-    PENDING_ACTION_TTL,
+    CODR_TICKET_DEFERRAL_TTL, PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW,
+    PARK_ROW_RETENTION, PENDING_ACTION_TTL,
 )
 from src.deferral_kinds import (
-    DEFERRAL_DECLARATION_KEY, DEFERRAL_KIND_APPROVAL, declared_deferral,
+    DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_TICKET, declared_deferral,
+    without_declaration,
 )
 from src.memory.memory_manager import (
     PARK_DB_CLAIMED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED, PARK_DB_LIVE,
@@ -511,6 +512,16 @@ class ConfirmationManager:
             for t in self._by_key.get((user_identifier, persona_name), [])
             if t in self.pending and self.pending[t].kind == kind
         ]
+
+    def pending_of_kind(self, kind: str) -> List[ParkedWrite]:
+        """Every live deferral of one kind, in any conversation (DP-493).
+
+        For an authority that polls rather than pings: the codr agent reads
+        these each tick to find the tickets stagr is waiting on. Never an
+        approval: those are a human's, and only `list_for` hands them out."""
+        if kind == DEFERRAL_KIND_APPROVAL:
+            return []
+        return [p for p in list(self.pending.values()) if p.kind == kind]
 
     def lock_for(self, key: ConversationKey) -> asyncio.Lock:
         return self._locks.setdefault(key, asyncio.Lock())
@@ -1101,8 +1112,7 @@ class ConfirmationManager:
         declared = declared_deferral(decision.result)
         if declared is None or not self._redefer(park, *declared):
             return None
-        decision.result = {k: v for k, v in decision.result.items()
-                           if k != DEFERRAL_DECLARATION_KEY}
+        decision.result = without_declaration(decision.result)
         return declared[0]
 
     def _redefer(self, park: "ParkedWrite", kind: str, token: str) -> bool:
@@ -1242,7 +1252,7 @@ class ConfirmationManager:
         stale = self._take_expired(now)
         for parked in stale:
             self.expire(parked, PARK_STATUS_EXPIRED,
-                        f"No decision within {PENDING_ACTION_TTL}s")
+                        f"No decision within {deferral_ttl(parked.kind)}s")
         return len(stale)
 
     def _take_expired(self, now: Optional[float] = None) -> List[ParkedWrite]:
@@ -1262,8 +1272,7 @@ class ConfirmationManager:
         happens to them is `expire`, which is terminal either way.
         """
         now = time.time() if now is None else now
-        tokens = [t for t, p in self.pending.items()
-                  if now - p.created_at > PENDING_ACTION_TTL]
+        tokens = [t for t, p in self.pending.items() if self.is_expired(p, now)]
         stale = [p for p in (self._pop(t) for t in tokens) if p is not None]
         if stale:
             logger.info("Expired %d unanswered gated write(s)", len(stale))
@@ -1300,11 +1309,11 @@ class ConfirmationManager:
         purge = self._purge_due()
         if not stale and not purge:
             return
-        reason = f"No decision within {PENDING_ACTION_TTL}s"
 
         def _finish() -> None:
             for parked in stale:
-                self.expire(parked, PARK_STATUS_EXPIRED, reason)
+                self.expire(parked, PARK_STATUS_EXPIRED,
+                            f"No decision within {deferral_ttl(parked.kind)}s")
             if purge:
                 self._purge_old_rows()
 
@@ -1351,7 +1360,16 @@ class ConfirmationManager:
     def is_expired(self, parked: ParkedWrite,
                    now: Optional[float] = None) -> bool:
         now = time.time() if now is None else now
-        return now - parked.created_at > PENDING_ACTION_TTL
+        return now - parked.created_at > deferral_ttl(parked.kind)
+
+
+def deferral_ttl(kind: str) -> int:
+    """How long a park of this kind may wait. Every kind gets
+    PENDING_ACTION_TTL except a codr ticket (DP-493), which waits on codr's
+    queue rather than on a human."""
+    if kind == DEFERRAL_KIND_CODR_TICKET:
+        return CODR_TICKET_DEFERRAL_TTL
+    return PENDING_ACTION_TTL
 
 
 def new_token() -> str:

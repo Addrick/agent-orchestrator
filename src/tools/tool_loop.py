@@ -24,7 +24,9 @@ from typing import (
 )
 
 from config.global_config import MAX_TOOL_CALLS, MAX_TOOL_ITERATIONS
-from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
+from src.deferral_kinds import (
+    DEFERRAL_KIND_APPROVAL, declared_deferral, without_declaration,
+)
 from src.engine import LLMCommunicationError, TextEngine
 from src.security.scrubber import get_scrubber
 from src.generation_events import (
@@ -36,7 +38,7 @@ from src.persona import Persona
 from src.tool_policy import callable_tool_names
 from src.tools.definitions import (
     ALWAYS_CONFIRM_TOOLS,
-    get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
+    get_tool_capabilities, is_auto_approvable, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
 from src.tools.turn_context import bind_conflict, get_turn_context
@@ -68,6 +70,75 @@ def _bind_refusal(name: str, args: Dict[str, Any]) -> Optional[str]:
     one that names another bank must not run anything."""
     binds = (get_tool_definition(name) or {}).get("bind_args") or {}
     return bind_conflict(name, binds, args, get_turn_context())
+
+
+def _auto_approve_on(persona: Any) -> bool:
+    """The persona's DP-493 `auto_approve` switch. Strict `is True`, so a
+    stand-in persona (a test double) never switches it on by accident."""
+    getter = getattr(persona, "get_auto_approve", None)
+    return callable(getter) and getter() is True
+
+
+def _deferred_result(
+    r: Dict[str, Any], tool_result: Any, turn_tainted: bool,
+) -> Optional[Tuple[Dict[str, Any], "ToolDeferredEvent"]]:
+    """An executed call whose result declares a deferral (DP-493): the
+    history entry (an `awaiting:<kind>` placeholder holding the handler's own
+    result, the same shape the resolve patches) and the event that parks it.
+    None for an ordinary result.
+
+    The approval path re-parks a declared deferral after the click
+    (`ConfirmationManager._maybe_redefer`); this is the same for a write that
+    ran without one. Only on success: a failed call has nothing to wait for."""
+    declared = declared_deferral(tool_result)
+    if declared is None or tool_error(tool_result):
+        return None
+    kind, token = declared
+    content = _scrubbed_result({"status": awaiting_status(kind), "token": token,
+                                "result": without_declaration(tool_result)})
+    call = {"id": r["call_id"], "name": r["name"], "arguments": r["args"]}
+    event = ToolDeferredEvent(
+        token=token, write_call=call,
+        audit_info={"actions": [{"tool": r["name"], "arguments": r["args"], "auto_approved": True}],
+                    "tainted": turn_tainted},
+        confirmation_text="", turn_tainted=turn_tainted, kind=kind,
+    )
+    return _tool_result_message(r, content), event
+
+
+def _settled_call(
+    r: Dict[str, Any], tool_result: Any, group_id: Optional[str], turn_tainted: bool,
+) -> Tuple[Dict[str, Any], List[LoopEvent]]:
+    """One executed call's history entry and the events it emits, in order:
+    a `ToolDeferredEvent` if its result declares a deferral, then its
+    `ToolCallResultEvent`."""
+    result_str = _scrubbed_result(tool_result)
+    err_str: Optional[str] = None
+    # Shared with the gated-write path (DP-323): both used to re-derive
+    # "did this fail" from the envelope's `error` key alone, and both
+    # therefore read a handler that reports failure by *returning*
+    # (`{"status": "error"}`, `{"executed": False}`) as a success. Here
+    # that only mis-coloured a ToolCard; there it wrote a failed
+    # irreversible write into history as `approved`.
+    failure = tool_error(tool_result)
+    if failure:
+        # Egress scrub (DP-225 boundary 1): the error is surfaced raw in
+        # ToolCallResultEvent.error (portal SSE / ToolCard), so redact it
+        # exactly like result_str above — the sibling result field being
+        # scrubbed is not enough on its own.
+        err_str = cast(str, get_scrubber().scrub(failure))
+    events: List[LoopEvent] = []
+    deferred = _deferred_result(r, tool_result, turn_tainted)
+    if deferred is not None:
+        message, deferral = deferred
+        events.append(deferral)
+    else:
+        message = _tool_result_message(r, result_str)
+    events.append(ToolCallResultEvent(
+        call_id=r["call_id"], tool_name=r["name"], result=message["content"],
+        error=err_str, group_id=group_id,
+    ))
+    return message, events
 
 
 def _refusal(
@@ -1092,8 +1163,13 @@ class ToolLoop:
             yield _StepBoundaryEvent(
                 history=conversation_history, start=history_start,
             )
+            # DP-493: a write marked `auto_approvable` runs in the executed
+            # batch when the persona's `auto_approve` switch is on: no prompt,
+            # but a deferral its result declares still parks (`_execute_calls`).
+            auto_approve = _auto_approve_on(persona)
             write_calls = [
                 c for c in admitted if is_write_tool(c["name"])
+                and not (auto_approve and is_auto_approvable(c["name"]))
                 and _bind_refusal(c["name"], c.get("arguments") or {}) is None
             ]
             read_calls = [c for c in admitted if not is_write_tool(c["name"])]
@@ -1104,6 +1180,7 @@ class ToolLoop:
                 [c for c in tool_calls_collected
                  if not any(c is w for w in write_calls)],
                 conversation_history, group_id=group_id, offered=offered,
+                turn_tainted=turn_tainted,
             ):
                 yield tool_ev
 
@@ -1523,6 +1600,7 @@ class ToolLoop:
         group_id: Optional[str] = None,
         *,
         offered: AbstractSet[str],
+        turn_tainted: bool = False,
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Calls in
@@ -1574,28 +1652,7 @@ class ToolLoop:
         # Append/emit in original order — concurrency must not reorder the
         # transcript the model reads next iteration.
         for r, tool_result in zip(resolved, results):
-            result_str = _scrubbed_result(tool_result)
-            err_str: Optional[str] = None
-            # Shared with the gated-write path (DP-323): both used to re-derive
-            # "did this fail" from the envelope's `error` key alone, and both
-            # therefore read a handler that reports failure by *returning*
-            # (`{"status": "error"}`, `{"executed": False}`) as a success. Here
-            # that only mis-coloured a ToolCard; there it wrote a failed
-            # irreversible write into history as `approved`.
-            failure = tool_error(tool_result)
-            if failure:
-                # Egress scrub (DP-225 boundary 1): the error is surfaced raw in
-                # ToolCallResultEvent.error (portal SSE / ToolCard), so redact it
-                # exactly like result_str above — the sibling result field being
-                # scrubbed is not enough on its own.
-                err_str = cast(str, get_scrubber().scrub(failure))
-
-            conversation_history.append(_tool_result_message(r, result_str))
-
-            yield ToolCallResultEvent(
-                call_id=r["call_id"],
-                tool_name=r["name"],
-                result=result_str,
-                error=err_str,
-                group_id=group_id,
-            )
+            message, events = _settled_call(r, tool_result, group_id, turn_tainted)
+            conversation_history.append(message)
+            for event in events:
+                yield event

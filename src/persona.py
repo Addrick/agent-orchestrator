@@ -132,6 +132,10 @@ class Persona:
         self._display_name_in_chat: bool = display_name_in_chat
         self._service_bindings: List[str] = service_bindings if service_bindings is not None else []
         self._include_ambient_memory: bool = include_ambient_memory
+        # DP-493: runtime only, never saved. On, an `auto_approvable` write
+        # (stagr's queue_codr_task) runs without the approval prompt. A
+        # restart turns it off, so a forgotten switch fails closed.
+        self._auto_approve: bool = False
         self._thinking_level: Optional[str] = thinking_level
         self._long_term_memory: bool = long_term_memory
         self._chat_template: Optional[str] = chat_template if chat_template else None
@@ -805,6 +809,15 @@ class Persona:
             logger.warning(f"Invalid type for execution mode: {type(new_mode)}. No change made.")
             return
         logger.info(f"Persona '{self._name}' execution mode set to {self._execution_mode.name}.")
+
+    def get_auto_approve(self) -> bool:
+        """Whether this persona's auto-approvable writes skip the prompt (DP-493)."""
+        return self._auto_approve
+
+    def set_auto_approve(self, value: bool) -> None:
+        """Runtime only: not saved, so it is off again after a restart."""
+        self._auto_approve = bool(value)
+        logger.info(f"Persona '{self._name}' auto_approve set to {self._auto_approve}.")
 
     def set_include_ambient_memory(self, value: bool) -> None:
         """Sets whether ambient channel memories are included in long-term retrieval."""

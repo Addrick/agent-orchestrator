@@ -9,6 +9,7 @@ import asyncio
 import json
 import shutil
 import subprocess
+from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declared_deferral
 from pathlib import Path
 
 import pytest
@@ -333,6 +334,18 @@ _TICKET = dict(title="Fix the --count flag", project="click-cli", spec="It must 
 
 async def _queue(handler, **fields):
     return await handler._queue_codr_task(**{**_TICKET, **fields})
+
+
+async def test_a_queued_ticket_declares_a_codr_ticket_deferral(queue, action_log):
+    """DP-493: the ticket ID is the token the codr agent settles, so the
+    conversation that queued it hears its final outcome."""
+    result = await _queue(StagrToolHandler(memory_manager=action_log))
+    assert declared_deferral(result) == (DEFERRAL_KIND_CODR_TICKET, "CD-001")
+
+
+async def test_a_refused_ticket_declares_nothing(queue, action_log):
+    result = await _queue(StagrToolHandler(memory_manager=action_log), project="Not A Project")
+    assert result["status"] == "error" and declared_deferral(result) is None
 
 
 def test_the_shared_attempt_row_names_match_the_codr_agent():

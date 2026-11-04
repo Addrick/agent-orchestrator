@@ -167,6 +167,10 @@ MAX_CACHED_API_REQUESTS = 128
 # DP-319 made the store durable (`Parked_Writes`), so this is now the whole
 # deadline rather than min(this, process uptime) as it was under DP-297.
 PENDING_ACTION_TTL = 24 * 60 * 60
+# DP-493: a codr ticket stagr queued waits for codr to finish it, not for a
+# human, and a ticket can sit behind others in the queue and run for several
+# attempts. Its deferral (kind `codr_ticket`) lives this long instead.
+CODR_TICKET_DEFERRAL_TTL = 14 * 24 * 60 * 60
 
 # How long a DECIDED park's row is kept after it resolves.
 #
