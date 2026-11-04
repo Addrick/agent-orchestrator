@@ -188,6 +188,7 @@ def test_workspace_files_stop_the_offline_npm_install():
     assert {".opencode/package.json", ".opencode/package-lock.json"} <= set(files)
     config = json.loads(files[".opencode/opencode.json"])
     assert config["provider"]["kcpp-pool"]["options"]["baseURL"] == codr_agent.DEFAULTS["pool_url"]
+    assert config["provider"]["kcpp-pool"]["options"]["headerTimeout"] >= 30 * 60 * 1000  # router holds (DP-490)
     assert "model: kcpp-pool/local" in files[".opencode/agent/pool.md"]
     assert "mkdir -p .opencode .opencode/agent .opencode/node_modules .opencode/tool" in sync_script(files)
 
@@ -763,6 +764,7 @@ async def test_a_ticket_gets_a_project_a_worktree_and_a_memory_record(fake, tmp_
     proj, wt = work / "projects/notes", work / "worktrees/01-a"
     assert _git(proj, "symbolic-ref", "--short", "HEAD") == "main"
     assert _git(proj, "log", "--format=%s") == "DERPR: start notes"
+    assert _git(proj, "ls-files") == ".gitignore"             # the first commit ignores caches
     assert _git(wt, "rev-parse", "--abbrev-ref", "HEAD") == "ticket/01-a"
     assert (wt / "README").read_text() == "seed\n"
     record = (work / "memory/tickets/01-a.md").read_text()
@@ -772,7 +774,10 @@ async def test_a_ticket_gets_a_project_a_worktree_and_a_memory_record(fake, tmp_
 
     # Check -> merge: leftovers committed, merged with a merge commit, worktree gone, branch kept.
     (wt / "app.py").write_text("print('hi')\n")
-    check = codr_agent.CodrTask("01-a", "", "test -f app.py && echo in-the-worktree", 1, project="notes")
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "app.cpython-312.pyc").write_bytes(b"x")
+    (wt / "notes.db").write_bytes(b"x")                        # left by the check
+    check =codr_agent.CodrTask("01-a", "", "test -f app.py && echo in-the-worktree", 1, project="notes")
     assert parse_check(_run(work, codr_agent.check_script(check, 30))) == (True, "in-the-worktree\n")
     merged, main, problem = codr_agent.parse_merge(_run(work, codr_agent.merge_script(task)))
     assert (main, problem) == ("main", "") and merged
@@ -780,6 +785,7 @@ async def test_a_ticket_gets_a_project_a_worktree_and_a_memory_record(fake, tmp_
     assert _git(proj, "log", "-1", "--format=%s") == "01-a: merge ticket/01-a"
     assert len(_git(proj, "log", "-1", "--format=%p").split()) == 2          # a merge commit
     assert "01-a: uncommitted at check pass" in _git(proj, "log", "--format=%s")
+    assert _git(proj, "ls-files").split() == [".gitignore", "README", "app.py"]   # no caches, no db
     assert not wt.exists() and _git(proj, "branch", "--list", "ticket/01-a")
 
     # A ticket depending on it is cut from the new main.
