@@ -28,9 +28,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import (
     DEFAULT_PERSONA, MAX_TOOL_CALLS, MAX_TOOL_CALLS_OVERRIDE_CAP,
+    MEMORY_MAX_SUMMARIES_IN_CONTEXT,
 )
 from src.origin import split_allowlist_entries
-from src.persona import ExecutionMode, MemoryMode, Persona
+from src.persona import (
+    LTM_BUDGETS, LTM_MAX_ITEMS_CAP, LTM_MAX_TOKENS_CAP, LTM_MAX_TOKENS_MIN,
+    ExecutionMode, MemoryMode, Persona,
+)
 from src.tool_policy import KNOWN_OVERRIDES
 
 # `what <field>` renderer: persona -> response text.
@@ -158,6 +162,33 @@ def _plain_patch(apply: Callable[[Persona, Any], Any]) -> PatchFn:
 # ---------------------------------------------------------------------------
 # Bespoke (but persona-only) handlers that don't fit a factory
 # ---------------------------------------------------------------------------
+
+_CLEAR_TOKENS = ('none', 'null', 'clear', 'default')
+
+
+def _set_ltm_budget(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+    """DP-491: low/mid/high, or none to clear to the server default."""
+    valid = f"{', '.join(LTM_BUDGETS)}, none"
+    try:
+        raw = args[1].strip().lower()
+    except IndexError:
+        return f"Error: Please specify an LTM budget. Valid: {valid}.", False
+    if raw in _CLEAR_TOKENS:
+        persona.set_ltm_budget(None)
+        return f"LTM recall budget for {persona.get_name()} cleared (server default).", True
+    if raw not in LTM_BUDGETS:
+        return f"Error: Invalid LTM budget '{args[1]}'. Valid: {valid}.", False
+    persona.set_ltm_budget(raw)
+    return f"LTM recall budget for {persona.get_name()} set to '{raw}'.", True
+
+
+def _patch_ltm_budget(persona: Persona, value: Any) -> bool:
+    """null / "" clear; anything but low/mid/high is rejected (and clears)."""
+    if value is None or (isinstance(value, str) and value.strip() == ''):
+        persona.set_ltm_budget(None)
+        return False
+    return persona.set_ltm_budget(value) is None
+
 
 def _what_prompt(p: Persona) -> str:
     return f"Prompt for '{p.get_name()}': {p.get_prompt()}"
@@ -716,6 +747,8 @@ PERSONA_FIELDS: List[PersonaField] = [
                 f"Ambient memory inclusion {'enabled' if v else 'disabled'} for {name}."
             ),
         ),
+        patch_key='include_ambient_memory',
+        patch_apply=_plain_patch(lambda p, v: p.set_include_ambient_memory(bool(v))),
     ),
     PersonaField(
         name='inject_timestamp',
@@ -778,6 +811,58 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
         patch_key='max_tool_calls',
         patch_apply=_optional_number_patch(lambda p, v: p.set_max_tool_calls(v)),
+    ),
+    PersonaField(
+        name='ltm_max_items',
+        describe=lambda p: (
+            f"LTM items injected per message for '{p.get_name()}': {p.get_effective_ltm_max_items()}"
+            + (" (persona override)." if p.get_ltm_max_items() is not None
+               else f" (global default, MEMORY_MAX_SUMMARIES_IN_CONTEXT={MEMORY_MAX_SUMMARIES_IN_CONTEXT}).")
+        ),
+        set_cli=_optional_number_setter(
+            caster=int,
+            apply=lambda p, v: p.set_ltm_max_items(v),
+            ok_msg="LTM items per message for {name} set to {value}.",
+            fallback_msg=(
+                "LTM items per message for {name} cleared ('{raw}' is not a number); "
+                f"the global default ({MEMORY_MAX_SUMMARIES_IN_CONTEXT}) will be used."
+            ),
+            lo=1,
+            hi=LTM_MAX_ITEMS_CAP,
+            range_msg=f"Error: ltm_max_items must be between 1 and {LTM_MAX_ITEMS_CAP}.",
+        ),
+        patch_key='ltm_max_items',
+        patch_apply=_optional_number_patch(lambda p, v: p.set_ltm_max_items(v)),
+    ),
+    PersonaField(
+        name='ltm_max_tokens',
+        describe=lambda p: (
+            f"LTM recall token cap (Hindsight) for '{p.get_name()}': "
+            + (f"{p.get_ltm_max_tokens()} (persona override)." if p.get_ltm_max_tokens() is not None
+               else f"default ({p.get_effective_ltm_max_items()} items x 500).")
+        ),
+        set_cli=_optional_number_setter(
+            caster=int,
+            apply=lambda p, v: p.set_ltm_max_tokens(v),
+            ok_msg="LTM recall token cap for {name} set to {value}.",
+            fallback_msg="LTM recall token cap for {name} cleared ('{raw}' is not a number); the default will be used.",
+            lo=LTM_MAX_TOKENS_MIN,
+            hi=LTM_MAX_TOKENS_CAP,
+            range_msg=f"Error: ltm_max_tokens must be between {LTM_MAX_TOKENS_MIN} and {LTM_MAX_TOKENS_CAP}.",
+        ),
+        patch_key='ltm_max_tokens',
+        patch_apply=_optional_number_patch(lambda p, v: p.set_ltm_max_tokens(v)),
+    ),
+    PersonaField(
+        name='ltm_budget',
+        describe=lambda p: (
+            f"LTM recall budget (Hindsight) for '{p.get_name()}': "
+            + (p.get_ltm_budget() or "not set (server default)")
+            + f". Valid: {', '.join(LTM_BUDGETS)}, none."
+        ),
+        set_cli=_set_ltm_budget,
+        patch_key='ltm_budget',
+        patch_apply=_patch_ltm_budget,
     ),
     PersonaField(
         name='chat_template',

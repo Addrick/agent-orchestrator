@@ -142,6 +142,14 @@ def to_dict(personas: Dict[str, Any]) -> List[Dict[str, Any]]:
         # following MAX_TOOL_CALLS rather than freezing today's value.
         if persona.get_max_tool_calls() is not None:
             persona_json["max_tool_calls"] = persona.get_max_tool_calls()
+        # DP-491: LTM recall knobs, written only when overridden (same reason).
+        for key, value in (
+            ("ltm_max_items", persona.get_ltm_max_items()),
+            ("ltm_max_tokens", persona.get_ltm_max_tokens()),
+            ("ltm_budget", persona.get_ltm_budget()),
+        ):
+            if value is not None:
+                persona_json[key] = value
         # DP-255: Hindsight retain-tuning knobs. Only persist when set so old
         # save files (and personas that never tuned them) stay compact and
         # round-trip to the same on-disk shape.
@@ -276,6 +284,9 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 max_tool_calls=new_persona.get("max_tool_calls"),
+                ltm_max_items=new_persona.get("ltm_max_items"),
+                ltm_max_tokens=new_persona.get("ltm_max_tokens"),
+                ltm_budget=new_persona.get("ltm_budget"),
                 tool_policy=new_persona.get("tool_policy"),
                 explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),
@@ -358,6 +369,9 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 long_term_memory=new_persona.get("long_term_memory", True),
                 max_context_tokens=new_persona.get("max_context_tokens"),
                 max_tool_calls=new_persona.get("max_tool_calls"),
+                ltm_max_items=new_persona.get("ltm_max_items"),
+                ltm_max_tokens=new_persona.get("ltm_max_tokens"),
+                ltm_budget=new_persona.get("ltm_budget"),
                 tool_policy=new_persona.get("tool_policy"),
                 explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),

@@ -125,7 +125,11 @@ const NUM_BASE: (keyof Persona)[] = [
   'history_messages',
   'max_context_tokens',
   'max_tool_calls',
+  'ltm_max_items',
+  'ltm_max_tokens',
 ]
+// Hindsight recall budgets (Persona.LTM_BUDGETS); empty = server default.
+const LTM_BUDGETS = ['low', 'mid', 'high']
 // PATCH-able kobold sampler extras (top-level keys on the PATCH body; the
 // adapter routes them into provider_extras["kobold"]). Empty string clears.
 const KOBOLD_EXTRAS = ['rep_pen', 'rep_pen_range', 'rep_pen_slope', 'min_p', 'typical', 'tfs']
@@ -141,6 +145,8 @@ function buildBuffer(p: Persona): Buf {
     prompt: asStr(p.prompt),
     memory_mode: asStr(p.memory_mode),
     thinking_level: asStr(p.thinking_level),
+    ltm_budget: asStr(p.ltm_budget),
+    include_ambient_memory: String(p.include_ambient_memory ?? true),
   }
   for (const k of STR_BASE) b[k] = asStr(p[k])
   for (const k of NUM_BASE) b[k] = asStr(p[k])
@@ -195,6 +201,9 @@ function PersonaPane({ store }: { store: PortalStore }) {
     if (buf.prompt !== baseline.prompt) patch.prompt = buf.prompt
     for (const k of STR_BASE) if (buf[k] !== baseline[k]) patch[k] = buf[k]
     if (buf.memory_mode !== baseline.memory_mode) patch.memory_mode = buf.memory_mode
+    if (buf.ltm_budget !== baseline.ltm_budget) patch.ltm_budget = buf.ltm_budget === '' ? null : buf.ltm_budget
+    if (buf.include_ambient_memory !== baseline.include_ambient_memory)
+      patch.include_ambient_memory = buf.include_ambient_memory === 'true'
     // numeric base params
     for (const k of NUM_BASE) {
       if (buf[k] !== baseline[k]) patch[k] = buf[k] === '' ? null : coerceNum(buf[k])
@@ -365,6 +374,68 @@ function PersonaPane({ store }: { store: PortalStore }) {
           <span title="edit in the Tools tab (default · allow/ask · overrides)">
             {policyLabel(p.tool_policy)} · edit in Tools ›
           </span>
+        </Cell>
+      </Pair>
+
+      <div className="section">
+        ▣ long-term memory
+        <span className="desc">
+          recall into each new message · {p.long_term_memory ? 'on' : 'off (toggle: LTM recall chip)'}
+        </span>
+      </div>
+
+      <Pair>
+        <Cell label="ltm_max_items">
+          <input
+            type="number"
+            min={1}
+            max={50}
+            value={buf.ltm_max_items}
+            placeholder="default"
+            title="memories inserted into each new message (1-50). Empty = MEMORY_MAX_SUMMARIES_IN_CONTEXT."
+            onChange={(e) => set('ltm_max_items', e.target.value)}
+          />
+        </Cell>
+        <Cell label="include_ambient_memory">
+          <select
+            value={buf.include_ambient_memory}
+            title="whether shared ambient-channel memories are eligible (SQLite backend)"
+            onChange={(e) => set('include_ambient_memory', e.target.value)}
+          >
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select>
+        </Cell>
+      </Pair>
+
+      <Pair>
+        <Cell label="ltm_max_tokens · hindsight">
+          <input
+            type="number"
+            min={100}
+            max={32000}
+            value={buf.ltm_max_tokens}
+            placeholder="items × 500"
+            title="Hindsight only: token cap for the recalled memories (100-32000). Empty = ltm_max_items × 500."
+            onChange={(e) => set('ltm_max_tokens', e.target.value)}
+          />
+        </Cell>
+        <Cell label="ltm_budget · hindsight">
+          <select
+            value={buf.ltm_budget}
+            title="Hindsight only: how hard recall searches. Empty = server default."
+            onChange={(e) => set('ltm_budget', e.target.value)}
+          >
+            <option value="">server default</option>
+            {buf.ltm_budget && !LTM_BUDGETS.includes(buf.ltm_budget) && (
+              <option value={buf.ltm_budget}>{buf.ltm_budget}</option>
+            )}
+            {LTM_BUDGETS.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
         </Cell>
       </Pair>
 

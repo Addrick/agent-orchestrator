@@ -740,6 +740,10 @@ _SETTER_TO_COMMAND = {
     'set_thinking_level': 'thinking_level',
     'set_max_context_tokens': 'max_context_tokens',
     'set_max_tool_calls': 'max_tool_calls',
+    # DP-491: LTM recall knobs.
+    'set_ltm_max_items': 'ltm_max_items',
+    'set_ltm_max_tokens': 'ltm_max_tokens',
+    'set_ltm_budget': 'ltm_budget',
     'set_chat_template': 'chat_template',
     'set_tool_policy': 'tool_policy',
     # DP-277: gated field — dedicated command, never part of tool_policy JSON.
@@ -789,6 +793,9 @@ _GETTER_TO_COMMAND = {
     'get_thinking_level': 'thinking_level',
     'get_max_context_tokens': 'max_context_tokens',
     'get_max_tool_calls': 'max_tool_calls',
+    'get_ltm_max_items': 'ltm_max_items',
+    'get_ltm_max_tokens': 'ltm_max_tokens',
+    'get_ltm_budget': 'ltm_budget',
     'get_chat_template': 'chat_template',
     'get_tool_policy': 'tool_policy',
     # DP-277: gated field — queryable via its own what command.
@@ -814,6 +821,8 @@ _GETTER_EXCEPTIONS = {
     'get_current_effective_history_messages',
     # DP-428: `what max_tool_calls` reports both the effective and raw value.
     'get_effective_max_tool_calls',
+    # DP-491: `what ltm_max_items` reports both the effective and raw value.
+    'get_effective_ltm_max_items',
     'get_config_for_engine',
     'get_generation_params',
     # provider_extras is reached via the dotted-path fallback in _handle_what,

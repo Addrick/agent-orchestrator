@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.global_config import (
-    MEMORY_MAX_SUMMARIES_IN_CONTEXT, MEMORY_RETRIEVAL_ENABLED,
+    MEMORY_RETRIEVAL_ENABLED,
 )
 from src.embedding_service import EmbeddingService
 from src.generation_params import GenerationParams
@@ -413,9 +413,13 @@ class RequestBuilder:
             hits = await self.memory_backend.recall(
                 bank_id=persona.get_name(),
                 query=query_text,
-                k=MEMORY_MAX_SUMMARIES_IN_CONTEXT,
+                # DP-491: per-persona recall knobs; None = backend default.
+                k=persona.get_effective_ltm_max_items(),
+                max_tokens=persona.get_ltm_max_tokens(),
+                budget=persona.get_ltm_budget(),
                 tag_filter=tag_filter,
                 memory_mode=mode_label,
+                include_ambient=persona.get_include_ambient_memory(),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Memory recall failed: {e}")

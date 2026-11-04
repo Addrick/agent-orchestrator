@@ -1024,7 +1024,9 @@ class HindsightBackend(MemoryBackend):
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
         memory_mode: Optional[str] = None,
+        include_ambient: bool = True,
     ) -> List[MemoryHit]:
+        # DP-491: `include_ambient` is SQLite-only (no ambient bank here).
         # DP-253: `memory_mode` is a sqlite-side scoping hint; Hindsight scopes
         # purely via `tag_filter`, so the caller drops the channel tag for
         # non-channel modes and this param is accepted-and-ignored here.

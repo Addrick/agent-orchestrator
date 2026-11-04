@@ -169,6 +169,29 @@ def test_max_tool_calls_round_trip_and_unset_stays_unset(temp_save_file: Path):
     assert loaded["plain"].get_max_tool_calls() is None
 
 
+def test_ltm_knobs_round_trip_and_unset_stays_unset(temp_save_file: Path):
+    """DP-491: LTM recall overrides survive save/load; unset writes no key."""
+    from config import global_config
+    set_p = Persona(persona_name="tuned", model_name="m", prompt="p",
+                    ltm_max_items=12, ltm_max_tokens=4000, ltm_budget="high")
+    unset_p = Persona(persona_name="plain", model_name="m", prompt="p")
+    save_utils.save_personas_to_file(
+        {"tuned": set_p, "plain": unset_p}, set(), file_path_override=str(temp_save_file))
+
+    on_disk = {p["name"]: p for p in json.loads(temp_save_file.read_text())["personas"]}
+    assert (on_disk["tuned"]["ltm_max_items"], on_disk["tuned"]["ltm_max_tokens"],
+            on_disk["tuned"]["ltm_budget"]) == (12, 4000, "high")
+    for key in ("ltm_max_items", "ltm_max_tokens", "ltm_budget"):
+        assert key not in on_disk["plain"]
+
+    loaded = save_utils.load_personas_from_file(file_path_override=str(temp_save_file))
+    assert loaded["tuned"].get_effective_ltm_max_items() == 12
+    assert loaded["tuned"].get_ltm_max_tokens() == 4000
+    assert loaded["tuned"].get_ltm_budget() == "high"
+    assert loaded["plain"].get_ltm_max_items() is None
+    assert loaded["plain"].get_effective_ltm_max_items() == global_config.MEMORY_MAX_SUMMARIES_IN_CONTEXT
+
+
 # --- Phase A: GenerationParams nested shape on disk ---
 
 

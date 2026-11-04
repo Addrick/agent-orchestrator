@@ -391,6 +391,7 @@ class MemoryBackend(ABC):
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
         memory_mode: Optional[str] = None,
+        include_ambient: bool = True,
     ) -> List[MemoryHit]:
         """Semantic recall (new-shape).
 
@@ -401,6 +402,10 @@ class MemoryBackend(ABC):
         pinned to the caller's channel. When None, backends fall back to their
         legacy channel-presence derivation (back-compat). Hindsight scopes via
         `tag_filter` and ignores this hint.
+
+        `include_ambient` (DP-491) is the persona's `include_ambient_memory`:
+        whether the shared `ambient` bank's memories are eligible. SQLite-only;
+        Hindsight has no ambient bank and ignores it.
 
         Sprint 1 stub — Hindsight backend (Sprint 2) implements; SQLite raises.
         """

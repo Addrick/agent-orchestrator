@@ -1431,6 +1431,42 @@ def test_persona_max_tool_calls_get_and_patch():
     mm.close()
 
 
+def test_persona_ltm_knobs_get_and_patch():
+    """DP-491: LTM recall knobs are null on GET when unset; PATCH sets them,
+    null clears them, and invalid values are reported as rejected."""
+    adapter, mm, persona = _make_adapter_with_seeded_db()
+    with TestClient(adapter.app) as client:
+        body = client.get("/api/v1/persona/test_persona").json()
+        assert body["ltm_max_items"] is None
+        assert body["ltm_max_tokens"] is None
+        assert body["ltm_budget"] is None
+        assert body["include_ambient_memory"] is True
+
+        r = client.patch("/api/v1/persona/test_persona", json={
+            "ltm_max_items": 8, "ltm_max_tokens": 3000, "ltm_budget": "low",
+            "include_ambient_memory": False,
+        })
+        assert r.status_code == 200
+        assert r.json()["rejected_fields"] == []
+        assert persona.get_effective_ltm_max_items() == 8
+        assert persona.get_ltm_max_tokens() == 3000
+        assert persona.get_ltm_budget() == "low"
+        assert persona.get_include_ambient_memory() is False
+
+        r = client.patch("/api/v1/persona/test_persona", json={
+            "ltm_max_items": 0, "ltm_max_tokens": 5, "ltm_budget": "turbo",
+        })
+        assert sorted(r.json()["rejected_fields"]) == ["ltm_budget", "ltm_max_items", "ltm_max_tokens"]
+
+        r = client.patch("/api/v1/persona/test_persona", json={
+            "ltm_max_items": None, "ltm_max_tokens": None, "ltm_budget": None,
+        })
+        assert r.json()["rejected_fields"] == []
+        assert persona.get_ltm_max_items() is None
+        assert persona.get_ltm_budget() is None
+    mm.close()
+
+
 def test_patch_persona_updates_max_context_tokens():
     adapter, mm, persona = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
