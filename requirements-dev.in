@@ -1,5 +1,5 @@
 # Development and testing dependencies.
-# Compiled into requirements-dev.txt via pip-compile.
+# Compiled into requirements-dev.txt via `uv pip compile` (scripts/sync_deps.ps1; 7-day --exclude-newer cooldown, DP-491).
 # This file includes all production dependencies (-r requirements.in).
 # CI/CD and local development should use requirements-dev.txt.
 -r requirements.in

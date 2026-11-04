@@ -1,5 +1,5 @@
 # Base runtime dependencies — the lean core the application needs to run.
-# Compiled into requirements.txt via pip-compile.
+# Compiled into requirements.txt via `uv pip compile` (scripts/sync_deps.ps1; 7-day --exclude-newer cooldown, DP-491).
 #
 # DP-250: the heavy voice/STT stack (discord-ext-voice-recv, useful-moonshine-onnx
 # and their ML transitive deps: numba/onnxruntime/scikit-learn/librosa/...) lives
@@ -41,5 +41,5 @@ ddgs
 sqlite-vec
 
 # MCP client (DP-268): consume external MCP tool servers over streamable HTTP
-mcp
+mcp>=1.30.0,<2  # >=1.30.0: 4 CVEs (DP-491). <2: 2.x is a breaking client-API migration, deferred to its own ticket
 tzdata  # zoneinfo has no system tz database on Windows (DP-252 LOCAL_TZ)
