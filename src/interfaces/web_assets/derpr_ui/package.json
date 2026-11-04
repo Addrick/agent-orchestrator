@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "katex": "^0.17.0",
+    "katex": "^0.19.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",
@@ -31,5 +31,8 @@
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.59.2",
     "vite": "^8.0.12"
+  },
+  "overrides": {
+    "katex": "$katex"
   }
 }
