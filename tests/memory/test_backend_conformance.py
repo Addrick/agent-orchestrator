@@ -87,6 +87,33 @@ async def test_sqlite_recall_clean_summary_is_trusted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sqlite_recall_honours_include_ambient() -> None:
+    """DP-491: `include_ambient=False` drops the shared ambient bank's
+    memories. Before DP-491 recall hardcoded True, so the persona's
+    `include_ambient_memory` setting was saved but never read."""
+    mm = MemoryManager(db_path=":memory:")
+    mm.create_schema()
+    try:
+        backend = SqliteSemanticBackend(mm, embedding_service=_StubEmbeddingService())
+        now = datetime.now(timezone.utc)
+        s1 = backend.store_segment("c1", None, "alice", 1, 3, 3, now)
+        backend.store_summary(s1, "alice fact", _embed(0.5),
+                              EMBEDDING_MODEL, now, summary_level=1)
+        s2 = backend.store_segment("c1", None, "ambient", 4, 6, 3, now)
+        backend.store_summary(s2, "ambient fact", _embed(0.5),
+                              EMBEDDING_MODEL, now, summary_level=1)
+
+        on = await backend.recall("alice", "q", k=5, tag_filter=["channel:c1"])
+        assert {h.content for h in on} == {"alice fact", "ambient fact"}
+
+        off = await backend.recall("alice", "q", k=5, tag_filter=["channel:c1"],
+                                   include_ambient=False)
+        assert {h.content for h in off} == {"alice fact"}
+    finally:
+        mm.close()
+
+
+@pytest.mark.asyncio
 async def test_sqlite_recall_global_mode_crosses_channels() -> None:
     """DP-253: an explicit memory_mode='global' recalls across all channels,
     while 'channel' mode (and the legacy no-mode path) stays channel-pinned.

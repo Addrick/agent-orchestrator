@@ -284,10 +284,13 @@ async def test_retrieve_memory_block_empty_history(chat_system_with_memory, mock
 
 @pytest.mark.asyncio
 @patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
-@patch('src.request_builder.MEMORY_MAX_SUMMARIES_IN_CONTEXT', 2)
 async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_persona):
-    """Only top-K summaries are fetched from the database."""
+    """The persona's LTM knobs (DP-491) reach the backend recall."""
     system, mm, emb_service = chat_system_with_memory
+    mock_persona.get_effective_ltm_max_items.return_value = 2
+    mock_persona.get_ltm_max_tokens.return_value = 1500
+    mock_persona.get_ltm_budget.return_value = "high"
+    mock_persona.get_include_ambient_memory.return_value = False
 
     system.memory_backend.recall = AsyncMock(return_value=[
         MemoryHit(id=str(i), content=f"Fact {i}", score=0.5,
@@ -302,7 +305,34 @@ async def test_retrieve_memory_block_top_k_limit(chat_system_with_memory, mock_p
 
     assert result is not None
     system.memory_backend.recall.assert_called_once()
-    assert system.memory_backend.recall.call_args.kwargs['k'] == 2
+    kwargs = system.memory_backend.recall.call_args.kwargs
+    assert kwargs['k'] == 2
+    assert kwargs['max_tokens'] == 1500
+    assert kwargs['budget'] == "high"
+    assert kwargs['include_ambient'] is False
+
+
+@pytest.mark.asyncio
+@patch('src.request_builder.MEMORY_RETRIEVAL_ENABLED', True)
+async def test_retrieve_memory_block_unset_persona_uses_global_k(chat_system_with_memory, monkeypatch):
+    """DP-491: a real persona with no override recalls with the global
+    MEMORY_MAX_SUMMARIES_IN_CONTEXT, and leaves max_tokens/budget to the backend."""
+    from config import global_config
+    from src.persona import Persona
+    system, mm, emb_service = chat_system_with_memory
+    monkeypatch.setattr(global_config, 'MEMORY_MAX_SUMMARIES_IN_CONTEXT', 3)
+    system.memory_backend.recall = AsyncMock(return_value=[])
+    persona = Persona(persona_name="plain", model_name="m", prompt="p")
+
+    await system.request_builder.retrieve_memory_block(
+        persona, "user1", "chan", None, [{"role": "user", "content": "Hello"}],
+    )
+
+    kwargs = system.memory_backend.recall.call_args.kwargs
+    assert kwargs['k'] == 3
+    assert kwargs['max_tokens'] is None
+    assert kwargs['budget'] is None
+    assert kwargs['include_ambient'] is True
 
 
 @pytest.mark.asyncio

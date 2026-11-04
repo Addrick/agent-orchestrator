@@ -396,6 +396,9 @@ MANAGR_STANDING_ORDERS_LIMIT = 20     # newest active orders injected per planni
 # =============================================================================
 MEMORY_RETRIEVAL_ENABLED = True
 MEMORY_MAX_SUMMARIES_IN_CONTEXT = 5
+# Hindsight recall is token-budgeted, not k-limited: without an explicit
+# max_tokens, HindsightBackend.recall asks for k * this (DP-491 names it).
+LTM_TOKENS_PER_ITEM = 500
 
 SEMANTIC_BACKEND = os.environ.get("SEMANTIC_BACKEND", "sqlite") # Literal["sqlite", "hindsight"]
 HINDSIGHT_URL = os.environ.get("HINDSIGHT_URL", "http://10.0.0.70:8888")

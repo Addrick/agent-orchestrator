@@ -715,6 +715,7 @@ class SqliteSemanticBackend(MemoryBackend):
         max_tokens: Optional[int] = None,
         budget: Optional[str] = None,
         memory_mode: Optional[str] = None,
+        include_ambient: bool = True,
     ) -> List[MemoryHit]:
         if self._embedding_service is None:
             logger.info("SqliteSemanticBackend.recall: no embedding service set; returning empty.")
@@ -748,7 +749,7 @@ class SqliteSemanticBackend(MemoryBackend):
             server_id=server_id,
             user_identifier=user_identifier,
             memory_mode=memory_mode,
-            include_ambient=True,
+            include_ambient=include_ambient,
             exclude_after_interaction_id=exclude_after,
             model_name=self._embedding_service.model_name,
             query_embeddings=query_embeddings,

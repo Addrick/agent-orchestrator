@@ -28,9 +28,13 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import (
     DEFAULT_PERSONA, MAX_TOOL_CALLS, MAX_TOOL_CALLS_OVERRIDE_CAP,
+    LTM_TOKENS_PER_ITEM, MEMORY_MAX_SUMMARIES_IN_CONTEXT,
 )
 from src.origin import split_allowlist_entries
-from src.persona import ExecutionMode, MemoryMode, Persona
+from src.persona import (
+    LTM_BUDGETS, LTM_MAX_ITEMS_CAP, LTM_MAX_TOKENS_CAP, LTM_MAX_TOKENS_MIN,
+    ExecutionMode, MemoryMode, Persona,
+)
 from src.tool_policy import KNOWN_OVERRIDES
 
 # `what <field>` renderer: persona -> response text.
@@ -158,6 +162,67 @@ def _plain_patch(apply: Callable[[Persona, Any], Any]) -> PatchFn:
 # ---------------------------------------------------------------------------
 # Bespoke (but persona-only) handlers that don't fit a factory
 # ---------------------------------------------------------------------------
+
+_CLEAR_TOKENS = ('none', 'null', 'clear', 'default')
+
+
+def _ltm_setter(
+        *,
+        apply: Callable[[Persona, Any], bool],
+        label: str,
+        valid: str,
+        describe: WhatFn,
+) -> SetFn:
+    """DP-491 `set ltm_*`: `none`/`clear`/`default` clear to the default; an
+    invalid value is an error and changes nothing (a typo never wipes a
+    saved override). On success, echo the resulting `what` line."""
+    def set_cli(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
+        try:
+            raw = args[1].strip()
+        except IndexError:
+            return f"Error: Please specify {label}. Valid: {valid}.", False
+        value = None if raw.lower() in _CLEAR_TOKENS else raw
+        if not apply(persona, value):
+            return f"Error: Invalid {label} '{raw}'. Valid: {valid}.", False
+        return describe(persona), True
+    return set_cli
+
+
+def _ltm_patch(apply: Callable[[Persona, Any], bool]) -> PatchFn:
+    """null / "" clear; an invalid value is rejected and changes nothing."""
+    def patch_apply(persona: Persona, value: Any) -> bool:
+        if isinstance(value, str) and value.strip() == '':
+            value = None
+        return not apply(persona, value)
+    return patch_apply
+
+
+def _what_ltm_max_items(p: Persona) -> str:
+    own = p.get_ltm_max_items() is not None
+    return (
+        f"LTM items injected per message for '{p.get_name()}': {p.get_effective_ltm_max_items()}"
+        + (" (persona override)." if own else
+           f" (global default, MEMORY_MAX_SUMMARIES_IN_CONTEXT={MEMORY_MAX_SUMMARIES_IN_CONTEXT}).")
+    )
+
+
+def _what_ltm_max_tokens(p: Persona) -> str:
+    v = p.get_ltm_max_tokens()
+    return (
+        f"LTM recall token cap for '{p.get_name()}': "
+        + (f"{v} (persona override)" if v is not None
+           else f"default ({p.get_effective_ltm_max_items()} items x {LTM_TOKENS_PER_ITEM})")
+        + ". Hindsight only; the SQLite backend ignores it."
+    )
+
+
+def _what_ltm_budget(p: Persona) -> str:
+    return (
+        f"LTM recall budget for '{p.get_name()}': "
+        + (p.get_ltm_budget() or "not set (server default)")
+        + ". Hindsight only; the SQLite backend ignores it."
+    )
+
 
 def _what_prompt(p: Persona) -> str:
     return f"Prompt for '{p.get_name()}': {p.get_prompt()}"
@@ -778,6 +843,42 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
         patch_key='max_tool_calls',
         patch_apply=_optional_number_patch(lambda p, v: p.set_max_tool_calls(v)),
+    ),
+    PersonaField(
+        name='ltm_max_items',
+        describe=_what_ltm_max_items,
+        set_cli=_ltm_setter(
+            apply=lambda p, v: p.set_ltm_max_items(v),
+            label='ltm_max_items',
+            valid=f"an integer 1-{LTM_MAX_ITEMS_CAP}, or none",
+            describe=_what_ltm_max_items,
+        ),
+        patch_key='ltm_max_items',
+        patch_apply=_ltm_patch(lambda p, v: p.set_ltm_max_items(v)),
+    ),
+    PersonaField(
+        name='ltm_max_tokens',
+        describe=_what_ltm_max_tokens,
+        set_cli=_ltm_setter(
+            apply=lambda p, v: p.set_ltm_max_tokens(v),
+            label='ltm_max_tokens',
+            valid=f"an integer {LTM_MAX_TOKENS_MIN}-{LTM_MAX_TOKENS_CAP}, or none",
+            describe=_what_ltm_max_tokens,
+        ),
+        patch_key='ltm_max_tokens',
+        patch_apply=_ltm_patch(lambda p, v: p.set_ltm_max_tokens(v)),
+    ),
+    PersonaField(
+        name='ltm_budget',
+        describe=_what_ltm_budget,
+        set_cli=_ltm_setter(
+            apply=lambda p, v: p.set_ltm_budget(v),
+            label='ltm_budget',
+            valid=f"{', '.join(LTM_BUDGETS)}, or none",
+            describe=_what_ltm_budget,
+        ),
+        patch_key='ltm_budget',
+        patch_apply=_ltm_patch(lambda p, v: p.set_ltm_budget(v)),
     ),
     PersonaField(
         name='chat_template',

@@ -259,3 +259,41 @@ def test_what_origin_allowlist_names_the_entries_it_dropped(persona):
     assert 'UNREACHABLE' not in response
     assert '12345' in response
     assert 'NOT in force' in response and "'*'" in response
+
+
+# --- DP-491: LTM recall knobs ---
+
+def _ltm_field(name):
+    from src.persona_fields import PERSONA_FIELDS
+    return next(f for f in PERSONA_FIELDS if f.name == name)
+
+
+@pytest.mark.parametrize("name, good, bad, getter", [
+    ("ltm_max_items", "12", "7.5", "get_ltm_max_items"),
+    ("ltm_max_items", "12", "0", "get_ltm_max_items"),
+    ("ltm_max_tokens", "4000", "lots", "get_ltm_max_tokens"),
+    ("ltm_budget", "high", "turbo", "get_ltm_budget"),
+])
+def test_set_ltm_invalid_is_an_error_and_changes_nothing(name, good, bad, getter):
+    from src.persona import Persona
+    p = Persona(persona_name="x", model_name="m", prompt="p")
+    field = _ltm_field(name)
+    _, mutated = field.set_cli([name, good], p)
+    assert mutated is True
+    kept = getattr(p, getter)()
+    assert kept is not None
+    msg, mutated = field.set_cli([name, bad], p)
+    assert mutated is False
+    assert msg.startswith("Error: Invalid")
+    assert getattr(p, getter)() == kept
+
+
+@pytest.mark.parametrize("name", ["ltm_max_items", "ltm_max_tokens", "ltm_budget"])
+def test_set_ltm_none_clears_without_a_parse_error(name):
+    from src.persona import Persona
+    p = Persona(persona_name="x", model_name="m", prompt="p",
+                ltm_max_items=9, ltm_max_tokens=900, ltm_budget="low")
+    msg, mutated = _ltm_field(name).set_cli([name, "none"], p)
+    assert mutated is True
+    assert "not a number" not in msg and not msg.startswith("Error")
+    assert getattr(p, f"get_{name}")() is None

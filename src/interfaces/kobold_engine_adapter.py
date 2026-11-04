@@ -680,6 +680,10 @@ class KoboldEngineAdapter:
             # None = the global MAX_TOOL_CALLS (DP-428).
             "max_tool_calls": p.get_max_tool_calls(),
             "long_term_memory": p.get_long_term_memory(),
+            # DP-491: None = default (MEMORY_MAX_SUMMARIES_IN_CONTEXT / Hindsight's).
+            "ltm_max_items": p.get_ltm_max_items(),
+            "ltm_max_tokens": p.get_ltm_max_tokens(),
+            "ltm_budget": p.get_ltm_budget(),
             "inject_timestamp": p.get_inject_timestamp(),
             "chat_template": p.get_chat_template(),
             "kobold_extras": get_kobold_extras_for_get(p),

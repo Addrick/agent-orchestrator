@@ -311,6 +311,60 @@ def test_max_tool_calls_none_clears(base_persona_args):
     assert p.get_effective_max_tool_calls() == global_config.MAX_TOOL_CALLS
 
 
+# --- DP-491: LTM recall knobs ---
+
+def test_ltm_unset_follows_global_default(base_persona_args, monkeypatch):
+    p = Persona(**base_persona_args)
+    assert (p.get_ltm_max_items(), p.get_ltm_max_tokens(), p.get_ltm_budget()) == (None, None, None)
+    monkeypatch.setattr(global_config, 'MEMORY_MAX_SUMMARIES_IN_CONTEXT', 3)
+    assert p.get_effective_ltm_max_items() == 3
+
+
+@pytest.mark.parametrize("kwargs, getter, expected", [
+    ({"ltm_max_items": 1}, "get_ltm_max_items", 1),
+    ({"ltm_max_items": 50}, "get_ltm_max_items", 50),
+    ({"ltm_max_items": "12"}, "get_ltm_max_items", 12),
+    ({"ltm_max_tokens": 100}, "get_ltm_max_tokens", 100),
+    ({"ltm_max_tokens": 32000}, "get_ltm_max_tokens", 32000),
+    ({"ltm_budget": "MID "}, "get_ltm_budget", "mid"),
+])
+def test_ltm_valid_values_load(base_persona_args, kwargs, getter, expected):
+    assert getattr(Persona(**base_persona_args, **kwargs), getter)() == expected
+
+
+@pytest.mark.parametrize("kwargs, getter", [
+    ({"ltm_max_items": 0}, "get_ltm_max_items"),
+    ({"ltm_max_items": 51}, "get_ltm_max_items"),
+    ({"ltm_max_items": True}, "get_ltm_max_items"),
+    ({"ltm_max_items": "abc"}, "get_ltm_max_items"),
+    ({"ltm_max_tokens": 99}, "get_ltm_max_tokens"),
+    ({"ltm_max_tokens": 32001}, "get_ltm_max_tokens"),
+    ({"ltm_budget": "turbo"}, "get_ltm_budget"),
+    ({"ltm_budget": 3}, "get_ltm_budget"),
+])
+def test_ltm_invalid_saved_value_loads_as_default_and_warns(base_persona_args, kwargs, getter, caplog):
+    with caplog.at_level("WARNING"):
+        p = Persona(**base_persona_args, **kwargs)
+    assert getattr(p, getter)() is None
+    assert "invalid" in caplog.text
+
+
+@pytest.mark.parametrize("setter, getter, good, bad", [
+    ("set_ltm_max_items", "get_ltm_max_items", 12, 0),
+    ("set_ltm_max_items", "get_ltm_max_items", 12, "7.5"),
+    ("set_ltm_max_tokens", "get_ltm_max_tokens", 4000, 5),
+    ("set_ltm_budget", "get_ltm_budget", "high", "hgih"),
+])
+def test_ltm_invalid_set_keeps_current_value(base_persona_args, setter, getter, good, bad):
+    """A typo never wipes a saved override (unlike max_tool_calls)."""
+    p = Persona(**base_persona_args)
+    assert getattr(p, setter)(good) is True
+    assert getattr(p, setter)(bad) is False
+    assert getattr(p, getter)() == good
+    assert getattr(p, setter)(None) is True
+    assert getattr(p, getter)() is None
+
+
 # --- provider_extras helpers (Phase E) ---
 
 def test_provider_extra_set_and_get(persona):

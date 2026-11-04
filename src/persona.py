@@ -14,6 +14,13 @@ from src.origin import (
 )
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 
+# DP-491: bounds on the per-persona LTM recall knobs. The caps only stop a
+# typo from flooding the prompt; Hindsight's budget values are its own enum.
+LTM_MAX_ITEMS_CAP = 50
+LTM_MAX_TOKENS_MIN = 100
+LTM_MAX_TOKENS_CAP = 32000
+LTM_BUDGETS = ('low', 'mid', 'high')
+
 logger = logging.getLogger(__name__)
 
 E = TypeVar('E', bound=Enum)
@@ -80,6 +87,9 @@ class Persona:
             enable_observations: Optional[bool] = None,
             disposition: Optional[Dict[str, Any]] = None,
             origin_allowlist: Optional[List[str]] = None,
+            ltm_max_items: Optional[int] = None,
+            ltm_max_tokens: Optional[int] = None,
+            ltm_budget: Optional[str] = None,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -169,6 +179,16 @@ class Persona:
             self._max_context_tokens = global_config.DEFAULT_MAX_CONTEXT_TOKENS
 
         self._max_tool_calls: Optional[int] = self._coerce_max_tool_calls(max_tool_calls)
+
+        # DP-491: per-persona LTM recall knobs. None = default (global
+        # MEMORY_MAX_SUMMARIES_IN_CONTEXT / Hindsight's own), raw so an unset
+        # persona keeps tracking the default.
+        self._ltm_max_items: Optional[int] = self._load_ltm(
+            'ltm_max_items', ltm_max_items, self._coerce_ltm_max_items)
+        self._ltm_max_tokens: Optional[int] = self._load_ltm(
+            'ltm_max_tokens', ltm_max_tokens, self._coerce_ltm_max_tokens)
+        self._ltm_budget: Optional[str] = self._load_ltm(
+            'ltm_budget', ltm_budget, self._coerce_ltm_budget)
 
         if isinstance(tool_policy, ToolPolicy):
             self._tool_policy = tool_policy
@@ -576,6 +596,26 @@ class Persona:
             return self._max_tool_calls
         return global_config.MAX_TOOL_CALLS
 
+    def get_ltm_max_items(self) -> Optional[int]:
+        """Per-persona override of how many LTM hits are injected (DP-491),
+        or None for `MEMORY_MAX_SUMMARIES_IN_CONTEXT`."""
+        return self._ltm_max_items
+
+    def get_effective_ltm_max_items(self) -> int:
+        """The recall `k` this persona's turns actually run with."""
+        if self._ltm_max_items is not None:
+            return self._ltm_max_items
+        return global_config.MEMORY_MAX_SUMMARIES_IN_CONTEXT
+
+    def get_ltm_max_tokens(self) -> Optional[int]:
+        """Hindsight recall token cap (DP-491), or None for `k * 500`."""
+        return self._ltm_max_tokens
+
+    def get_ltm_budget(self) -> Optional[str]:
+        """Hindsight recall budget — low/mid/high (DP-491), or None for the
+        server default."""
+        return self._ltm_budget
+
     def get_provider_extra(self, provider: str, key: str) -> Any:
         """Read a single provider-specific knob from `provider_extras[provider][key]`."""
         return self._params.provider_extras.get(provider, {}).get(key)
@@ -944,16 +984,22 @@ class Persona:
         return self._max_context_tokens
 
     @staticmethod
-    def _coerce_max_tool_calls(value: Any) -> Optional[int]:
-        """An integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], else None (the
-        global default)."""
+    def _coerce_int_range(value: Any, lo: int, hi: int) -> Optional[int]:
+        """An integer in [lo, hi], else None."""
         if value is None or isinstance(value, bool):
             return None
         try:
             parsed = int(value)
         except (ValueError, TypeError):
             return None
-        return parsed if 1 <= parsed <= global_config.MAX_TOOL_CALLS_OVERRIDE_CAP else None
+        return parsed if lo <= parsed <= hi else None
+
+    @staticmethod
+    def _coerce_max_tool_calls(value: Any) -> Optional[int]:
+        """An integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], else None (the
+        global default)."""
+        return Persona._coerce_int_range(
+            value, 1, global_config.MAX_TOOL_CALLS_OVERRIDE_CAP)
 
     def set_max_tool_calls(self, new_value: Any) -> Optional[int]:
         """Sets the per-persona tool-call budget. None, or anything that does
@@ -966,6 +1012,65 @@ class Persona:
         else:
             logger.info(f"Persona '{self._name}' max_tool_calls set to {self._max_tool_calls}.")
         return self._max_tool_calls
+
+    @staticmethod
+    def _coerce_ltm_budget(value: Any) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        v = value.strip().lower()
+        return v if v in LTM_BUDGETS else None
+
+    @staticmethod
+    def _coerce_ltm_max_items(value: Any) -> Optional[int]:
+        return Persona._coerce_int_range(value, 1, LTM_MAX_ITEMS_CAP)
+
+    @staticmethod
+    def _coerce_ltm_max_tokens(value: Any) -> Optional[int]:
+        return Persona._coerce_int_range(value, LTM_MAX_TOKENS_MIN, LTM_MAX_TOKENS_CAP)
+
+    def _load_ltm(self, label: str, value: Any, coerce: Any) -> Any:
+        """Constructor-side coercion: an invalid saved value falls back to the
+        default, loudly — a silent drop reads as config that applied."""
+        coerced = coerce(value)
+        if coerced is None and value is not None:
+            logger.warning(
+                f"Persona '{self._name}': invalid {label} {value!r} in config; using default.")
+        return coerced
+
+    def _set_ltm(self, attr: str, label: str, value: Any, coerce: Any) -> bool:
+        """DP-491 setter semantics: None clears to the default; an invalid
+        value is REJECTED and the current value kept (returns False). Unlike
+        max_tool_calls, a typo never wipes a saved override."""
+        if value is None:
+            setattr(self, attr, None)
+            logger.info(f"Persona '{self._name}' {label} cleared to default.")
+            return True
+        coerced = coerce(value)
+        if coerced is None:
+            logger.warning(
+                f"Persona '{self._name}': rejected invalid {label} {value!r}; "
+                f"keeping {getattr(self, attr)!r}.")
+            return False
+        setattr(self, attr, coerced)
+        logger.info(f"Persona '{self._name}' {label} set to {coerced}.")
+        return True
+
+    def set_ltm_max_items(self, new_value: Any) -> bool:
+        """How many LTM hits are injected per message, 1..LTM_MAX_ITEMS_CAP;
+        None clears. Returns False (unchanged) on an invalid value."""
+        return self._set_ltm('_ltm_max_items', 'ltm_max_items', new_value,
+                             self._coerce_ltm_max_items)
+
+    def set_ltm_max_tokens(self, new_value: Any) -> bool:
+        """Hindsight recall token cap; None clears. False (unchanged) if invalid."""
+        return self._set_ltm('_ltm_max_tokens', 'ltm_max_tokens', new_value,
+                             self._coerce_ltm_max_tokens)
+
+    def set_ltm_budget(self, new_value: Any) -> bool:
+        """Hindsight recall budget low/mid/high; None clears. False (unchanged)
+        if invalid."""
+        return self._set_ltm('_ltm_budget', 'ltm_budget', new_value,
+                             self._coerce_ltm_budget)
 
     def set_memory_mode(self, new_mode: Any) -> None:
         """Sets the memory retrieval strategy from a string or a MemoryMode member."""
