@@ -1,6 +1,13 @@
 set -u
 [ -f app.py ] || { echo "FAIL: app.py missing"; exit 1; }
-[ -f ../03-notes-api/app.py ] || { echo "FAIL: ../03-notes-api/app.py missing (the task-03 app is the migration source)"; exit 1; }
+# The task-03 app is the migration source: ticket 03's branch, which stays after its
+# merge (DP-488), or else its pre-DP-488 folder. Not the worktree's own app.py, which
+# codr has rewritten by now.
+OLD_APP=$(mktemp)
+git show ticket/03-notes-api:app.py > "$OLD_APP" 2>/dev/null \
+  || cp ../../tasks/03-notes-api/app.py "$OLD_APP" 2>/dev/null \
+  || { echo "FAIL: no task-03 app.py (branch ticket/03-notes-api) to migrate from"; exit 1; }
+export OLD_APP
 python3 -I - <<'PY'
 import json, os, shutil, socket, sqlite3, subprocess, sys, tempfile, time, urllib.error, urllib.request
 
@@ -15,7 +22,7 @@ failures = []
 tmp = tempfile.mkdtemp()
 # The task-03 app runs from a private copy, so nothing else in its folder matters.
 old_app = os.path.join(tmp, "old_app.py")
-shutil.copy("../03-notes-api/app.py", old_app)
+shutil.copy(os.environ["OLD_APP"], old_app)
 
 def free_port():
     with socket.socket() as s:
