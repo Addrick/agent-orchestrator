@@ -24,17 +24,24 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # (This replaces the one-off `--constraint=<temp file>` the committed locks were
 # built with, which sync did not reproduce.)
 
+# DP-491 supply-chain cooldown: never resolve to a release younger than 7 days.
+# Malicious uploads (typosquats, hijacked maintainer accounts) are usually caught
+# and yanked within days; waiting a week means a regen does not pull one in.
+# A security fix that is younger than the cooldown can be let through for that one
+# package with: --exclude-newer-package "<pkg>=<YYYY-MM-DD>"
+$Cooldown = "7 days"
+
 # 1. Compile lean base production requirements
 Write-Host "[1/5] Compiling requirements.txt (lean base)..." -ForegroundColor Yellow
-pip-compile requirements.in --resolver=backtracking --quiet
+uv pip compile --universal requirements.in -o requirements.txt --exclude-newer $Cooldown --quiet
 
 # 2. Compile full production requirements (base + voice/STT), pinned to the base lock
 Write-Host "[2/5] Compiling requirements-voice.txt (prod, base + voice)..." -ForegroundColor Yellow
-pip-compile requirements-voice.in --constraint requirements.txt --resolver=backtracking --quiet
+uv pip compile --universal requirements-voice.in --constraint requirements.txt -o requirements-voice.txt --exclude-newer $Cooldown --quiet
 
 # 3. Compile development/CI requirements (lean base + tooling), pinned to the base lock
 Write-Host "[3/5] Compiling requirements-dev.txt (CI, lean)..." -ForegroundColor Yellow
-pip-compile requirements-dev.in --constraint requirements.txt --resolver=backtracking --quiet
+uv pip compile --universal requirements-dev.in --constraint requirements.txt -o requirements-dev.txt --exclude-newer $Cooldown --quiet
 
 # 4. Synchronize local environment to the FULL set (tooling + voice) so local
 #    dev mirrors prod capabilities; CI installs only requirements-dev.txt.

@@ -1,5 +1,5 @@
 # Production runtime = lean base + the DP-238 voice/STT stack.
-# Compiled into requirements-voice.txt via pip-compile; the Dockerfile installs
+# Compiled into requirements-voice.txt via `uv pip compile` (scripts/sync_deps.ps1; 7-day --exclude-newer cooldown, DP-491); the Dockerfile installs
 # requirements-voice.txt for production builds.
 #
 # DP-250: split out from requirements.in so CI (requirements-dev.txt) can stay
