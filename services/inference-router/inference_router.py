@@ -39,7 +39,7 @@ MAX_HEAD_BYTES = 64 * 1024
 MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_SEEN_PREFIXES = 20000
 CHARS_PER_TOKEN = 4  # estimate, only used to keep a prompt off a smaller-context box
-RETRY_STATUSES = {b"502", b"503", b"504"}  # the box's proxy has no live engine behind it
+RETRY_STATUSES = {b"502", b"503", b"504"}  # fail over only when the box's proxy says so (proxy_failure)
 # Only these occupy a box. Anything else (token counts, load, abort) must not wait behind a generation.
 GENERATION_PATHS = {b"/v1/chat/completions", b"/v1/completions", b"/v1/messages", b"/v1/responses",
                     b"/api/v1/generate", b"/api/extra/generate/stream"}
@@ -403,8 +403,15 @@ async def _read_chunked(reader: asyncio.StreamReader) -> bytes:
         await reader.readline()
 
 
-async def _send(backend: Backend, request: bytes) -> Optional[tuple[asyncio.StreamReader, asyncio.StreamWriter, bytes]]:
-    """Connect and read the status line, the last point a request can still go elsewhere."""
+async def _send(
+    backend: Backend, request: bytes,
+) -> Optional[tuple[asyncio.StreamReader, asyncio.StreamWriter, bytes, bytes]]:
+    """Connect and read the status line, the last point a request can still go elsewhere.
+
+    -> (reader, writer, status line, header bytes already read), or None when the box could not
+    answer at all. Only that marks it down: an HTTP error the engine itself sent (Strata's 502 for
+    a reply that failed its schema) is that request's failure, passed on with its status.
+    """
     writer = None
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(backend.host, backend.port), CONNECT_TIMEOUT_S)
@@ -421,11 +428,42 @@ async def _send(backend: Backend, request: bytes) -> Optional[tuple[asyncio.Stre
             writer.close()
         return None
     parts = status.split()
-    if len(parts) < 2 or parts[1] in RETRY_STATUSES:
+    if len(parts) < 2:  # closed or reset before a status line: the box, not the request
         log.warning("%s answered %r", backend.name, status[:60])
         writer.close()
         return None
-    return reader, writer, status
+    if parts[1] not in RETRY_STATUSES:
+        return reader, writer, status, b""
+    head = await _engine_error_head(backend, reader, status)
+    if head is None:
+        writer.close()
+        return None
+    return reader, writer, status, head
+
+
+async def _engine_error_head(backend: Backend, reader: asyncio.StreamReader, status: bytes) -> Optional[bytes]:
+    """A 502/503/504's headers if the engine sent it (pass it on), None if the box has no engine."""
+    try:
+        head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), READ_TIMEOUT_S)
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+        return None
+    if proxy_failure(head):
+        log.warning("%s has no engine behind it: %r", backend.name, status[:60])
+        return None
+    log.info("%s answered %r for this request; passed on", backend.name, status[:60])
+    return head
+
+
+def proxy_failure(head: bytes) -> bool:
+    """Whether a 502/503/504 came from a proxy in front of the box rather than from its engine.
+
+    r9700-lb.conf marks its own errors with X-Proxy-Error (error_page applies only to responses
+    nginx generates, never to upstream ones). An HTML error page counts too: neither Strata nor
+    kcpp answers in HTML, and it covers a proxy whose conf predates the header.
+    """
+    lines = (line.partition(b":") for line in head.split(b"\r\n"))
+    headers = {k.strip().lower(): v.strip().lower() for k, _, v in lines}
+    return b"x-proxy-error" in headers or headers.get(b"content-type", b"").startswith(b"text/html")
 
 
 async def _client_closed(reader: asyncio.StreamReader) -> None:
@@ -614,12 +652,12 @@ class Server:
             sent = sending.result()
             if sent is None:
                 return False
-            upstream, upstream_writer, status = sent
+            upstream, upstream_writer, status, head = sent
             if counted:
                 backend.remember(chain)
                 log.info("%s -> %s (cached %d of %d chars, %d in flight, %d waiting)", target.decode(), backend.name,
                          matched, chain[-1][1] if chain else 0, backend.inflight, self.router.waiting)
-            writer.write(status + b"X-Inference-Backend: " + backend.name.encode() + b"\r\n")
+            writer.write(status + b"X-Inference-Backend: " + backend.name.encode() + b"\r\n" + head)
             await relay(upstream, reader, writer)
             return True
         finally:

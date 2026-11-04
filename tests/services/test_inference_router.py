@@ -200,8 +200,9 @@ def test_parse_backends_rejects_bad_config(spec):
 class FakeEngine:
     """A model server that streams, records requests, and notices a closed connection."""
 
-    def __init__(self, status=b"200 OK"):
+    def __init__(self, status=b"200 OK", headers=b"Content-Type: text/event-stream\r\n"):
         self.status = status
+        self.headers = headers
         self.requests = []
         self.release = asyncio.Event()
         self.disconnected = asyncio.Event()
@@ -213,7 +214,7 @@ class FakeEngine:
                        if line.lower().startswith(b"content-length")), 0)
         request_body = await reader.readexactly(length) if length else b""
         self.requests.append((head, request_body))
-        writer.write(b"HTTP/1.1 " + self.status + b"\r\nContent-Type: text/event-stream\r\n\r\n")
+        writer.write(b"HTTP/1.1 " + self.status + b"\r\n" + self.headers + b"\r\n")
         writer.write(b"first")
         await writer.drain()
         if self.hold:
@@ -425,12 +426,40 @@ async def test_a_box_that_cannot_be_reached_fails_over_to_the_next():
         assert h.router.primary.healthy is False
 
 
+NO_ENGINE = b"Content-Type: application/json\r\nX-Proxy-Error: r9700-proxy\r\n"  # r9700-lb.conf's @no_engine
+
+
 @pytest.mark.asyncio
-async def test_a_502_from_the_box_proxy_fails_over():
+@pytest.mark.parametrize("headers", [NO_ENGINE, b"Content-Type: text/html\r\n"])
+async def test_a_502_from_the_box_proxy_fails_over(headers):
     """r9700-proxy answers 502 when neither CT is running."""
-    async with Harness({"r9700": FakeEngine(b"502 Bad Gateway"), "dt21": FakeEngine()}) as h:
+    async with Harness({"r9700": FakeEngine(b"502 Bad Gateway", headers), "dt21": FakeEngine()}) as h:
         raw = await h.fetch(body("hi"))
-    assert b"X-Inference-Backend: dt21" in raw
+        assert b"X-Inference-Backend: dt21" in raw
+        assert h.router.primary.healthy is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [b"502 Bad Gateway", b"503 Service Unavailable", b"500 Internal Server Error"])
+async def test_an_engine_error_is_the_requests_failure_not_the_boxs(status):
+    """Strata's 502 structured_output_failed once marked the R9700 down and moved the chat (2026-11-04)."""
+    r9700, dt21 = FakeEngine(status, b"Content-Type: application/json\r\n"), FakeEngine()
+    async with Harness({"r9700": r9700, "dt21": dt21}) as h:
+        raw = await h.fetch(body("hi"))
+        assert raw.startswith(b"HTTP/1.1 " + status + b"\r\nX-Inference-Backend: r9700\r\n")
+        assert b"Content-Type: application/json" in raw and raw.endswith(b"first-last")
+        assert h.router.primary.healthy is True
+    assert not dt21.requests
+
+
+@pytest.mark.parametrize("head, failure", [
+    (NO_ENGINE + b"\r\n", True),
+    (b"Content-Type: text/html\r\nServer: nginx\r\n\r\n", True),
+    (b"Content-Type: application/json\r\n\r\n", False),
+    (b"\r\n", False),
+])
+def test_proxy_failure(head, failure):
+    assert ir.proxy_failure(head) is failure
 
 
 @pytest.mark.asyncio

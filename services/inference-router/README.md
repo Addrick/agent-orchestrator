@@ -55,6 +55,13 @@ Hindsight's nginx pool (`hindsight-kobold-proxy`, CT100 `/opt/configs/hindsight/
   parks every job as a conversation, and five of them evicted a parked 9.6k-token chat (next turn: 0 reused, 4.9 s).
   With the flag the turn reused 9,630 of 9,650 tokens (0.15 s). Injected here rather than through Hindsight's
   `LLM_EXTRA_BODY`, because only the router knows that this request is going to Strata.
+- **Not built: keeping a preempted job's prompt on disk.** On CT102 (2026-11-04), a job cancelled mid-generation
+  *without* the flag could be saved: `/slots/0?action=save` stored the prompt plus the partial output, and after a
+  restore the same prompt reused all but 7 tokens. That held at 12k, 52k and 136k tokens, with saves of 0.45 / 0.79 /
+  1.59 s and restores of 0.42 / 1.09 / 2.48 s. **With the flag the save is refused** (`400 no complete session to
+  save`, after a cancel and after a completed reply alike). In every run the RAM park alone also gave full reuse on
+  the retry, so the disk copy only matters once the park is evicted, and evicting chats' parks is exactly what
+  the flag prevents. Saving jobs means sending them without the flag, which is a trade-off awaiting a decision.
 - Jobs do not move `last_active`, so neither the hold-off nor the quiet rule sees them as chat.
   `/router/status` → `background` holds counters for admitted, refused, preempted and incomplete jobs.
 
@@ -71,6 +78,15 @@ Each box is polled every 3 s: `/v1/models` (up, model, context, loaded) and `/me
 that did not come through the router, which is how Adam's direct use of dt21 counts). A box is used
 only if it is **loaded and serves the primary's model**, so a kcpp swap on the R9700 takes dt21 out of
 rotation by itself, and a lazy Strata is never made to load.
+
+**A box is marked down only when it cannot answer**: a connect error, timeout or reset, or three failed polls.
+An HTTP error from the engine is passed to the client with its status and body unchanged, and the box stays
+up. Example: Strata's 502 `structured_output_failed` for a reply that failed its JSON schema. Until DP-405B,
+that 502 marked the R9700 down until the next poll and re-sent the chat to dt21. A 502/503/504 fails over
+only if the proxy in front generated it: `r9700-lb.conf` tags its own errors `X-Proxy-Error`, and an HTML
+error page counts too. The status is kept at 502 rather than remapped to 422/500 because it is Strata's
+answer. No proxy in this chain acts on an engine's status any more: `r9700-proxy` only fails over on
+`error timeout`. Hindsight's pool re-sends a 502 to another worker on purpose, and Hindsight retries any 5xx.
 
 The `Host` header passes through untouched, so every Strata needs the callers' hosts in
 `allowed_hosts` (it answers 403 otherwise): `10.0.0.70`, `host.docker.internal`.
@@ -89,6 +105,10 @@ docker run -d --name inference-router --restart unless-stopped --network host \
   -v /opt/configs/derpr/inference_router.py:/app/inference_router.py:ro \
   python:3.13-alpine python -u /app/inference_router.py
 ```
+
+Deploy `r9700-lb.conf` before the router. Its `X-Proxy-Error` tag is how the router tells a stopped CT from an
+engine's error, though an HTML error page from an older conf still counts as a stopped CT. CT102's
+save-on-stop / restore-on-start units are a separate install: `services/strata/README.md`.
 
 Background work also needs, in `kobold-lb.conf`'s `kobold_pool`, a
 `server 10.0.0.70:5007 max_fails=2 fail_timeout=60s;` line, and in its `location /` the line

@@ -1,0 +1,13 @@
+# /etc/systemd/system/strata-restore.service on CT102 (DP-405B).
+# Started by strata.service (Wants= in slot-persist.conf). A separate oneshot unit, not an
+# ExecStartPost: waiting out a 2-5 min model load inside strata's start would hold it in
+# "activating" past its 90 s TimeoutStartSec, and systemd would kill the engine mid-load.
+[Unit]
+Description=Restore Strata's live conversation saved at its last stop (DP-405B)
+After=strata.service
+PartOf=strata.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/strata/strata-slot-persist restore
+TimeoutStartSec=20min
