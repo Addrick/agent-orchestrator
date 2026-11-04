@@ -1061,8 +1061,14 @@ only thing that talks to both:
   `auto_approve` off, that is the next `queue_codr_task`), the post says so, and
   you approve it in stagr's channel. A ticket you copied into the queue by hand
   wakes no one. stagr waits up to 14 days for a ticket to end; past that the
-  wait expires and it is not woken.
-- **Feeding codr a sequence of tickets.** Plan the tickets with stagr, have it
+  wait expires and it is not woken. **While stagr's turn runs, codr starts no
+  ticket**, so a ticket already waiting in the queue starts only after stagr has
+  had its say: it can prepare codr's box (`codr_shell`, `copy_to_codr`) or step
+  in (delete the next ticket's folder, say) before codr picks it up.
+- **Feeding codr a sequence of tickets** works two ways. Tickets that need no
+  preparation between them can all be queued at once (chained with
+  `depends_on`); codr runs them in order, and stagr still hears each result
+  before the next starts. Or stagr feeds them one at a time: plan the tickets with stagr, have it
   queue the first, and approve that one. If the sequence looks right, turn on
   `set auto_approve on` for stagr: from then on stagr queues each next ticket
   itself when codr finishes the one before, with no prompt, until it runs out,

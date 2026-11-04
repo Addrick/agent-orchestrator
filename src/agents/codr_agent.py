@@ -850,7 +850,11 @@ class CodrAgent(Agent):
 
             if self._dispose_pending and not busy:
                 await self._dispose(client)
-            if not busy and self.cfg["start_tasks"]:
+            # DP-493: while stagr is being told a ticket ended, start nothing,
+            # so a ticket queued ahead of time waits for stagr's turn (it may
+            # prepare the box with codr_shell, or step in) instead of starting
+            # on the next tick behind its back.
+            if not busy and self.cfg["start_tasks"] and not self._waking:
                 await self._start_next(client)
 
     async def _scan(self, client: OpencodeClient, busy: Set[str]

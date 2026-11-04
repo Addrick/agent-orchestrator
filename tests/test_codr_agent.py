@@ -333,6 +333,21 @@ async def test_a_seed_of_any_size_arrives_and_keeps_what_codr_changed(fake, tmp_
 # --- ticks ---------------------------------------------------------------------
 
 
+async def test_no_ticket_starts_while_stagr_is_being_woken(fake, tmp_path):
+    """DP-493: a ticket queued ahead waits for stagr's wake turn to end, so
+    stagr can prepare or step in before codr starts it."""
+    _task(tmp_path, "CD-002", text="Build csvstats.")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path)
+    agent._waking.add("CD-001")                                # stagr's turn about CD-001 is running
+    await agent.deploy()
+    assert not [s for s in fake.sessions.values() if s.get("title", "").endswith(":CD-002")]
+
+    agent._waking.clear()                                      # the turn ended
+    await agent.deploy()
+    assert _session(fake, "CD-002")
+
+
 async def test_first_tick_sets_up_the_workspace_and_starts_the_oldest_task(fake, tmp_path):
     _task(tmp_path, "01-a", text="Build csvstats.")
     fake.shell_output = _shell()
