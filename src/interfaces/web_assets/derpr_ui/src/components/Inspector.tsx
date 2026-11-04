@@ -146,7 +146,6 @@ function buildBuffer(p: Persona): Buf {
     memory_mode: asStr(p.memory_mode),
     thinking_level: asStr(p.thinking_level),
     ltm_budget: asStr(p.ltm_budget),
-    include_ambient_memory: String(p.include_ambient_memory ?? true),
   }
   for (const k of STR_BASE) b[k] = asStr(p[k])
   for (const k of NUM_BASE) b[k] = asStr(p[k])
@@ -202,8 +201,6 @@ function PersonaPane({ store }: { store: PortalStore }) {
     for (const k of STR_BASE) if (buf[k] !== baseline[k]) patch[k] = buf[k]
     if (buf.memory_mode !== baseline.memory_mode) patch.memory_mode = buf.memory_mode
     if (buf.ltm_budget !== baseline.ltm_budget) patch.ltm_budget = buf.ltm_budget === '' ? null : buf.ltm_budget
-    if (buf.include_ambient_memory !== baseline.include_ambient_memory)
-      patch.include_ambient_memory = buf.include_ambient_memory === 'true'
     // numeric base params
     for (const k of NUM_BASE) {
       if (buf[k] !== baseline[k]) patch[k] = buf[k] === '' ? null : coerceNum(buf[k])
@@ -395,16 +392,6 @@ function PersonaPane({ store }: { store: PortalStore }) {
             title="memories inserted into each new message (1-50). Empty = MEMORY_MAX_SUMMARIES_IN_CONTEXT."
             onChange={(e) => set('ltm_max_items', e.target.value)}
           />
-        </Cell>
-        <Cell label="include_ambient_memory">
-          <select
-            value={buf.include_ambient_memory}
-            title="whether shared ambient-channel memories are eligible (SQLite backend)"
-            onChange={(e) => set('include_ambient_memory', e.target.value)}
-          >
-            <option value="true">on</option>
-            <option value="false">off</option>
-          </select>
         </Cell>
       </Pair>
 

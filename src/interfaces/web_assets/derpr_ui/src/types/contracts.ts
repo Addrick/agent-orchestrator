@@ -88,7 +88,6 @@ export interface Persona {
   max_tool_calls: number | null
   // DP-491 LTM recall knobs; null = default (MEMORY_MAX_SUMMARIES_IN_CONTEXT /
   // Hindsight's own). ltm_max_tokens + ltm_budget are Hindsight-only.
-  include_ambient_memory?: boolean
   ltm_max_items?: number | null
   ltm_max_tokens?: number | null
   ltm_budget?: string | null

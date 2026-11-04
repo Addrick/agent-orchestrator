@@ -747,8 +747,6 @@ PERSONA_FIELDS: List[PersonaField] = [
                 f"Ambient memory inclusion {'enabled' if v else 'disabled'} for {name}."
             ),
         ),
-        patch_key='include_ambient_memory',
-        patch_apply=_plain_patch(lambda p, v: p.set_include_ambient_memory(bool(v))),
     ),
     PersonaField(
         name='inject_timestamp',

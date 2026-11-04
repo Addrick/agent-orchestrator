@@ -1440,18 +1440,15 @@ def test_persona_ltm_knobs_get_and_patch():
         assert body["ltm_max_items"] is None
         assert body["ltm_max_tokens"] is None
         assert body["ltm_budget"] is None
-        assert body["include_ambient_memory"] is True
 
         r = client.patch("/api/v1/persona/test_persona", json={
             "ltm_max_items": 8, "ltm_max_tokens": 3000, "ltm_budget": "low",
-            "include_ambient_memory": False,
         })
         assert r.status_code == 200
         assert r.json()["rejected_fields"] == []
         assert persona.get_effective_ltm_max_items() == 8
         assert persona.get_ltm_max_tokens() == 3000
         assert persona.get_ltm_budget() == "low"
-        assert persona.get_include_ambient_memory() is False
 
         r = client.patch("/api/v1/persona/test_persona", json={
             "ltm_max_items": 0, "ltm_max_tokens": 5, "ltm_budget": "turbo",

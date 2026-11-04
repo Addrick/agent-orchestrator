@@ -29,7 +29,6 @@ export const MOCK_PERSONA: Persona = {
   long_term_memory: false,
   max_context_tokens: 16384,
   max_tool_calls: null,
-  include_ambient_memory: true,
   ltm_max_items: null,
   ltm_max_tokens: null,
   ltm_budget: null,
