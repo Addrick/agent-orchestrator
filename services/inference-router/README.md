@@ -32,6 +32,31 @@ conversation may re-read once.
 - `ROUTER_MOVE_CHARS` (40000) — a conversation with less than this cached is cheap to move.
 - `ROUTER_QUIET_S` (120) — a box idle this long has no conversation between steps on it.
 - `ROUTER_HOST` / `ROUTER_PORT` (`0.0.0.0` / `5001`).
+- `ROUTER_BACKGROUND_PORT` (unset = off) — the listener Hindsight's pool reaches (DP-405B, below).
+- `ROUTER_BACKGROUND_BACKENDS` (the primary) — boxes that may take background work. dt21's `:5001` is Adam's own.
+- `ROUTER_BACKGROUND_HOLDOFF_S` (`ROUTER_QUIET_S`) — seconds since the last chat before a box takes a background job.
+- `ROUTER_PUBLIC_HOST` (`10.0.0.70`) — the `Host` a loopback backend is addressed as (polls, background jobs).
+
+## Background work: Hindsight behind chat (DP-405B)
+
+Hindsight's nginx pool (`hindsight-kobold-proxy`, CT100 `/opt/configs/hindsight/kobold-lb.conf`) lists
+`10.0.0.70:<ROUTER_BACKGROUND_PORT>` as one more worker. On that port:
+
+- A job runs only on a background box that is **running Strata** (its `/metrics` has an `engine` block; kcpp's
+  cancel-on-disconnect is unverified), has no chat in flight or queued, runs no other job, and has had no chat for
+  the hold-off. Otherwise: **503 at once, never held.** nginx then gives the job to the next worker, and Hindsight's
+  startup LLM probe (fail-open, capped at 10 s in 1.2.0) is never slowed by the router.
+- **Chat preempts.** A chat request routed to a box that is running a job closes that job's upstream (Strata
+  stops within its 0.5 s disconnect watch, verified on CT102 2026-11-04), the job gets a 503, and the chat goes in.
+- The job's reply is read **whole** before anything is sent. A reply that fails its framing (`Content-Length`,
+  chunked terminator, `data: [DONE]`, or unframed JSON that does not parse) becomes a 502. A box's own 5xx
+  (Strata's 502 for a schema failure) is passed on and does **not** mark the box down.
+- Each job is sent with `"strata_checkpoint": false` and `Host: ROUTER_PUBLIC_HOST`. Without the flag Strata
+  parks every job as a conversation, and five of them evicted a parked 9.6k-token chat (next turn: 0 reused, 4.9 s).
+  With the flag the turn reused 9,630 of 9,650 tokens (0.15 s). Injected here rather than through Hindsight's
+  `LLM_EXTRA_BODY`, because only the router knows that this request is going to Strata.
+- Jobs do not move `last_active`, so neither the hold-off nor the quiet rule sees them as chat.
+  `/router/status` → `background` holds counters for admitted, refused, preempted and incomplete jobs.
 
 A request is held in the router until its chosen box is free, oldest first, because once sent it is
 stuck in that box's queue even if the other frees up (seen live: 208 s behind the R9700 with dt21 idle).
@@ -60,9 +85,16 @@ docker rm -f r9700-proxy
 docker run -d --name r9700-proxy --restart unless-stopped -p 127.0.0.1:5006:5001 \
   -v /opt/configs/derpr/r9700-lb.conf:/etc/nginx/nginx.conf:ro nginx:1.27-alpine
 docker run -d --name inference-router --restart unless-stopped --network host \
+  -e ROUTER_BACKGROUND_PORT=5007 \
   -v /opt/configs/derpr/inference_router.py:/app/inference_router.py:ro \
   python:3.13-alpine python -u /app/inference_router.py
 ```
+
+Background work also needs, in `kobold-lb.conf`'s `kobold_pool`, a
+`server 10.0.0.70:5007 max_fails=2 fail_timeout=60s;` line, and in its `location /` the line
+`proxy_next_upstream error timeout http_502 http_503 non_idempotent;`. That way a refused or preempted
+job (503) or a schema failure (502) goes to the next worker. Without `non_idempotent`, nginx never re-sends
+a POST. Then run `docker restart hindsight-kobold-proxy`.
 
 Update the router: copy the file, `docker restart inference-router`.
 

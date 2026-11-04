@@ -8,6 +8,12 @@ other sits idle. nginx can hash (ignores busy) or count connections (ignores the
 not both. This router does both, using only the request's own messages, so clients need
 no session header and no configuration.
 
+Background work (DP-405B): Hindsight reaches the router on a second port. A job there runs
+only on an idle Strata box with no chat for a hold-off, is refused with a 503 otherwise (its
+nginx pool hands it to another worker), and is preempted -- its upstream closed, which Strata
+turns into a cancel -- the moment a chat request wants the box. Its reply is held whole and
+sent on only when complete, so a cut-off job is always a 5xx, never a short 200.
+
 Standard library only: it runs from a bind-mounted file in a stock python image, and
 must survive derpr deploys. It never logs or stores message content, only hashes.
 """
@@ -38,6 +44,14 @@ RETRY_STATUSES = {b"502", b"503", b"504"}  # the box's proxy has no live engine 
 GENERATION_PATHS = {b"/v1/chat/completions", b"/v1/completions", b"/v1/messages", b"/v1/responses",
                     b"/api/v1/generate", b"/api/extra/generate/stream"}
 HOP_HEADERS = {b"connection", b"keep-alive", b"proxy-connection", b"transfer-encoding", b"content-length"}
+# The Host a loopback backend (r9700-proxy on CT100) is reached as: Strata answers 403 outside allowed_hosts.
+LOOPBACK_HOST = os.environ.get("ROUTER_PUBLIC_HOST", "10.0.0.70")
+# After a background job ends, Strata may still report the cancelled generation for a moment;
+# that is not someone else's work. Strata's own disconnect watch polls every 0.5 s.
+BACKGROUND_SETTLE_S = 2.0
+# Sent with every background request: Strata keeps no conversation checkpoint for the call, so
+# a burst of Hindsight jobs cannot evict a parked chat (measured 2026-11-04, DP-405B).
+BACKGROUND_FIELDS = {"strata_checkpoint": False}
 
 
 @dataclass
@@ -51,11 +65,15 @@ class Backend:
     inflight: int = 0
     external_busy: bool = False  # the server reports work this router did not send
     poll_failures: int = 0
-    last_active: float = float("-inf")
+    last_active: float = float("-inf")  # chat only: background jobs hold no conversation
     seen: "OrderedDict[str, int]" = field(default_factory=OrderedDict)  # prefix hash -> prefix chars
+    strata: bool = False  # cancels on disconnect and honours strata_checkpoint: may take background work
+    background: Optional[asyncio.Event] = None  # set while a background job runs here; set() preempts it
+    background_ended: float = float("-inf")
 
     @property
     def idle(self) -> bool:
+        """No chat in progress. A background job does not count: chat preempts it."""
         return self.inflight == 0 and not self.external_busy
 
     def matched(self, chain: Sequence[tuple[str, int]]) -> int:
@@ -146,14 +164,35 @@ def choose(
 
 
 class Router:
-    def __init__(self, backends: Sequence[Backend], move_chars: int, quiet_s: float) -> None:
+    def __init__(
+        self, backends: Sequence[Backend], move_chars: int, quiet_s: float,
+        holdoff_s: Optional[float] = None, background_names: Optional[Iterable[str]] = None,
+    ) -> None:
         self.backends = list(backends)
         self.primary = self.backends[0]
         self.move_chars = move_chars
         self.quiet_s = quiet_s
+        # A chat between steps must not find a Hindsight job on its box: same window as "quiet".
+        self.holdoff_s = quiet_s if holdoff_s is None else holdoff_s
+        self.background_names = set(background_names) if background_names is not None else {self.primary.name}
+        self.background_counts = {"admitted": 0, "refused": 0, "preempted": 0, "incomplete": 0}
         self.expected_model: Optional[str] = None  # the primary's, kept while it is down
         self.changed = asyncio.Event()  # replaced on each wake; waiters resume in arrival order
         self.waiting = 0
+
+    def admit_background(self, now: float) -> Optional[Backend]:
+        """A box a background job may start on now, or None: then it is refused, never held.
+
+        Refusing at once is what keeps Hindsight's startup probe and its nginx pool fast: a
+        held job would sit on a pool slot that another worker could have served.
+        """
+        if self.waiting:  # chat is queued: it gets the next free box
+            return None
+        for backend in self.backends:
+            if (backend.name in self.background_names and backend.healthy and backend.strata and backend.idle
+                    and backend.background is None and now - backend.last_active >= self.holdoff_s):
+                return backend
+        return None
 
     def wake(self) -> None:
         """A box may have freed up: held requests look again, oldest first."""
@@ -170,13 +209,18 @@ class Router:
             return [], chain
         return [chosen] + [b for b in candidates if b is not chosen], chain
 
-    def note_poll(self, backend: Backend, models: Optional[dict[str, Any]], metrics: Optional[dict[str, Any]]) -> None:
+    def note_poll(
+        self, backend: Backend, models: Optional[dict[str, Any]], metrics: Optional[dict[str, Any]],
+        now: Optional[float] = None,
+    ) -> None:
+        now = time.monotonic() if now is None else now
         entry = _first_model(models)
         if entry is None:
             backend.poll_failures += 1
             if backend.poll_failures >= POLL_FAILURES_DOWN:
                 backend.healthy = False
                 backend.external_busy = False
+                backend.strata = False
             return
         backend.poll_failures = 0
         # A lazy or unloaded server must refuse rather than load on a router request.
@@ -185,17 +229,25 @@ class Router:
         backend.n_ctx = (entry.get("meta") or {}).get("n_ctx")
         if backend is self.primary and backend.healthy:
             self.expected_model = backend.model
+        # Strata's /metrics is JSON with an "engine" block; kcpp has none. Only Strata is known to
+        # cancel on disconnect (verified on CT102 2026-11-04) and to honour strata_checkpoint.
+        backend.strata = isinstance((metrics or {}).get("engine"), dict)
         live = (metrics or {}).get("live") or {}
-        backend.external_busy = backend.inflight == 0 and live.get("state", "idle") not in ("idle", "unloaded")
+        ours = (backend.inflight > 0 or backend.background is not None
+                or now - backend.background_ended < BACKGROUND_SETTLE_S)
+        backend.external_busy = not ours and live.get("state", "idle") not in ("idle", "unloaded")
 
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
         return {
             "expected_model": self.expected_model,
             "waiting": self.waiting,
+            "background": {"boxes": sorted(self.background_names), "holdoff_s": self.holdoff_s,
+                           **self.background_counts},
             "backends": [{
                 "name": b.name, "url": f"http://{b.host}:{b.port}", "healthy": b.healthy, "model": b.model,
                 "n_ctx": b.n_ctx, "inflight": b.inflight, "external_busy": b.external_busy,
+                "strata": b.strata, "background_running": b.background is not None,
                 "idle_s": None if b.last_active == float("-inf") else round(now - b.last_active, 1),
             } for b in self.backends],
         }
@@ -227,6 +279,100 @@ def rewrite_head(head_lines: Iterable[bytes], body_length: int) -> bytes:
     out += [line for line in lines if line.split(b":", 1)[0].strip().lower() not in HOP_HEADERS]
     out += [b"Connection: close", b"Content-Length: %d" % body_length]
     return b"\r\n".join(out) + b"\r\n\r\n"
+
+
+def upstream_host(backend: Backend) -> str:
+    """The Host a backend must be addressed as when the caller's own Host means nothing to it."""
+    return LOOPBACK_HOST if backend.host == "127.0.0.1" else backend.host
+
+
+def with_host(head_lines: Sequence[bytes], host: str) -> list[bytes]:
+    """Replace the Host header. Hindsight's nginx pool sends its own container name, which Strata refuses."""
+    lines = [head_lines[0]] + [line for line in head_lines[1:] if not line.lower().startswith(b"host:")]
+    return lines[:1] + [b"Host: " + host.encode()] + lines[1:]
+
+
+def background_body(body: bytes) -> bytes:
+    """Mark a background request as one Strata must not keep as a conversation."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return body  # the server's 400 says more than ours would
+    if not isinstance(payload, dict):
+        return body
+    payload.update(BACKGROUND_FIELDS)
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+async def _read_all(reader: asyncio.StreamReader) -> bytes:
+    """The whole reply: the request said Connection: close, so the server's EOF ends it."""
+    raw = bytearray()
+    while True:
+        chunk = await asyncio.wait_for(reader.read(65536), READ_TIMEOUT_S)
+        if not chunk:
+            return bytes(raw)
+        raw += chunk
+        if len(raw) > MAX_BODY_BYTES:
+            raise ValueError("reply too large")
+
+
+def response_complete(raw: bytes) -> bool:
+    """Whether a buffered HTTP reply arrived whole. False is what turns a cut-off job into a 5xx.
+
+    Framing decides when there is any (Content-Length, chunked); an unframed reply ended by EOF
+    must parse as JSON, and a streamed one must have reached `data: [DONE]`.
+    """
+    head, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return False
+    lines = head.split(b"\r\n")
+    status = lines[0].split()
+    if len(status) < 2 or not status[0].startswith(b"HTTP/") or not status[1].isdigit():
+        return False
+    headers = {k.strip().lower(): v.strip() for k, _, v in (line.partition(b":") for line in lines[1:])}
+    has_framing, framed = _framed_body(headers, body)
+    if framed is None:
+        return False
+    if status[1] != b"200":
+        return True  # an error is an error however short; the client must not see a 200 for it
+    if b"event-stream" in headers.get(b"content-type", b"").lower():
+        return framed.rstrip().endswith(b"data: [DONE]")
+    if has_framing:
+        return True
+    try:
+        json.loads(framed)
+    except ValueError:
+        return False
+    return True
+
+
+def _framed_body(headers: dict[bytes, bytes], body: bytes) -> tuple[bool, Optional[bytes]]:
+    """(whether the reply declared its length, its body or None if shorter than declared)."""
+    if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
+        return True, _dechunk_strict(body)
+    if b"content-length" in headers:
+        length = headers[b"content-length"]
+        return True, body if length.isdigit() and len(body) == int(length) else None
+    return False, body
+
+
+def _dechunk_strict(body: bytes) -> Optional[bytes]:
+    """A chunked body, or None if it stops before its terminating zero-size chunk."""
+    out = bytearray()
+    while True:
+        size_line, sep, rest = body.partition(b"\r\n")
+        if not sep:
+            return None
+        try:
+            size = int(size_line.split(b";")[0].strip() or b"x", 16)
+        except ValueError:
+            return None
+        if size == 0:
+            return bytes(out)
+        if len(rest) < size + 2:
+            return None
+        out += rest[:size]
+        body = rest[size + 2:]
 
 
 async def read_request(reader: asyncio.StreamReader) -> Optional[tuple[list[bytes], bytes]]:
@@ -313,8 +459,9 @@ async def relay(
 
 
 class Server:
-    def __init__(self, router: Router) -> None:
+    def __init__(self, router: Router, background: bool = False) -> None:
         self.router = router
+        self.background = background  # the listener Hindsight's pool reaches: preemptible, never held
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -336,6 +483,9 @@ class Server:
             _respond(writer, b"200 OK", self.router.status())
             return
         generation = _is_generation(method, target)
+        if generation and self.background:
+            await self._background(lines, body, reader, writer)
+            return
         if generation:
             held = await self._hold(body, reader)
             if held is None:  # the client left while waiting; no box ever saw it
@@ -358,8 +508,13 @@ class Server:
         try:
             while True:
                 order, chain = self.router.route(body, time.monotonic())
-                if not order or order[0].idle:
+                if not order or (order[0].idle and order[0].background is None):
                     return order, chain
+                job = order[0].background
+                if order[0].idle and job is not None and not job.is_set():
+                    log.info("chat wants %s: preempting its background job", order[0].name)
+                    self.router.background_counts["preempted"] += 1
+                    job.set()  # its task closes the upstream, answers 503, then wakes us
                 changed = asyncio.ensure_future(self.router.changed.wait())
                 await asyncio.wait({gone, changed}, return_when=asyncio.FIRST_COMPLETED)
                 changed.cancel()
@@ -368,6 +523,62 @@ class Server:
         finally:
             self.router.waiting -= 1
             gone.cancel()
+
+    async def _background(
+        self, lines: list[bytes], body: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    ) -> None:
+        """Run a Hindsight job if a box is free of chat; refuse it at once otherwise.
+
+        The reply is read whole before anything is sent, so the only outcomes are the box's own
+        complete answer or a 5xx: a preempt or a cut-off reply can never reach Hindsight as a 200
+        it would read as a document with no facts.
+        """
+        router = self.router
+        backend = router.admit_background(time.monotonic())
+        if backend is None:
+            router.background_counts["refused"] += 1
+            _respond(writer, b"503 Service Unavailable", {"error": "busy with chat; try another worker"})
+            return
+        router.background_counts["admitted"] += 1
+        preempt = backend.background = asyncio.Event()
+        payload = background_body(body)
+        request = rewrite_head(with_host(lines, upstream_host(backend)), len(payload)) + payload
+        upstream_writer = None
+        tasks: list[asyncio.Future[Any]] = []
+        try:
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(backend.host, backend.port), CONNECT_TIMEOUT_S)
+            upstream_writer.write(request)
+            await upstream_writer.drain()
+            reply = asyncio.ensure_future(_read_all(upstream_reader))
+            tasks = [reply, asyncio.ensure_future(preempt.wait()), asyncio.ensure_future(_client_closed(reader))]
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if reply.done() and not reply.exception():
+                raw = reply.result()
+                if response_complete(raw):
+                    status, _, rest = raw.partition(b"\r\n")
+                    writer.write(status + b"\r\nX-Inference-Backend: " + backend.name.encode() + b"\r\n" + rest)
+                else:
+                    router.background_counts["incomplete"] += 1
+                    log.warning("%s background reply incomplete (%d bytes); answered 502", backend.name, len(raw))
+                    _respond(writer, b"502 Bad Gateway", {"error": "the model server's reply was incomplete"})
+            elif preempt.is_set():
+                _respond(writer, b"503 Service Unavailable", {"error": "preempted by a chat request; retry"})
+            elif reply.done():
+                _respond(writer, b"502 Bad Gateway", {"error": "the model server's reply could not be read"})
+            # else: Hindsight hung up; closing the upstream below cancels the generation
+        except (OSError, asyncio.TimeoutError) as exc:
+            log.warning("%s unreachable for background work: %r", backend.name, exc)
+            _respond(writer, b"503 Service Unavailable", {"error": "no inference server answered"})
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if upstream_writer:
+                upstream_writer.close()  # before the chat goes in: this is what stops the generation
+            backend.background = None
+            backend.background_ended = time.monotonic()
+            router.wake()
 
     async def _forward(
         self, order: list[Backend], chain: list[tuple[str, int]], request: bytes, generation: bool, target: bytes,
@@ -434,8 +645,7 @@ async def _get_json(backend: Backend, path: str) -> Optional[dict[str, Any]]:
     writer = None
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(backend.host, backend.port), POLL_TIMEOUT_S)
-        host = f"Host: {backend.host}\r\n" if backend.host != "127.0.0.1" else "Host: 10.0.0.70\r\n"
-        writer.write(f"GET {path} HTTP/1.1\r\n{host}Connection: close\r\n\r\n".encode())
+        writer.write(f"GET {path} HTTP/1.1\r\nHost: {upstream_host(backend)}\r\nConnection: close\r\n\r\n".encode())
         raw = await asyncio.wait_for(reader.read(), POLL_TIMEOUT_S)
         head, _, body = raw.partition(b"\r\n\r\n")
         if b" 200" not in head.split(b"\r\n", 1)[0]:
@@ -478,22 +688,34 @@ async def poll_forever(router: Router) -> None:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    holdoff = os.environ.get("ROUTER_BACKGROUND_HOLDOFF_S")
+    background_boxes = os.environ.get("ROUTER_BACKGROUND_BACKENDS")
     router = Router(
         parse_backends(os.environ.get("ROUTER_BACKENDS", "r9700=127.0.0.1:5006,dt21=10.0.0.69:5001")),
         move_chars=int(os.environ.get("ROUTER_MOVE_CHARS", "40000")),
         quiet_s=float(os.environ.get("ROUTER_QUIET_S", "120")),
+        holdoff_s=float(holdoff) if holdoff else None,
+        background_names=[n.strip() for n in background_boxes.split(",") if n.strip()] if background_boxes else None,
     )
+    host = os.environ.get("ROUTER_HOST", "0.0.0.0")
     poller = asyncio.ensure_future(poll_forever(router))
-    server = await asyncio.start_server(
-        Server(router).handle, os.environ.get("ROUTER_HOST", "0.0.0.0"), int(os.environ.get("ROUTER_PORT", "5001")),
-        limit=MAX_HEAD_BYTES,
-    )
+    servers = [await asyncio.start_server(
+        Server(router).handle, host, int(os.environ.get("ROUTER_PORT", "5001")), limit=MAX_HEAD_BYTES,
+    )]
+    background_port = int(os.environ.get("ROUTER_BACKGROUND_PORT", "0") or 0)  # 0: no background listener
+    if background_port:
+        servers.append(await asyncio.start_server(
+            Server(router, background=True).handle, host, background_port, limit=MAX_HEAD_BYTES,
+        ))
+        log.info("background work on :%d -> %s, hold-off %.0f s", background_port,
+                 ", ".join(sorted(router.background_names)), router.holdoff_s)
     log.info("routing to %s", ", ".join(b.name for b in router.backends))
-    async with server:
-        try:
-            await server.serve_forever()
-        finally:
-            poller.cancel()
+    try:
+        await asyncio.gather(*(server.serve_forever() for server in servers))
+    finally:
+        poller.cancel()
+        for server in servers:
+            server.close()
 
 
 if __name__ == "__main__":

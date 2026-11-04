@@ -470,3 +470,275 @@ async def test_a_chunked_request_body_is_read_and_resent_with_a_length():
         writer.close()
     assert engine.requests[0][1] == b"hello"
     assert b"Transfer-Encoding" not in engine.requests[0][0]
+
+
+# --- background work: Hindsight on the R9700 behind chat (DP-405B) ----------------
+
+
+def test_a_background_job_waits_out_the_hold_off_after_chat():
+    router = ir.Router([box("r9700", strata=True, last_active=NOW - 30)], MOVE, QUIET, holdoff_s=60)
+    assert router.admit_background(NOW) is None
+    assert router.admit_background(NOW + 30) is router.primary
+
+
+def test_the_hold_off_defaults_to_the_quiet_window():
+    assert ir.Router([box("r9700")], MOVE, QUIET).holdoff_s == QUIET
+
+
+@pytest.mark.parametrize("kw", [
+    {"strata": False},  # kcpp on the R9700: cancel-on-disconnect and strata_checkpoint unverified there
+    {"strata": True, "inflight": 1},
+    {"strata": True, "external_busy": True},
+    {"strata": True, "healthy": False},
+])
+def test_a_background_job_only_takes_an_idle_strata_box(kw):
+    router = ir.Router([box("r9700", **kw)], MOVE, QUIET)
+    assert router.admit_background(NOW) is None
+
+
+def test_one_background_job_per_box():
+    router = ir.Router([box("r9700", strata=True)], MOVE, QUIET)
+    router.primary.background = asyncio.Event()
+    assert router.admit_background(NOW) is None
+
+
+def test_queued_chat_blocks_a_new_background_job():
+    router = ir.Router([box("r9700", strata=True)], MOVE, QUIET)
+    router.waiting = 1
+    assert router.admit_background(NOW) is None
+
+
+def test_background_work_stays_off_boxes_not_named_for_it():
+    """dt21's :5001 is Adam's own Strata; only the boxes configured for it take Hindsight."""
+    router = ir.Router([box("r9700", strata=True, inflight=1), box("dt21", strata=True)], MOVE, QUIET)
+    assert router.admit_background(NOW) is None
+    router = ir.Router([box("r9700", strata=True), box("dt21", strata=True)], MOVE, QUIET,
+                       background_names=["dt21"])
+    assert router.admit_background(NOW).name == "dt21"
+
+
+def test_a_box_running_only_a_background_job_counts_as_idle_for_chat():
+    r9700 = box("r9700", strata=True)
+    r9700.background = asyncio.Event()
+    assert choose([r9700, box("dt21", last_active=NOW - 1)], chain("new")) is r9700
+
+
+def test_strata_is_recognised_by_its_metrics_engine_block():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, {"engine": {"version": "0.1.52"}, "live": {}})
+    assert router.primary.strata is True
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None)  # kcpp: no /metrics JSON
+    assert router.primary.strata is False
+
+
+def test_our_own_background_job_is_not_someone_elses_work():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    busy = {"engine": {}, "live": {"state": "generating"}}
+    router.primary.background = asyncio.Event()
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, busy, now=NOW)
+    assert router.primary.external_busy is False
+    router.primary.background, router.primary.background_ended = None, NOW
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, busy, now=NOW + 1)  # still cancelling
+    assert router.primary.external_busy is False
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, busy, now=NOW + ir.BACKGROUND_SETTLE_S)
+    assert router.primary.external_busy is True
+
+
+def test_background_body_turns_off_strata_checkpoints():
+    sent = json.loads(ir.background_body(json.dumps({"messages": [], "strata_checkpoint": True}).encode()))
+    assert sent["strata_checkpoint"] is False
+    assert ir.background_body(b"not json") == b"not json"
+
+
+def test_with_host_replaces_the_pools_host():
+    lines = ir.with_host([b"POST / HTTP/1.1", b"Host: kobold-proxy", b"X: y"], "10.0.0.70")
+    assert lines == [b"POST / HTTP/1.1", b"Host: 10.0.0.70", b"X: y"]
+
+
+def _reply(payload, status=b"200 OK", headers=b"Content-Type: application/json\r\n"):
+    return b"HTTP/1.1 " + status + b"\r\n" + headers + b"\r\n" + payload
+
+
+@pytest.mark.parametrize("raw, complete", [
+    (_reply(b'{"a": 1}', headers=b"Content-Length: 8\r\n"), True),
+    (_reply(b'{"a": 1', headers=b"Content-Length: 8\r\n"), False),  # cut off mid-body
+    (_reply(b'8\r\n{"a": 1}\r\n0\r\n\r\n', headers=b"Transfer-Encoding: chunked\r\n"), True),
+    (_reply(b'8\r\n{"a": 1}\r\n', headers=b"Transfer-Encoding: chunked\r\n"), False),
+    (_reply(b'{"a": 1}'), True),  # unframed, ended by EOF: must parse
+    (_reply(b'{"choices": [{"message": {"content": "{\\"facts\\": ['), False),
+    (_reply(b"data: {}\n\ndata: [DONE]\n\n", headers=b"Content-Type: text/event-stream\r\n"), True),
+    (_reply(b"data: {}\n\n", headers=b"Content-Type: text/event-stream\r\n"), False),
+    (_reply(b"<html>", status=b"502 Bad Gateway", headers=b"Content-Type: text/html\r\n"), True),
+    (b"HTTP/1.1 200 OK\r\nContent-Le", False),
+    (b"", False),
+])
+def test_response_complete(raw, complete):
+    assert ir.response_complete(raw) is complete
+
+
+class JsonEngine:
+    """A non-streaming model server: nothing is sent until the reply is done, like Strata's."""
+
+    def __init__(self, reply=b'{"choices": [{"message": {"content": "{\\"facts\\": []}"}}]}', truncate=False,
+                 status=b"200 OK"):
+        self.reply, self.truncate, self.status = reply, truncate, status
+        self.requests = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.disconnected = asyncio.Event()
+        self.hold = False
+
+    async def handle(self, reader, writer):
+        head = await reader.readuntil(b"\r\n\r\n")
+        length = next((int(line.split(b":")[1]) for line in head.split(b"\r\n")
+                       if line.lower().startswith(b"content-length")), 0)
+        self.requests.append((head, await reader.readexactly(length) if length else b""))
+        self.started.set()
+        if self.hold:
+            hung_up = asyncio.ensure_future(reader.read(1))
+            released = asyncio.ensure_future(self.release.wait())
+            await asyncio.wait({hung_up, released}, return_when=asyncio.FIRST_COMPLETED)
+            released.cancel()
+            if hung_up.done() and not hung_up.result():
+                self.disconnected.set()
+                writer.close()
+                return
+            hung_up.cancel()
+        declared = len(self.reply) + (100 if self.truncate else 0)
+        writer.write(b"HTTP/1.1 " + self.status + b"\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: %d\r\n\r\n" % declared + self.reply)
+        await writer.drain()
+        writer.close()
+
+    async def start(self):
+        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0)
+        return self.server.sockets[0].getsockname()[1]
+
+
+class BackgroundHarness(Harness):
+    """The chat listener and the background listener over one router, as main() wires them."""
+
+    async def __aenter__(self):
+        await super().__aenter__()
+        for backend in self.router.backends:
+            backend.strata = True
+        self.bg_server = await asyncio.start_server(ir.Server(self.router, background=True).handle, "127.0.0.1", 0)
+        self.bg_port = self.bg_server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *exc):
+        self.bg_server.close()
+        await super().__aexit__(*exc)
+
+    async def open_bg(self, payload):
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.bg_port)
+        writer.write(b"POST /v1/chat/completions HTTP/1.1\r\nHost: kobold-proxy\r\n"
+                     b"Content-Length: %d\r\n\r\n" % len(payload) + payload)
+        await writer.drain()
+        return reader, writer
+
+    async def fetch_bg(self, payload):
+        reader, writer = await self.open_bg(payload)
+        raw = await asyncio.wait_for(reader.read(), 5)
+        writer.close()
+        return raw
+
+
+HS_JOB = json.dumps({"model": "qwen3.6-35b-a3b", "messages": [{"role": "user", "content": "extract"}]}).encode()
+VERIFY = json.dumps({"messages": [{"role": "user", "content": "Say ok"}], "max_completion_tokens": 512}).encode()
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_gets_the_whole_reply_and_leaves_no_trace_on_chat_state():
+    engine = JsonEngine()
+    async with BackgroundHarness({"r9700": engine}) as h:
+        raw = await h.fetch_bg(HS_JOB)
+        assert raw.startswith(b"HTTP/1.1 200 OK\r\nX-Inference-Backend: r9700\r\n")
+        assert raw.endswith(engine.reply)
+        assert h.router.primary.last_active == float("-inf")  # the hold-off and the quiet rule see chat only
+        assert h.router.primary.background is None
+    head, sent = engine.requests[0]
+    assert json.loads(sent)["strata_checkpoint"] is False
+    assert b"Host: 10.0.0.70" in head and b"kobold-proxy" not in head
+
+
+@pytest.mark.asyncio
+async def test_chat_preempts_a_background_job_which_gets_a_503_never_a_short_200():
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        bg_reader, bg_writer = await h.open_bg(HS_JOB)
+        await asyncio.wait_for(engine.started.wait(), 5)
+        engine.hold = False
+        chat = asyncio.ensure_future(h.fetch(body("user turn")))
+        bg_raw = await asyncio.wait_for(bg_reader.read(), 5)
+        assert bg_raw.startswith(b"HTTP/1.1 503")
+        await asyncio.wait_for(engine.disconnected.wait(), 5)  # the box saw the hang-up: Strata cancels here
+        chat_raw = await asyncio.wait_for(chat, 1)  # the chat starts at once, not after the job
+        assert chat_raw.startswith(b"HTTP/1.1 200 OK")
+        assert h.router.background_counts["preempted"] == 1
+        bg_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_is_refused_at_once_while_chat_runs():
+    """Never held: Hindsight's startup probe (10 s cap) and its pool must not wait on chat."""
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        _, chat_writer = await h.open(body("long chat"))
+        await asyncio.wait_for(engine.started.wait(), 5)
+        raw = await asyncio.wait_for(h.fetch_bg(VERIFY), 1)
+        assert raw.startswith(b"HTTP/1.1 503")
+        assert len(engine.requests) == 1  # the probe never reached the box
+        chat_writer.close()
+        engine.release.set()
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_is_refused_during_the_hold_off_after_chat():
+    engine = JsonEngine()
+    async with BackgroundHarness({"r9700": engine}) as h:
+        await h.fetch(body("user turn"))
+        raw = await h.fetch_bg(HS_JOB)
+        assert raw.startswith(b"HTTP/1.1 503")
+        assert h.router.background_counts["refused"] == 1
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_reply_reaches_hindsight_as_a_502():
+    async with BackgroundHarness({"r9700": JsonEngine(truncate=True)}) as h:
+        raw = await h.fetch_bg(HS_JOB)
+        assert raw.startswith(b"HTTP/1.1 502")
+        assert h.router.background_counts["incomplete"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_background_5xx_is_passed_on_and_does_not_take_the_box_out_of_chat():
+    """Strata answers 502 when a reply fails its JSON schema; that is the job's failure, not the box's."""
+    failed = b'{"error": {"type": "structured_output_failed"}}'
+    async with BackgroundHarness({"r9700": JsonEngine(failed, status=b"502 Bad Gateway")}) as h:
+        raw = await h.fetch_bg(HS_JOB)
+        assert raw.startswith(b"HTTP/1.1 502 Bad Gateway\r\nX-Inference-Backend: r9700")
+        assert h.router.primary.healthy is True
+
+
+@pytest.mark.asyncio
+async def test_hindsight_hanging_up_cancels_its_job():
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        _, writer = await h.open_bg(HS_JOB)
+        await asyncio.wait_for(engine.started.wait(), 5)
+        writer.close()
+        await asyncio.wait_for(engine.disconnected.wait(), 5)
+        await _until(lambda: h.router.primary.background is None)
+
+
+@pytest.mark.asyncio
+async def test_the_chat_port_never_runs_background_rules():
+    engine = JsonEngine()
+    async with BackgroundHarness({"r9700": engine}) as h:
+        await h.fetch(HS_JOB)
+    assert "strata_checkpoint" not in json.loads(engine.requests[0][1])
