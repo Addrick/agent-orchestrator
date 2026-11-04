@@ -767,7 +767,9 @@ worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from m
 ```
 
 - **Projects.** The first ticket for a project creates `projects/<project>/` as a git
-  repo with an empty first commit on `main`. If a repo is already there (for example
+  repo whose first commit on `main` is a `.gitignore` for caches, virtualenvs, build
+  output and databases (a pass commits whatever codr left in the worktree, so these
+  must be ignored from the start). If a repo is already there (for example
   one stagr copied in with `copy_to_codr` and `keep_git`), DERPR uses it as it is,
   and that repo's checked-out branch counts as its main. A folder there that is not a
   git repo is left alone, and the ticket's attempt fails to start.

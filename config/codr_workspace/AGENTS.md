@@ -25,6 +25,11 @@ worktrees/<ticket>/    the ticket's worktree, branch ticket/<ticket>, cut from m
 - **Commit in the worktree, staging files by path** (`git add path/to/file`). Never
   `git add -A` or `git add .`: they sweep in scratch files, databases and caches. Check
   `git status` before you commit; it should list only what you meant to change.
+- **Ignore what builds and tests leave behind.** When the check passes, DERPR commits
+  everything left in your worktree before it merges, except what `.gitignore` covers. A
+  new project's `.gitignore` already covers Python and Node caches, virtualenvs and
+  `*.db`; when your work makes some other output (a build folder, a data file), add it
+  to `.gitignore` in the same commit.
 - **Run the tests inside the worktree**, from its top folder, the way the check will.
   Tests run from anywhere else test different files.
 - There is no remote: no fetch, no push, no pull requests. The box has no internet, so

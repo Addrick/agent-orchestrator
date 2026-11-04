@@ -523,14 +523,38 @@ def _copy_missing(src: str, dest: str) -> str:
     return f"tar -C {src} -cf - . | tar -xf - -C {dest} --skip-old-files"
 
 
+# The first commit of a project DERPR creates. A pass commits whatever codr
+# left in the worktree (`git add -A`, since removing the worktree would delete
+# untracked work), so build and test output must be ignored up front.
+PROJECT_GITIGNORE = """__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+node_modules/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.DS_Store
+"""
+
+
 def ticket_script(task: CodrTask, staged: str) -> str:
     """Bash that gets a ticket ready for an attempt, from `staged`
     (`ticket_archive`):
 
     - the `memory/` skeleton, and `memory/tickets/<id>.md` from the ticket if
       it is not there yet (committed);
-    - `projects/<project>/` as a git repo with an empty first commit on
-      `main`, unless a repo is already there (its checked-out branch is its
+    - `projects/<project>/` as a git repo whose first commit on `main` is
+      `PROJECT_GITIGNORE` as `.gitignore`, unless a repo is already there (its checked-out branch is its
       main);
     - `worktrees/<id>/` on branch `ticket/<id>`, cut from main, if it is
       missing (a retry reuses it). A new one first gets the files of a
@@ -553,8 +577,13 @@ def ticket_script(task: CodrTask, staged: str) -> str:
         f"  mkdir -p {proj} && git -C {proj} init -q -b main",
         "fi",
         *_git_identity_lines(task.project_dir),
-        f"git -C {proj} rev-parse -q --verify HEAD >/dev/null || "
-        f"{_GIT_AS_DERPR} -C {proj} commit -q --allow-empty -m {q('DERPR: start ' + task.project_name)}",
+        # A new project's first commit is a .gitignore: the pass merge commits
+        # everything codr left (`merge_script`), and that must not be caches.
+        f"if ! git -C {proj} rev-parse -q --verify HEAD >/dev/null; then",
+        f"  [ -e {proj}/.gitignore ] || printf '%s' {q(PROJECT_GITIGNORE)} > {proj}/.gitignore",
+        f"  git -C {proj} add .gitignore && "
+        f"{_GIT_AS_DERPR} -C {proj} commit -q -m {q('DERPR: start ' + task.project_name)} || exit 1",
+        "fi",
         f"main=$(git -C {proj} symbolic-ref -q --short HEAD) || "
         f"{{ echo {q(task.project_dir + ' has no branch checked out')}; exit 1; }}",
         f"if [ ! -d {wt} ]; then",
