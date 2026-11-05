@@ -2,7 +2,7 @@
 #
 # SECURITY: CodeQL py/stack-trace-exposure is suppressed for this file because
 # the kobold web UI is internal-only and tracebacks in responses aid debugging.
-# See memory/project/decisions/kobold_stack_trace_exposure.md for rationale.
+# See memory/project/decisions/security/2026-05-27-kobold-stack-trace-exposure.md for rationale.
 # If this UI ever becomes externally accessible, re-enable the rule (un-dismiss
 # the alerts in GitHub code scanning) and scrub tracebacks from all responses.
 
@@ -326,7 +326,7 @@ class KoboldEngineAdapter:
     Phase D split (2026-04-28): the OAI route (`/v1/chat/completions`) is a
     thin SSE transcoder over `chat_system.stream_response` — engine rebuilds
     history from DB, only `derpr_user_text` (or last-user fallback) drives
-    the user turn. See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
+    the user turn. See memory/project/decisions/portal-ui/2026-04-28-portal-engine-as-source-of-truth.md.
 
     DP-365 retired the vendored Kobold Lite UI (`/portal`) and the
     kobold-native routes only it called (`/api/v1/generate`,
@@ -1614,7 +1614,7 @@ class KoboldEngineAdapter:
                 logger.warning(f"perf upstream answered {r.status_code} with an unusable body")
             except Exception as e:
                 # Generic reason to the client — the exception text can carry
-                # the upstream URL (decisions/2026-05-27-kobold-stack-trace-exposure).
+                # the upstream URL (memory/project/decisions/security/2026-05-27-kobold-stack-trace-exposure.md).
                 logger.warning(f"perf fetch failed: {e}")
             return JSONResponse(status_code=503, content={"error": "backend_unreachable"})
 
@@ -1666,7 +1666,7 @@ class KoboldEngineAdapter:
                 except Exception as e:
                     # Data-plane route: the exception text can carry the upstream URL,
                     # so log it and return a generic reason
-                    # (decisions/2026-05-27-kobold-stack-trace-exposure).
+                    # (memory/project/decisions/security/2026-05-27-kobold-stack-trace-exposure.md).
                     logger.debug(f"prefill progress sidecar fetch failed: {e}")
 
             # Strata fallback: no sidecar configured or sidecar unreachable, check /metrics
@@ -1730,7 +1730,7 @@ class KoboldEngineAdapter:
             DB. Only `derpr_user_text` (or fallback last-user scan for
             non-portal clients) drives the user turn. Retry/edit/delete
             already round-trip via PATCH/DELETE/version routes, so DB == UI.
-            See decisions/2026-04-28-portal-engine-as-source-of-truth.md.
+            See memory/project/decisions/portal-ui/2026-04-28-portal-engine-as-source-of-truth.md.
             """
             data = await request.json()
             is_retry = bool(data.get("derpr_retry"))

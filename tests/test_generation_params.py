@@ -1,7 +1,7 @@
 # tests/test_generation_params.py
 """Phase A — `GenerationParams` dataclass + Persona facade.
 
-Plan: memory/project/plans/portal_engine_reintegration.md
+Plan: memory/project-history/plans/portal_engine_reintegration.md
 """
 
 import pytest

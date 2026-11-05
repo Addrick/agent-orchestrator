@@ -618,7 +618,7 @@ STAGR_OUTPUT_CHARS = int(os.environ.get("STAGR_OUTPUT_CHARS", "20000"))
 #
 # Gated (write/irreversible) calls are NOT executed by the bridge — they become
 # `call_derpr_tool` proposal rows for human approval. See
-# memory/project/decisions/2026-07-23-mcp-gate-is-the-proposal-queue.md.
+# memory/project/decisions/security/2026-07-23-mcp-gate-is-the-proposal-queue.md.
 MCP_BRIDGE_ENABLED = os.environ.get("MCP_BRIDGE_ENABLED", "False").lower() in ("true", "1", "yes", "on")
 # Tools exposed over the bridge. Default-deny: an empty list exposes NOTHING, so
 # enabling the bridge without choosing tools is inert rather than permissive.

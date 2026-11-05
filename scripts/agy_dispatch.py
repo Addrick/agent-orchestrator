@@ -12,7 +12,7 @@ only observe (never engine-execute) tool calls, whereas the interactive CLI
 ``agy -p`` runs on the cached OAuth tier and does real autonomous Model-A tool
 execution in its own worktree. agy has no ``--acp``/JSON-RPC mode, so there is
 no transport to drive — we just capture stdout. See the decision record
-``memory/project/decisions/2026-05-29-agy-sdk-oauth-finding.md``.
+``memory/project/decisions/agents-engine/2026-05-29-agy-sdk-oauth-finding.md``.
 
 The parsing/summary/event/signal/argparse core is **imported verbatim** from
 the gemini dispatcher; only the ~250-line ACP transport (spawn + AcpClient +

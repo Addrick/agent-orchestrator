@@ -50,7 +50,7 @@ class GenerationParams:
     Universal fields have consistent semantics across all providers. Provider-
     specific knobs (kobold samplers, anthropic thinking config, etc.) live
     under `provider_extras[provider_id]`. See plan
-    `memory/project/plans/portal_engine_reintegration.md` Phase A.
+    `memory/project-history/plans/portal_engine_reintegration.md` Phase A.
     """
 
     temperature: Optional[float] = None

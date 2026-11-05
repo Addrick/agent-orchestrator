@@ -611,7 +611,7 @@ class BotLogic:
     def _set_provider_extra(args: List[str], persona: Persona) -> Tuple[Optional[str], bool]:
         """Fallback dotted-path setter: `set <provider>.<key> <value>`.
         Stores in persona.params.provider_extras[provider][key]. Phase E
-        of plans/portal_engine_reintegration.md."""
+        of memory/project-history/plans/portal_engine_reintegration.md."""
         dotted = args[0].lower()  # provider/key are matched case-insensitively
         provider, _, key = dotted.partition('.')
         if not provider or not key:

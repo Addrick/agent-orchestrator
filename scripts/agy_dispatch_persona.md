@@ -3,7 +3,7 @@
 Canonical, cooperative persona for `agy` subagent dispatch. Point a dispatcher
 config's `agents_md_path` at this file (or inline its text as `agents_md`).
 Reliability notes that motivate each rule live in
-`memory/project/decisions/2026-05-29-agy-sdk-oauth-finding.md`.
+`memory/project/decisions/agents-engine/2026-05-29-agy-sdk-oauth-finding.md`.
 
 ---
 

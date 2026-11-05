@@ -73,7 +73,7 @@ class HindsightRESTClient:
 
     Apes the official `hindsight-client` using the project's trusted httpx,
     bypassing the install-time attack surface during the supply-chain quarantine.
-    See memory/project/decisions/2026-05-05-hindsight-paranoid-mode.md.
+    See memory/project/decisions/security/2026-05-05-hindsight-paranoid-mode.md.
 
     Failure policy: log + raise once. NO retry storm — alpha system, retain is
     fire-and-forget at the backend layer; recall is user-facing and should fail

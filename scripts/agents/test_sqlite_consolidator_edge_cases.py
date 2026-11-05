@@ -424,5 +424,5 @@ class TestRateLimiterSharing:
                   "vec-row invalidation on update_interaction_content is not asserted; "
                   "embedding may orphan on edit.")
 def test_consolidator_vec_row_invalidation_on_content_update() -> None:
-    """Placeholder for the latent bug listed in DP-199-edge-cases.md."""
+    """Placeholder for the latent bug listed in memory/project-history/plans/DP-199-edge-cases.md."""
     pass
