@@ -946,3 +946,29 @@ def test_the_engines_requester_header_survives_the_routers_cleaning_unchanged(na
     assert len(sent) <= ir.MAX_REQUESTER_CHARS
     if sent:
         assert ir.requester_of([b"POST / HTTP/1.1", b"X-Inference-Requester: " + sent.encode()], "ip", False) == sent
+
+
+@pytest.mark.asyncio
+async def test_a_down_box_does_not_delay_another_boxs_poll(monkeypatch):
+    # DP-499: polled in turn, dt21's connect timeout aged r9700's sample to ~8 s every cycle.
+    router = ir.Router([box("dt21"), box("r9700")], MOVE, QUIET)
+    dt21_released = asyncio.Event()
+    r9700_polled = asyncio.Event()
+
+    async def get_json(backend, path):
+        if backend.name == "dt21":
+            await dt21_released.wait()  # stands in for a connect timeout
+            return None
+        if path == "/v1/models":
+            r9700_polled.set()
+        return None
+
+    monkeypatch.setattr(ir, "_get_json", get_json)
+    poller = asyncio.ensure_future(ir.poll_forever(router))
+    try:
+        await asyncio.wait_for(r9700_polled.wait(), 1.0)
+    finally:
+        dt21_released.set()
+        poller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poller
