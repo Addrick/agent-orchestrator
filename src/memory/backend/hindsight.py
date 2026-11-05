@@ -13,7 +13,7 @@ import httpx
 from config import global_config
 from .base import (
     MemoryBackend, MemoryBackendError, MemoryHit, Experience, ReflectResult,
-    MentalModel, SESSION_GAP_SECONDS,
+    MentalModel, RetainRefused, SESSION_GAP_SECONDS,
 )
 
 if TYPE_CHECKING:
@@ -27,6 +27,15 @@ TRUSTED_TAG = "untrusted:false"
 # Hindsight hardcodes a single tenant prefix in every bank route (0.6.1;
 # still true on 0.10.0).
 HINDSIGHT_API_PREFIX = "/v1/default"
+
+
+def _unreachable(e: Exception) -> bool:
+    """Hindsight is down or overloaded (DP-495): no connection, a timeout, a
+    5xx, 408 or 429. Any other 4xx means it is up and refused the request."""
+    if isinstance(e, httpx.RequestError):
+        return True
+    code = getattr(e, "status_code", 0)
+    return code >= 500 or code in (408, 429)
 
 
 class HindsightAPIError(MemoryBackendError):
@@ -925,7 +934,12 @@ class HindsightBackend(MemoryBackend):
             result = await self._get_client().aretain(
                 bank_id=bank_id, items=payload, async_=True, operation_id=request_id,
             )
-        except (httpx.RequestError, HindsightAPIError) as e:
+        except HindsightAPIError as e:
+            if not _unreachable(e):
+                raise RetainRefused(str(e)) from e
+            logger.warning("Hindsight block retain not accepted (%s): %s", bank_id, e)
+            return None
+        except httpx.RequestError as e:
             logger.warning("Hindsight block retain not accepted (%s): %s", bank_id, e)
             return None
         ops = result.get("operation_ids") or (
@@ -951,7 +965,7 @@ class HindsightBackend(MemoryBackend):
                 statuses.append(str(op.get("status") or "unknown"))
         except (httpx.RequestError, HindsightAPIError) as e:
             logger.info("Hindsight operation poll failed (%s): %s", bank_id, e)
-            return "unknown"
+            return "unreachable" if _unreachable(e) else "unknown"
         if any(st in ("failed", "cancelled") for st in statuses):
             return "failed"
         if any(st in ("pending", "processing") for st in statuses):
@@ -969,9 +983,11 @@ class HindsightBackend(MemoryBackend):
             try:
                 await client.aget_document(bank_id, doc_id)
             except HindsightAPIError as e:
-                return "lost" if e.status_code == 404 else "unknown"
+                if e.status_code == 404:
+                    return "lost"
+                return "unreachable" if _unreachable(e) else "unknown"
             except httpx.RequestError:
-                return "unknown"
+                return "unreachable"
         return "completed"
 
     async def recall(

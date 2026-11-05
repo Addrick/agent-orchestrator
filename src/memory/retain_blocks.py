@@ -18,10 +18,11 @@ in `MemoryManager` (`Retain_Window`, `Retain_Block`, `Pending_Retain`); the
 delivery and completion polling in `TurnPersistence`.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
+from config.global_config import RETAIN_LEGACY_WINDOW
 from src.persona import MemoryMode
 from src.utils.timeutil import to_utc
 
@@ -37,6 +38,9 @@ class RetainScope:
     """The rows one persona's prompt covers under one memory mode.
 
     `key` names the scope in `Retain_Window`, `Retain_Block` and document ids.
+    It starts with the memory mode (`channel-`, `ticket-`, `server-`,
+    `user-`, `global`), so two modes never share a key: a persona whose
+    mode changes gets new windows instead of the old mode's.
     The filter fields mirror `fetch_raw_history`: None means "not filtered on",
     except `server_id`, which is filtered whenever `filter_server` is set (and
     then None means IS NULL, as the history getters match it).
@@ -48,6 +52,9 @@ class RetainScope:
     user_identifier: Optional[str] = None
     server_id: Optional[str] = None
     filter_server: bool = False
+    # Where a first-seen scope's prompt starts: DP-423's window size for this
+    # persona (`legacy_window()`). Not part of the scope's identity.
+    legacy_window: int = field(default=RETAIN_LEGACY_WINDOW, compare=False)
 
     @property
     def has_window(self) -> bool:
@@ -55,26 +62,38 @@ class RetainScope:
         return self.mode != MemoryMode.TICKET_ISOLATED.name
 
 
+def legacy_window(base_history_messages: int) -> int:
+    """DP-423's window for a persona whose `context` is `base_history_messages`
+    now. A persona that never set one reads DP-495's much larger default, but
+    DP-423 used RETAIN_LEGACY_WINDOW; a smaller own value was the real window.
+    Erring small is safe: DP-423 never retained its window's turns, so they
+    are still queued and pull the start back down themselves."""
+    return max(0, min(int(base_history_messages), RETAIN_LEGACY_WINDOW))
+
+
 def retain_scope(mode: MemoryMode, *, persona_name: str, channel: str,
-                 user_identifier: str, server_id: Optional[str]) -> RetainScope:
+                 user_identifier: str, server_id: Optional[str],
+                 legacy: int = RETAIN_LEGACY_WINDOW) -> RetainScope:
     """The scope of a request in `mode` — the same rows `fetch_raw_history`
     returns, so a cut never strands turns another scope still shows, nor
-    retains turns still in someone else's prompt."""
+    retains turns still in someone else's prompt. `legacy`: the persona's
+    `legacy_window()`."""
     server = server_id or None
     if mode == MemoryMode.GLOBAL:
-        return RetainScope(persona_name, mode.name, "global")
+        return RetainScope(persona_name, mode.name, "global", legacy_window=legacy)
     if mode == MemoryMode.PERSONAL:
         return RetainScope(persona_name, mode.name, f"user-{user_identifier}",
-                           user_identifier=user_identifier)
+                           user_identifier=user_identifier, legacy_window=legacy)
     if mode == MemoryMode.SERVER_WIDE:
         return RetainScope(persona_name, mode.name, f"server-{server or 'none'}",
-                           server_id=server, filter_server=True)
+                           server_id=server, filter_server=True, legacy_window=legacy)
     if mode == MemoryMode.TICKET_ISOLATED:
-        return RetainScope(persona_name, mode.name, channel, channel=channel)
+        return RetainScope(persona_name, mode.name, f"ticket-{channel}", channel=channel,
+                           legacy_window=legacy)
     # CHANNEL_ISOLATED: get_channel_history matches a falsy server_id as NULL.
-    key = channel if server is None else f"{channel}@{server}"
+    key = f"channel-{channel}" if server is None else f"channel-{channel}@{server}"
     return RetainScope(persona_name, mode.name, key, channel=channel,
-                       server_id=server, filter_server=True)
+                       server_id=server, filter_server=True, legacy_window=legacy)
 
 
 def scope_from_row(row: Dict[str, Any]) -> RetainScope:
@@ -88,7 +107,7 @@ def scope_from_row(row: Dict[str, Any]) -> RetainScope:
 
 def block_document_id(persona_name: str, scope_key: str, seq: int,
                       first_ts: datetime, part: Optional[int] = None) -> str:
-    """`stagr:web_ui_pandora:b0007:2026-11-02T00:34Z` — persona, scope, block
+    """`stagr:channel-web_ui_pandora:b0007:2026-11-02T00:34Z` — persona, scope, block
     number in that scope, UTC time of the block's first message. Parts of an
     oversized block insert `p<N>` after the number (`b0007p2`)."""
     suffix = f"p{part}" if part is not None else ""

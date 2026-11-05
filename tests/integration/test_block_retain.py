@@ -182,7 +182,7 @@ async def test_blocks_are_numbered_per_scope_with_first_message_time(setup):
     assert len(docs) >= 2
     for n, doc in enumerate(docs, start=1):
         persona, scope, block, stamp = doc.split(":", 3)
-        assert (persona, scope, block) == ("test_persona", "chan", f"b{n:04d}")
+        assert (persona, scope, block) == ("test_persona", "channel-chan", f"b{n:04d}")
         datetime.strptime(stamp, "%Y-%m-%dT%H:%MZ")
     # Every block after the first carries the turns before it as background.
     ctx = hs.sends[1]["items"][0]["context"]
@@ -341,9 +341,9 @@ async def test_sweep_acts_once_per_idle_mark(setup, monkeypatch):
                         lambda p, sc: calls.append(sc.key) or real(p, sc))
     t48 = datetime.now(timezone.utc) + timedelta(seconds=RETAIN_IDLE_TRIM_SECONDS + 60)
     await chat_system.idle_retain_sweep(t48, since=t48 - timedelta(minutes=15))
-    assert calls == ["chan"]
+    assert calls == ["channel-chan"]
     later = t48 + timedelta(minutes=15)
     await chat_system.idle_retain_sweep(later, since=t48)
-    assert calls == ["chan"]                      # mark already handled
+    assert calls == ["channel-chan"]                      # mark already handled
     await chat_system.idle_retain_sweep(later, since=None)
-    assert calls == ["chan", "chan"]              # the boot pass checks everything
+    assert calls == ["channel-chan", "channel-chan"]              # the boot pass checks everything

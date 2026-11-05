@@ -26,7 +26,7 @@ from src.memory.context_budget import (
     drop_orphaned_tool_head, message_tokens, plan_block_cut, truncate_messages_to_budget,
 )
 from src.memory.memory_manager import MemoryManager
-from src.memory.retain_blocks import RetainScope, retain_scope
+from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope
 from src.memory.scope_tags import recall_scope_tags
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
@@ -415,6 +415,7 @@ class RequestBuilder:
             scope = retain_scope(
                 persona.get_memory_mode(), persona_name=persona_name, channel=channel,
                 user_identifier=user_identifier, server_id=server_id,
+                legacy=legacy_window(persona.get_base_history_messages()),
             )
         start_id, floor_id = self.memory_manager.retain_window(scope, persist=advance)
         cap = max(effective_limit, 0) if scope.has_window else 0

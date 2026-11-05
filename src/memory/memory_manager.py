@@ -7,13 +7,17 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import (Any, Coroutine, Dict, List, Callable, Optional, Sequence, Set, Union, cast,
                     Tuple, Generator)
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
 from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_BACKEND, HINDSIGHT_URL
+from config.global_config import (
+    RETAIN_REFUSED_BACKOFF_MAX_SECONDS, RETAIN_REFUSED_BACKOFF_MIN_SECONDS,
+    RETAIN_REFUSED_PROMPT_SECONDS,
+)
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.generation_events import split_think_text
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
@@ -524,7 +528,10 @@ class MemoryManager:
                 untrusted INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 sent_at TEXT,
-                done_at TEXT
+                done_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                refused_since TEXT,
+                next_attempt_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_retain_block_scope
                 ON Retain_Block (persona_name, scope_key, status);
@@ -1640,11 +1647,6 @@ class MemoryManager:
     # stays after the send (`sent_generation`), so a turn re-queued later — a
     # retried reply — knows its block, and the block is rebuilt whole.
 
-    # DP-423's window size: a scope seen for the first time starts its prompt
-    # where DP-423's window did, so turns DP-423 already retained are not
-    # pulled back into the prompt.
-    _LEGACY_WINDOW = 15
-
     _UNSENT = "(p.sent_generation IS NULL OR p.sent_generation < p.generation)"
 
     def queue_retain(self, interaction_id: int, persona_name: str, channel: str,
@@ -1706,8 +1708,11 @@ class MemoryManager:
         # new work, so a block whose earlier POST landed unacknowledged would
         # otherwise resend under the old id and keep the old content. A send
         # in flight sees the id change and leaves the block queued.
+        # New content may be accepted where the old was refused: the
+        # refusal backoff starts over.
         conn.execute(
-            "UPDATE Retain_Block SET status = 'queued', request_id = ?, done_at = NULL"
+            "UPDATE Retain_Block SET status = 'queued', request_id = ?, done_at = NULL,"
+            " attempts = 0, refused_since = NULL, next_attempt_at = NULL"
             " WHERE block_id = ?",
             (str(uuid.uuid4()), block_id),
         )
@@ -1735,7 +1740,9 @@ class MemoryManager:
 
     def _initial_start(self, conn: sqlite3.Connection, scope: RetainScope) -> int:
         """Where a scope's prompt starts the first time it is seen: the
-        oldest turn still queued, or DP-423's window, whichever is older."""
+        oldest turn still queued, or DP-423's window (`scope.legacy_window`),
+        whichever is older, so turns DP-423 already retained are not pulled
+        back into the prompt. A window of 0 showed nothing: past the newest."""
         where, params = self._scope_sql(scope)
         pending = conn.execute(
             "SELECT MIN(p.interaction_id) AS m FROM Pending_Retain p"
@@ -1743,12 +1750,20 @@ class MemoryManager:
             " WHERE p.block_id IS NULL AND " + self._UNSENT + where,
             params,
         ).fetchone()["m"]
-        recent = conn.execute(
-            "SELECT MIN(interaction_id) AS m FROM (SELECT u.interaction_id"
-            " FROM User_Interactions u WHERE 1 = 1" + where +
-            " ORDER BY u.interaction_id DESC LIMIT ?)",
-            params + [self._LEGACY_WINDOW],
-        ).fetchone()["m"]
+        recent: Optional[int]
+        if scope.legacy_window > 0:
+            recent = conn.execute(
+                "SELECT MIN(interaction_id) AS m FROM (SELECT u.interaction_id"
+                " FROM User_Interactions u WHERE 1 = 1" + where +
+                " ORDER BY u.interaction_id DESC LIMIT ?)",
+                params + [scope.legacy_window],
+            ).fetchone()["m"]
+        else:
+            top = conn.execute(
+                "SELECT MAX(u.interaction_id) AS m FROM User_Interactions u WHERE 1 = 1"
+                + where, params,
+            ).fetchone()["m"]
+            recent = int(top) + 1 if top is not None else None
         found = [int(v) for v in (pending, recent) if v is not None]
         return min(found) if found else 0
 
@@ -1773,21 +1788,27 @@ class MemoryManager:
             )
         return start, 0
 
-    def retain_window(self, scope: RetainScope, *, persist: bool = True) -> Tuple[int, int]:
+    def retain_window(self, scope: RetainScope, *, persist: bool = True,
+                      now: Optional[datetime] = None) -> Tuple[int, int]:
         """`(start_id, floor_id)` of `scope`'s prompt (DP-495).
 
         `start_id` is the pinned history start: it moves only when a block
         is cut, so the prompt prefix is stable between trims. `floor_id` is
         where the prompt actually begins: lower than `start_id` while a cut
-        block is still waiting for Hindsight to finish with it. `persist`
+        block is still waiting for Hindsight to finish with it — except one
+        Hindsight has refused for RETAIN_REFUSED_PROMPT_SECONDS, which stays
+        queued and retried but no longer holds the prompt open. `persist`
         False (dry runs) computes a first-seen scope's start without storing it.
         """
+        now = now or datetime.now(timezone.utc)
+        held_until = to_utc(now - timedelta(seconds=RETAIN_REFUSED_PROMPT_SECONDS)).isoformat()
         with self.transaction() as conn:
             start, _ = self._window_row(conn, scope, persist)
             floor = conn.execute(
                 "SELECT MIN(lo_id) AS m FROM Retain_Block WHERE persona_name = ?"
-                " AND scope_key = ? AND status IN ('queued', 'sent')",
-                (scope.persona_name, scope.key),
+                " AND scope_key = ? AND status IN ('queued', 'sent')"
+                " AND (refused_since IS NULL OR refused_since > ?)",
+                (scope.persona_name, scope.key, held_until),
             ).fetchone()["m"]
         return start, (min(start, int(floor)) if floor is not None else start)
 
@@ -1883,8 +1904,10 @@ class MemoryManager:
         return block_id
 
     def retain_blocks(self, *, statuses: Sequence[str] = ("queued",),
-                      block_id: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Blocks in `statuses`, oldest first, each with its scope columns."""
+                      block_id: Optional[int] = None,
+                      due_at: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Blocks in `statuses`, oldest first, each with its scope columns.
+        `due_at` leaves out blocks whose refusal backoff runs past it."""
         marks = ",".join("?" * len(statuses))
         query = (
             "SELECT b.*, w.memory_mode, w.channel, w.user_identifier, w.server_id,"
@@ -1896,6 +1919,9 @@ class MemoryManager:
         if block_id is not None:
             query += " AND b.block_id = ?"
             params.append(block_id)
+        if due_at is not None:
+            query += " AND (b.next_attempt_at IS NULL OR b.next_attempt_at <= ?)"
+            params.append(to_utc(due_at).isoformat())
         with self._lock:
             rows = self._get_connection().execute(query + " ORDER BY b.block_id", params).fetchall()
         return [dict(r) for r in rows]
@@ -1998,13 +2024,35 @@ class MemoryManager:
                  json.dumps(list(document_ids)), int(untrusted), block_id),
             )
             conn.execute(
-                "UPDATE Retain_Block SET status = ?, request_id = ?, op_ids = ?, sent_at = ?"
+                "UPDATE Retain_Block SET status = ?, request_id = ?, op_ids = ?, sent_at = ?,"
+                " attempts = 0, refused_since = NULL, next_attempt_at = NULL"
                 " WHERE block_id = ? AND request_id = ? AND status = 'queued'",
                 ("queued" if stale else "sent",
                  str(uuid.uuid4()) if stale else block["request_id"],
                  json.dumps(list(op_ids)), to_utc(now).isoformat(),
                  block_id, block["request_id"]),
             )
+
+    def mark_retain_block_refused(self, block: Dict[str, Any], *,
+                                  now: Optional[datetime] = None) -> float:
+        """Hindsight refused `block` (a deterministic 4xx, DP-495): it stays
+        queued and is tried again after a backoff that doubles from
+        RETAIN_REFUSED_BACKOFF_MIN_SECONDS to ..._MAX_SECONDS, forever. A
+        block re-queued meanwhile (new request id, new content) is left
+        alone: its backoff was just reset. Returns the delay chosen."""
+        now = now or datetime.now(timezone.utc)
+        attempts = int(block.get("attempts") or 0)
+        delay = float(min(RETAIN_REFUSED_BACKOFF_MIN_SECONDS * 2 ** min(attempts, 20),
+                          RETAIN_REFUSED_BACKOFF_MAX_SECONDS))
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE Retain_Block SET attempts = attempts + 1,"
+                " refused_since = COALESCE(refused_since, ?), next_attempt_at = ?"
+                " WHERE block_id = ? AND request_id = ? AND status = 'queued'",
+                (to_utc(now).isoformat(), to_utc(now + timedelta(seconds=delay)).isoformat(),
+                 int(block["block_id"]), block["request_id"]),
+            )
+        return delay
 
     def set_retain_block_status(self, block_id: int, status: str, *,
                                 expect: Optional[str] = None,

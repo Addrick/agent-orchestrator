@@ -12,14 +12,14 @@ from typing import (
 
 from config.global_config import (
     HINDSIGHT_RETAIN_CHUNK_SIZE, RETAIN_IDLE_FINAL_SECONDS, RETAIN_IDLE_SWEEP_SECONDS,
-    RETAIN_IDLE_TRIM_SECONDS, RETAIN_MAINTENANCE_INTERVAL_SECONDS,
+    RETAIN_IDLE_TRIM_SECONDS, RETAIN_LEGACY_WINDOW, RETAIN_MAINTENANCE_INTERVAL_SECONDS,
 )
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
-from src.memory.retain_blocks import RetainScope, retain_scope, scope_from_row
+from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope, scope_from_row
 from src.engine import TextEngine
 from src.generation_events import (
     DoneEvent as DoneEvent,
@@ -1525,6 +1525,8 @@ class ChatSystem:
                 p.get_memory_mode() if p else MemoryMode.CHANNEL_ISOLATED,
                 persona_name=o["persona_name"], channel=o["channel"],
                 user_identifier=o["user_identifier"], server_id=o["server_id"],
+                legacy=legacy_window(p.get_base_history_messages()) if p
+                else RETAIN_LEGACY_WINDOW,
             )
             scopes.setdefault((sc.persona_name, sc.key), sc)
             unsent.add((sc.persona_name, sc.key))
@@ -1534,6 +1536,10 @@ class ChatSystem:
             return mark <= now and (since is None or mark > since)
 
         for key, sc in scopes.items():
+            # The work below is synchronous (DB reads, token counting): yield
+            # between scopes so a long pass — the boot pass checks every
+            # scope — never holds the event loop for its whole length.
+            await asyncio.sleep(0)
             # Per scope: the caller advances `since` after this pass, so a
             # failure that aborted the loop would skip every later scope's
             # mark for good.

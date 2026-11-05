@@ -3477,6 +3477,23 @@ def test_first_seen_scope_starts_at_dp423_window(mem_manager):
     assert mem_manager.retain_windows() == []
 
 
+def test_first_seen_scope_uses_the_personas_own_dp423_window(mem_manager):
+    """DP-423's window was the persona's own `context` (at most the old
+    default 15): a persona on 5 had turns 6-15 retained already, so its
+    first DP-495 prompt must not pull them back in. 0 showed nothing."""
+    from src.memory.retain_blocks import legacy_window
+    ids = [_log(mem_manager, f"m{i}") for i in range(20)]
+    assert legacy_window(5) == 5 and legacy_window(1000) == 15 and legacy_window(0) == 0
+    start, _ = mem_manager.retain_window(_scope(legacy=legacy_window(5)), persist=False)
+    assert start == ids[15]
+    start, _ = mem_manager.retain_window(_scope(legacy=0), persist=False)
+    assert start == ids[-1] + 1
+    # A turn still queued pulls the start back down, whatever the window.
+    mem_manager.queue_retain(ids[17], "p", "c1", untrusted=False)
+    start, _ = mem_manager.retain_window(_scope(legacy=0), persist=False)
+    assert start == ids[17]
+
+
 def test_cut_collects_queued_turns_and_moves_the_start(mem_manager):
     ids = _queued(mem_manager, "a", "b", "c", "d")
     other = _queued(mem_manager, "elsewhere", channel="c2")[0]

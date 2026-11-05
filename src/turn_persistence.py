@@ -20,7 +20,7 @@ from config.global_config import (
     HINDSIGHT_RETAIN_CHUNK_SIZE, MAX_CACHED_API_REQUESTS, RETAIN_CONTEXT_TAIL_CHARS,
 )
 from src.generation_events import ResponseType
-from src.memory.backend.base import MemoryBackend
+from src.memory.backend.base import MemoryBackend, RetainRefused
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import block_document_id, scope_from_row, split_block
 from src.memory.scope_tags import build_scope_tags
@@ -67,6 +67,11 @@ class TurnPersistence:
         # tasks so a slow backend never holds up a turn.
         self._flush_lock = asyncio.Lock()
         self._flush_tasks: Set["asyncio.Task[None]"] = set()
+        # A per-turn flush is waiting for the lock: another turn adds nothing.
+        self._flush_waiting = False
+        # The backend was unreachable on the last try. Turns stop sending;
+        # the maintenance loop's pass (once a minute) is the probe.
+        self._backend_down = False
 
     def store_api_request(self, user_identifier: str, persona_name: str,
                           payload: Dict[str, Any],
@@ -362,12 +367,20 @@ class TurnPersistence:
 
         Background because delivery is confirmed: a down Hindsight would
         otherwise stall the user's turn for the HTTP timeout. Runs after every
-        turn (so a block cut by this request goes out at once, and a refused
-        one is retried) and from ChatSystem's maintenance loop.
+        turn, so a block cut by this request goes out at once; ChatSystem's
+        maintenance loop runs the same pass once a minute. At most one waits
+        behind the running pass, and none is started while the backend is
+        down — the maintenance pass probes it.
         """
+        if self._backend_down or self._flush_waiting:
+            return
+        self._flush_waiting = True
+
         async def run() -> None:
-            await self.flush_blocks()
-            await self.poll_blocks()
+            async with self._flush_lock:
+                self._flush_waiting = False
+                await self._flush_locked()
+                await self._poll_locked()
 
         task = asyncio.get_running_loop().create_task(run(), name="dp495-retain-flush")
         self._flush_tasks.add(task)
@@ -380,23 +393,51 @@ class TurnPersistence:
             await asyncio.gather(*list(self._flush_tasks), return_exceptions=True)
 
     async def flush_blocks(self) -> int:
-        """Send every queued block, oldest first; returns how many the
-        backend accepted. Serialized by `_flush_lock`. A block leaves the
-        queue only once the backend accepted it, so one refused while
-        Hindsight is down is sent again by a later flush."""
+        """Send every queued block that is due, oldest first; returns how many
+        the backend accepted. Serialized by `_flush_lock`. A block leaves the
+        queue only once the backend accepted it; none is ever given up on."""
         async with self._flush_lock:
+            return await self._flush_locked()
+
+    def _set_backend_down(self, down: bool, why: str = "") -> None:
+        if down and not self._backend_down:
+            logger.warning(f"Hindsight unreachable ({why}); retain sends pause, probing once a minute")
+        elif not down and self._backend_down:
+            logger.info("Hindsight reachable again; retain sends resume")
+        self._backend_down = down
+
+    async def _flush_locked(self) -> int:
+        """`flush_blocks` under the lock. Stops at the first block the
+        backend could not take (it is down: the rest would only wait out the
+        same timeout). A block it refused backs off alone."""
+        now = datetime.now(timezone.utc)
+        try:
+            blocks = self.memory_manager.retain_blocks(statuses=("queued",), due_at=now)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Retain block flush failed: {e}")
+            return 0
+        sent = 0
+        for block in blocks:
             try:
-                blocks = self.memory_manager.retain_blocks(statuses=("queued",))
+                ok = await self._deliver_block(block)
+            except RetainRefused as e:
+                self._set_backend_down(False)
+                delay = self.memory_manager.mark_retain_block_refused(block, now=now)
+                logger.warning(
+                    f"Retain block {block['block_id']} ({block['persona_name']}:"
+                    f"{block['scope_key']}) refused by Hindsight, retrying in "
+                    f"{delay / 60:.0f} min: {e}"
+                )
+                continue
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"Retain block flush failed: {e}")
-                return 0
-            sent = 0
-            for block in blocks:
-                try:
-                    sent += await self._deliver_block(block)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"Retain block {block['block_id']} not sent: {e}")
-            return sent
+                logger.warning(f"Retain block {block['block_id']} not sent: {e}")
+                continue
+            if not ok:
+                self._set_backend_down(True, f"block {block['block_id']} not accepted")
+                break
+            self._set_backend_down(False)
+            sent += 1
+        return sent
 
     def _render(self, persona_name: str, rows: List[Dict[str, Any]],
                 text_key: str) -> List[str]:
@@ -473,7 +514,7 @@ class TurnPersistence:
             if accepted is None:
                 logger.info(
                     f"Retain block {block['block_id']} ({persona}:{block['scope_key']}) "
-                    "not accepted; it stays queued and in the prompt"
+                    "not accepted (Hindsight unreachable); it stays queued and in the prompt"
                 )
                 return False
             ops = accepted
@@ -504,37 +545,45 @@ class TurnPersistence:
     async def poll_blocks(self) -> int:
         """Ask the backend how each sent block's extraction stands; a
         completed block is marked done and leaves the prompt on the next
-        request. Returns how many completed."""
+        request. Returns how many completed. Stops at the first answer
+        that says the backend is unreachable."""
         async with self._flush_lock:
+            return await self._poll_locked()
+
+    async def _poll_locked(self) -> int:
+        try:
+            blocks = self.memory_manager.retain_blocks(statuses=("sent",))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Retain block poll failed: {e}")
+            return 0
+        done = 0
+        for block in blocks:
+            block_id = int(block["block_id"])
             try:
-                blocks = self.memory_manager.retain_blocks(statuses=("sent",))
+                status = await self.memory_backend.retain_status(
+                    block["persona_name"], json.loads(block["op_ids"] or "[]"),
+                    json.loads(block["document_ids"] or "[]"),
+                )
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"Retain block poll failed: {e}")
-                return 0
-            done = 0
-            for block in blocks:
-                block_id = int(block["block_id"])
-                try:
-                    status = await self.memory_backend.retain_status(
-                        block["persona_name"], json.loads(block["op_ids"] or "[]"),
-                        json.loads(block["document_ids"] or "[]"),
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.info(f"Retain block {block_id} poll failed: {e}")
-                    continue
-                if status == "completed":
-                    self.memory_manager.set_retain_block_status(block_id, "done", expect="sent")
-                    done += 1
-                elif status == "failed":
-                    # Hindsight gave up (its own retries exhausted) or an
-                    # operator cancelled it. Leave the prompt: holding it
-                    # forever would only push the prompt to the fallback cut.
-                    logger.warning(
-                        f"Retain block {block_id} ({block['persona_name']}:{block['scope_key']}) "
-                        "failed or was cancelled in Hindsight; it leaves the prompt unretained"
-                    )
-                    self.memory_manager.set_retain_block_status(block_id, "failed", expect="sent")
-                elif status == "lost":
-                    logger.warning(f"Retain block {block_id} unknown to Hindsight; sending it again")
-                    self.memory_manager.requeue_retain_block(block_id)
-            return done
+                logger.info(f"Retain block {block_id} poll failed: {e}")
+                continue
+            if status == "unreachable":
+                self._set_backend_down(True, f"poll of block {block_id}")
+                break
+            self._set_backend_down(False)
+            if status == "completed":
+                self.memory_manager.set_retain_block_status(block_id, "done", expect="sent")
+                done += 1
+            elif status == "failed":
+                # Hindsight gave up (its own retries exhausted) or an
+                # operator cancelled it. Leave the prompt: holding it
+                # forever would only push the prompt to the fallback cut.
+                logger.warning(
+                    f"Retain block {block_id} ({block['persona_name']}:{block['scope_key']}) "
+                    "failed or was cancelled in Hindsight; it leaves the prompt unretained"
+                )
+                self.memory_manager.set_retain_block_status(block_id, "failed", expect="sent")
+            elif status == "lost":
+                logger.warning(f"Retain block {block_id} unknown to Hindsight; sending it again")
+                self.memory_manager.requeue_retain_block(block_id)
+        return done

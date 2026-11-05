@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from config import global_config
-from src.memory.backend.base import MemoryBackend
+from src.memory.backend.base import MemoryBackend, RetainRefused
 from src.memory.context_budget import plan_block_cut
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import (
@@ -115,12 +115,19 @@ def test_scope_keys_follow_the_memory_mode():
         args = {"persona_name": "p", "channel": "ch", "user_identifier": "u", "server_id": None}
         args.update(kw)
         return retain_scope(mode, **args).key
-    assert key(MemoryMode.CHANNEL_ISOLATED) == "ch"
-    assert key(MemoryMode.CHANNEL_ISOLATED, server_id="g") == "ch@g"
+    assert key(MemoryMode.CHANNEL_ISOLATED) == "channel-ch"
+    assert key(MemoryMode.CHANNEL_ISOLATED, server_id="g") == "channel-ch@g"
     assert key(MemoryMode.GLOBAL) == "global"
     assert key(MemoryMode.SERVER_WIDE, server_id="g") == "server-g"
     assert key(MemoryMode.PERSONAL) == "user-u"
-    assert key(MemoryMode.TICKET_ISOLATED) == "ch"
+    assert key(MemoryMode.TICKET_ISOLATED) == "ticket-ch"
+    # Two modes never share a key, whatever the channel is called: a persona
+    # whose mode changes must not pick up the old mode's window row.
+    for name in ("global", "user-u", "server-g", "ch"):
+        keys = [key(m, channel=name, user_identifier="u", server_id=None)
+                for m in MemoryMode if m != MemoryMode.SERVER_WIDE]
+        keys.append(key(MemoryMode.SERVER_WIDE, channel=name, server_id="g"))
+        assert len(set(keys)) == len(keys), keys
     assert not retain_scope(MemoryMode.TICKET_ISOLATED, persona_name="p", channel="t",
                             user_identifier="u", server_id=None).has_window
 
@@ -185,6 +192,18 @@ for _name in list(getattr(MemoryBackend, "__abstractmethods__", ())):
 FakeBackend.__abstractmethods__ = frozenset()
 
 
+class RefusingBackend(FakeBackend):
+    """Hindsight up, refusing every block (a deterministic 4xx)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+
+    async def retain_block(self, bank_id, items, *, request_id) -> Optional[List[str]]:
+        self.calls += 1
+        raise RetainRefused("Hindsight API Error 422: bad item")
+
+
 @pytest.fixture
 def mm():
     manager = MemoryManager(db_path=":memory:")
@@ -233,7 +252,7 @@ async def test_block_is_sent_as_one_replace_document(mm, tp):
     assert await tp.flush_blocks() == 1
     (send,) = tp.memory_backend.sends
     (item,) = send["items"]
-    assert item["document_id"] == "stagr:web_ui_pandora:b0001:2026-11-02T00:34Z"
+    assert item["document_id"] == "stagr:channel-web_ui_pandora:b0001:2026-11-02T00:34Z"
     assert item["content"] == (
         "[2026-11-01 19:34] Adam: hi\n\nstagr: hello\n\n"
         "[2026-11-01 19:36] Adam: how are you\n\nstagr: fine"
@@ -255,7 +274,7 @@ async def test_second_block_carries_the_first_ones_tail(mm, tp):
     mm.cut_retain_block(SCOPE, expected_start=start, new_start=second[-1] + 1)
     await tp.flush_blocks()
     item = tp.memory_backend.sends[1]["items"][0]
-    assert item["document_id"].startswith("stagr:web_ui_pandora:b0002:")
+    assert item["document_id"].startswith("stagr:channel-web_ui_pandora:b0002:")
     assert item["context"] == CONTEXT_PREAMBLE + "[2026-11-01 19:34] Adam: a\n\nstagr: b"
 
 
@@ -312,7 +331,7 @@ async def test_rebuild_with_fewer_parts_deletes_the_superseded_documents(mm, tp,
     mm.queue_retain(ids[1], "stagr", "web_ui_pandora", untrusted=False)   # a retry
     await tp.flush_blocks()
     (rebuilt,) = tp.memory_backend.sends[1]["items"]
-    assert rebuilt["document_id"] == "stagr:web_ui_pandora:b0001:2026-11-02T00:34Z"
+    assert rebuilt["document_id"] == "stagr:channel-web_ui_pandora:b0001:2026-11-02T00:34Z"
     assert sorted(tp.memory_backend.deleted) == sorted(first_ids)
 
 
@@ -375,3 +394,118 @@ def test_chunk_size_setting_default_and_env_override(env, expected):
         capture_output=True, text=True, check=True,
     )
     assert out.stdout.split() == [expected, "1000"]
+
+
+# ---------- Hindsight down / refusing (DP-495) ----------
+
+@pytest.mark.asyncio
+async def test_refused_block_backs_off_alone_and_is_never_given_up(mm):
+    """A 4xx is this block's problem, not an outage: it stays queued, its
+    retry doubles from a minute to an hour, and Hindsight is not marked down."""
+    backend = RefusingBackend()
+    tp = TurnPersistence(mm, backend)
+    ids = _turns(mm, "hi", "hello")
+    _cut(mm, ids[-1] + 1)
+    assert await tp.flush_blocks() == 0
+    assert backend.calls == 1 and not tp._backend_down
+    (block,) = mm.retain_blocks(statuses=("queued",))
+    assert block["attempts"] == 1 and block["refused_since"] is not None
+    # Not due again until its backoff runs out.
+    assert await tp.flush_blocks() == 0 and backend.calls == 1
+    due = datetime.fromisoformat(block["next_attempt_at"])
+    assert mm.retain_blocks(statuses=("queued",), due_at=due) != []
+    delays = [mm.mark_retain_block_refused(dict(block, attempts=n)) for n in range(10)]
+    assert delays[0] == global_config.RETAIN_REFUSED_BACKOFF_MIN_SECONDS
+    assert delays[1] == 2 * delays[0]
+    assert delays[-1] == global_config.RETAIN_REFUSED_BACKOFF_MAX_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_long_refused_block_leaves_the_prompt_but_stays_queued(mm):
+    backend = RefusingBackend()
+    tp = TurnPersistence(mm, backend)
+    ids = _turns(mm, "hi", "hello", "more", "ok")
+    _cut(mm, ids[2])
+    await tp.flush_blocks()
+    _, floor = mm.retain_window(SCOPE)
+    assert floor == ids[0]                       # held in the prompt for now
+    later = datetime.now(timezone.utc) + timedelta(
+        seconds=global_config.RETAIN_REFUSED_PROMPT_SECONDS + 1)
+    _, floor = mm.retain_window(SCOPE, now=later)
+    assert floor == ids[2]                       # released from the prompt
+    assert [b["status"] for b in mm.retain_blocks(statuses=("queued",))] == ["queued"]
+
+
+@pytest.mark.asyncio
+async def test_requeue_resets_the_refusal_backoff(mm):
+    tp = TurnPersistence(mm, RefusingBackend())
+    ids = _turns(mm, "hi", "hello")
+    _cut(mm, ids[-1] + 1)
+    await tp.flush_blocks()
+    mm.queue_retain(ids[1], "stagr", "web_ui_pandora", untrusted=False)   # a retry
+    (block,) = mm.retain_blocks(statuses=("queued",))
+    assert block["attempts"] == 0 and block["next_attempt_at"] is None
+    assert block["refused_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_down_hindsight_pauses_turn_sends_and_the_loop_probes(mm):
+    """Unreachable: the flush stops at the first block (the rest would wait
+    out the same timeout), turns stop scheduling sends, and the next
+    maintenance pass is the probe that resumes them."""
+    backend = FakeBackend()
+    tp = TurnPersistence(mm, backend)
+    ids = _turns(mm, "a", "b", "c", "d", "e", "f")
+    _cut(mm, ids[2])
+    start, _ = mm.retain_window(SCOPE)
+    mm.cut_retain_block(SCOPE, expected_start=start, new_start=ids[4])
+    tried = []
+    real = tp._deliver_block
+
+    async def counting(block):
+        tried.append(block["block_id"])
+        return await real(block)
+
+    tp._deliver_block = counting  # type: ignore[method-assign]
+    backend.accept = False
+    assert await tp.flush_blocks() == 0
+    assert len(tried) == 1 and tp._backend_down
+    tp.schedule_flush()
+    assert not tp._flush_tasks                   # a turn starts nothing while down
+    backend.accept = True
+    assert await tp.flush_blocks() == 2          # the maintenance pass: probe, then all
+    assert not tp._backend_down
+
+
+@pytest.mark.asyncio
+async def test_unreachable_poll_marks_down_and_stops(mm):
+    backend = FakeBackend()
+    tp = TurnPersistence(mm, backend)
+    ids = _turns(mm, "a", "b", "c", "d")
+    _cut(mm, ids[2])
+    start, _ = mm.retain_window(SCOPE)
+    mm.cut_retain_block(SCOPE, expected_start=start, new_start=ids[3])
+    await tp.flush_blocks()
+    asked = []
+
+    async def status(bank_id, op_ids, document_ids):
+        asked.append(op_ids)
+        return "unreachable"
+
+    backend.retain_status = status  # type: ignore[method-assign]
+    assert await tp.poll_blocks() == 0
+    assert len(asked) == 1 and tp._backend_down
+    assert len(mm.retain_blocks(statuses=("sent",))) == 2
+
+
+@pytest.mark.asyncio
+async def test_turn_flushes_coalesce_to_one_waiting_pass(mm):
+    tp = TurnPersistence(mm, FakeBackend())
+    async with tp._flush_lock:                   # a pass is running
+        for _ in range(5):
+            tp.schedule_flush()
+        assert len(tp._flush_tasks) == 1
+    await tp.drain_flushes()
+    tp.schedule_flush()                          # nothing waiting: a new one
+    assert len(tp._flush_tasks) == 1
+    await tp.drain_flushes()

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from src.memory.backend.base import RetainRefused
 from src.memory.backend.hindsight import (
     HindsightAPIError,
     HindsightBackend,
@@ -1004,6 +1005,22 @@ async def test_retain_block_not_accepted_returns_none(backend: HindsightBackend)
         assert await backend.retain_block("p", [_block_item()], request_id="r") is None
     with patch.object(client, "aretain", new=AsyncMock(side_effect=HindsightAPIError(500, "x"))):
         assert await backend.retain_block("p", [_block_item()], request_id="r") is None
+    for transient in (408, 429):
+        with patch.object(client, "aretain",
+                          new=AsyncMock(side_effect=HindsightAPIError(transient, "x"))):
+            assert await backend.retain_block("p", [_block_item()], request_id="r") is None
+
+
+@pytest.mark.asyncio
+async def test_retain_block_4xx_is_refused_not_down(backend: HindsightBackend) -> None:
+    """A deterministic 4xx means Hindsight is up and refused this block: the
+    caller must back the block off, not pause every send (DP-495)."""
+    client = backend._get_client()
+    for code in (400, 409, 422):
+        with patch.object(client, "aretain",
+                          new=AsyncMock(side_effect=HindsightAPIError(code, "bad"))):
+            with pytest.raises(RetainRefused):
+                await backend.retain_block("p", [_block_item()], request_id="r")
 
 
 @pytest.mark.asyncio
@@ -1062,9 +1079,15 @@ async def test_retain_status(backend: HindsightBackend, statuses, docs_present, 
 
 
 @pytest.mark.asyncio
-async def test_retain_status_unknown_when_hindsight_unreachable(backend: HindsightBackend) -> None:
+async def test_retain_status_unreachable_when_hindsight_down(backend: HindsightBackend) -> None:
+    """Down (connection, 5xx, 429) is `unreachable`, so the poller pauses;
+    a 4xx is only `unknown` (DP-495)."""
     client = backend._get_client()
     with patch.object(client, "aget_operation", side_effect=httpx.ConnectError("down")):
+        assert await backend.retain_status("p", ["op"], ["d"]) == "unreachable"
+    with patch.object(client, "aget_operation", side_effect=HindsightAPIError(503, "x")):
+        assert await backend.retain_status("p", ["op"], ["d"]) == "unreachable"
+    with patch.object(client, "aget_operation", side_effect=HindsightAPIError(400, "x")):
         assert await backend.retain_status("p", ["op"], ["d"]) == "unknown"
 
 

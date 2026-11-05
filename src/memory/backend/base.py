@@ -47,6 +47,12 @@ class MemoryBackendError(Exception):
         self.transient = transient
 
 
+class RetainRefused(MemoryBackendError):
+    """The backend is up and refused this one item (DP-495): a deterministic
+    4xx. Resending it soon will not help, and the backend is not down — the
+    caller backs this item off without pausing the rest."""
+
+
 # ----------------------------- New-shape dataclasses ----------------------------- #
 
 
@@ -479,8 +485,10 @@ class MemoryBackend(ABC):
         Backends MUST persist `untrusted` as they do for `retain_turn`.
 
         Returns the ids to poll with `retain_status` once the backend has
-        accepted the block (empty: nothing to wait for), or None when it was
-        not accepted — the block stays queued and is sent again later.
+        accepted the block (empty: nothing to wait for), or None when the
+        backend is unreachable — the block stays queued and is sent again
+        later. Raises `RetainRefused` when the backend is up and refused this
+        block (it stays queued too, on its own backoff).
         `request_id` (a UUID) makes a resubmit of the same send idempotent.
         Default: a backend with no extraction to wait for accepts everything.
         """
@@ -494,8 +502,10 @@ class MemoryBackend(ABC):
     ) -> str:
         """Where a sent block's extraction stands: `completed`, `pending`,
         `failed` (gave up — the block leaves the prompt unretained),
-        `lost` (the backend no longer knows the block; send it again) or
-        `unknown` (could not ask; try later). Default: `completed`."""
+        `lost` (the backend no longer knows the block; send it again),
+        `unreachable` (the backend is down: no connection, timeout, 5xx,
+        429 — the caller pauses until it is back) or `unknown` (the answer
+        was unclear; try later). Default: `completed`."""
         return "completed"
 
     async def delete_bank(self, bank_id: str) -> None:

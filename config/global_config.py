@@ -306,6 +306,15 @@ RETAIN_IDLE_FINAL_SECONDS = 72 * 3600
 # tick, the idle sweep every RETAIN_IDLE_SWEEP_SECONDS. First tick at boot.
 RETAIN_MAINTENANCE_INTERVAL_SECONDS = 60
 RETAIN_IDLE_SWEEP_SECONDS = 900
+# A block Hindsight refuses (a deterministic 4xx; Hindsight is up) is retried
+# on its own backoff, doubling from MIN to MAX, forever. Once it has been
+# refused for RETAIN_REFUSED_PROMPT_SECONDS it leaves the prompt (still queued).
+RETAIN_REFUSED_BACKOFF_MIN_SECONDS = 60
+RETAIN_REFUSED_BACKOFF_MAX_SECONDS = 3600
+RETAIN_REFUSED_PROMPT_SECONDS = 3600
+# The window size DP-423 used for a persona with no `context` of its own; a
+# scope first seen after DP-495 starts its prompt where that window did.
+RETAIN_LEGACY_WINDOW = 15
 # How much of the conversation before a block (or block part) rides along in
 # the Hindsight item `context` as labelled background.
 RETAIN_CONTEXT_TAIL_CHARS = 4000
