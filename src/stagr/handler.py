@@ -270,9 +270,8 @@ class StagrToolHandler:
     async def _request_network(self, zone: str, reason: str = "") -> Dict[str, Any]:
         """Runs only once the operator approved it, so the approval is the
         confirmation: the prompt carried the LAN+WAN warning (the enricher
-        above), and it does not stop the call a second time. Under `allow`
-        in stagr's tool policy (DP-496) there is no prompt and so no warning:
-        listing it there is the operator's standing approval."""
+        above), and it does not stop the call a second time. It is never
+        auto-approvable (DP-496), so the warning is always seen."""
         zone = (zone or "").strip().lower()
         if zone not in ZONES:
             return _error("zone must be lan or wan.")

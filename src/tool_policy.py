@@ -60,7 +60,7 @@ class ToolPolicy:
         """Whether ``tool_name`` is listed by name under ``allow`` and not
         under ``ask`` (DP-496). The tool loop runs a write without the
         approval prompt only when this holds AND the tool's definition is
-        marked ``auto_approvable`` (today: stagr's four gated tools).
+        marked ``auto_approvable`` (today: stagr's ``queue_codr_task`` and ``copy_from_codr``).
 
         Explicit listing only: the ``["*"]`` wildcard does not count, so a
         wildcard persona never loses a prompt it had. A name under both lists

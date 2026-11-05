@@ -1401,7 +1401,7 @@ The system tracks the "trustworthiness" of the conversation context. If a person
 The Inspector's per-tool setting (off · allow · ask; `allow`/`ask` in
 `set tool_policy`) decides whether a persona has a tool at all. Whether a call
 waits for approval is decided by the tool: every write asks, whatever the
-setting says. The one exception today is stagr's four gated tools, which run
+setting says. The one exception today is stagr's `copy_from_codr` and `queue_codr_task`, which run
 without a prompt when listed by name under allow (DP-496, see
 [stagr Tools](#stagr-tools-requires-service_bindings-stagr-dp-456)); the `*` wildcard does not count as listing them.
 
@@ -1786,8 +1786,8 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 |---|---|---|
 | `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
 | `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
-| `request_web_access` | ask: yes · allow: no | Allow one more host until the setup box's WAN goes off |
-| `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
+| `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
+| `request_network` | yes | Ask to turn the setup box's LAN or WAN on, with a reason |
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
@@ -1798,12 +1798,12 @@ and no persona is given them: `sandbox_net_status` (both boxes' switches,
 allowlists, open connections, proxy log) and `set_sandbox_net` (flip any
 switch of either box; the operator's click is the approval).
 
-**ask or allow (DP-496).** stagr ships with its four gated tools
-(`request_web_access`, `request_network`, `copy_from_codr`, `queue_codr_task`)
-under **ask**: each call waits for your approval. Set one to **allow** in the
-Inspector's Tools tab (or with `set tool_policy`) and stagr runs it straight
-away, with no prompt; that includes `request_network`'s LAN+WAN warning, which
-appears only in the prompt. Only a tool listed **by name** under allow counts: a
+**ask or allow (DP-496).** stagr ships with `copy_from_codr` and
+`queue_codr_task` under **ask**: each call waits for your approval. Set one to
+**allow** in the Inspector's Tools tab (or with `set tool_policy`) and stagr runs
+it straight away, with no prompt. The network requests (`request_network`,
+`request_web_access`) always wait for you, whatever the setting: a switch or a
+new host is never run unprompted. Only a tool listed **by name** under allow counts: a
 policy whose allow list is the `*` wildcard still asks. The choice is saved with
 the persona and survives a restart. A `queue_codr_task` run without a prompt
 still wakes stagr when its ticket ends. For every other tool of every persona,

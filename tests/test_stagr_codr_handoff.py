@@ -189,7 +189,10 @@ def test_wake_result_tolerates_an_unreadable_payload():
 
 # --- the allow/ask gate (DP-496) --------------------------------------------
 
-GATED = ("queue_codr_task", "request_network", "request_web_access", "copy_from_codr")
+# Every gated stagr tool ships under ask; only the first two may be set to allow.
+UNPROMPTABLE = ("queue_codr_task", "copy_from_codr")
+ALWAYS_ASK = ("request_network", "request_web_access")
+GATED = UNPROMPTABLE + ALWAYS_ASK
 _STAGR_JSON = Path(__file__).resolve().parents[1] / "config" / "optional_personas" / "stagr.json"
 
 
@@ -199,9 +202,15 @@ def _persona(**policy):
     return persona
 
 
-@pytest.mark.parametrize("name", GATED)
+@pytest.mark.parametrize("name", UNPROMPTABLE)
 def test_a_gated_stagr_tool_under_allow_runs_unprompted(name):
     assert _runs_unprompted(_persona(allow=[name]), name)
+
+
+@pytest.mark.parametrize("name", ALWAYS_ASK)
+def test_a_network_request_under_allow_still_parks(name):
+    """Adam, DP-496: a switch or a new host always waits for him."""
+    assert not _runs_unprompted(_persona(allow=[name]), name)
 
 
 @pytest.mark.parametrize("name", GATED)
@@ -254,8 +263,9 @@ def _tool(**extra):
 
 def test_exactly_stagrs_gated_tools_are_auto_approvable():
     marked = {t["function"]["name"] for t in ALL_TOOL_DEFINITIONS if t.get("auto_approvable")}
-    assert marked == set(GATED)
-    assert all(is_auto_approvable(name) for name in GATED)
+    assert marked == set(UNPROMPTABLE)
+    assert all(is_auto_approvable(name) for name in UNPROMPTABLE)
+    assert not any(is_auto_approvable(name) for name in ALWAYS_ASK)
     assert not is_auto_approvable("create_ticket")
 
 
