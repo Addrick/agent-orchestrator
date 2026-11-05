@@ -8,7 +8,9 @@ it only between codr's turns. Everything that crosses a boundary is
 ``is_write`` and parked for approval: turning a switch on, approving a host,
 copying files out of codr's sandbox, and queueing a codr task
 (``queue_codr_task``: the approval is the operator's approval of stagr's plan,
-and where they see the hidden check; DERPR allocates the ticket's ``CD-NNN``, DP-489). ``sandbox_net_status`` and
+and where they see the hidden check; DERPR allocates the ticket's ``CD-NNN``, DP-489).
+Those four are ``auto_approvable`` (DP-496): listed under ``allow`` in stagr's
+tool policy they run without the prompt, under ``ask`` (as shipped) they park. ``sandbox_net_status`` and
 ``set_sandbox_net`` are the portal panel's (the operator's click is the
 approval there); no persona is given them. ``copy_to_codr`` is not: ``codr_shell`` can already write
 any file there, so a gate on the copy would only be a convention.
@@ -83,13 +85,16 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
+        # DP-496: runs without the prompt when stagr's tool policy lists it
+        # under allow (it ships under ask); see tool_loop._runs_unprompted.
+        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "request_web_access",
             "description": (
                 "Ask Adam to let stagr reach one more host through the proxy. Needs his "
-                "approval, and stagr's WAN must be on. The approval admits exactly that host "
+                "approval (unless he set it to allow), and stagr's WAN must be on. The approval admits exactly that host "
                 "(not its subdomains) until stagr's WAN goes off."
             ),
             "parameters": {
@@ -105,12 +110,16 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
+        # DP-496: runs without the prompt when stagr's tool policy lists it
+        # under allow (it ships under ask); see tool_loop._runs_unprompted.
+        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "request_network",
             "description": (
-                "Ask Adam to turn one of stagr's network switches on. Needs his approval. "
+                "Ask Adam to turn one of stagr's network switches on. Needs his approval "
+                "(unless he set it to allow). "
                 "wan: the internet through the proxy allowlist (web only). lan: the shared folder "
                 "on dt21 (~/work/dt21) and nothing else at home, not even DNS. Ask only for "
                 "what the job needs; Adam turns it off again."
@@ -224,13 +233,16 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
+        # DP-496: runs without the prompt when stagr's tool policy lists it
+        # under allow (it ships under ask); see tool_loop._runs_unprompted.
+        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "copy_from_codr",
             "description": (
                 "Copy a file or folder from codr's workspace to stagr, e.g. to review or test "
-                "codr's work. Needs Adam's approval. Any .git is left behind unless keep_git is "
+                "codr's work. Needs Adam's approval (unless he set it to allow). Any .git is left behind unless keep_git is "
                 "true. Never overwrites: refused if dest exists on stagr."
             ),
             "parameters": {
@@ -247,16 +259,16 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
-        # DP-493: stagr's `auto_approve` switch lets it queue without a prompt,
-        # once Adam has agreed a sequence of tickets with it.
+        # DP-496: runs without the prompt when stagr's tool policy lists it
+        # under allow (it ships under ask); see tool_loop._runs_unprompted.
         "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "queue_codr_task",
             "description": (
-                "Queue a planned ticket for codr. Needs Adam's approval (unless he turned on your "
-                "auto_approve): the prompt shows every field, so it is his approval of your plan. Prepare first: the project's repo in "
+                "Queue a planned ticket for codr. Needs Adam's approval (unless he set it to allow): "
+                "the prompt shows every field, so it is his approval of your plan. Prepare first: the project's repo in "
                 "projects/<project>/ if it comes from outside, and every package installed and "
                 "verified on codr's box. DERPR gives the ticket the next free ID (CD-NNN, named in "
                 "the result) and starts it when codr is idle and its dependencies have passed, in "

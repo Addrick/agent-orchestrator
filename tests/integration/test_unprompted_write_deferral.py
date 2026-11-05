@@ -1,6 +1,7 @@
-# tests/integration/test_auto_approve_deferral.py
-"""DP-493: a write the persona may run without a prompt (`auto_approve` on,
-tool `auto_approvable`) still parks the deferral its result declares, and
+# tests/integration/test_unprompted_write_deferral.py
+"""DP-493/DP-496: a write the persona may run without a prompt (tool
+`auto_approvable`, listed under `allow` in the persona's tool policy) still
+parks the deferral its result declares, and
 that deferral resumes the turn's own conversation exactly as one parked after
 an approval does (tests/integration/test_resume_kernel_convergence.py).
 
@@ -29,6 +30,17 @@ def auto_approvable(monkeypatch):
     monkeypatch.setattr(tool_loop, "is_auto_approvable", lambda name: name == "create_ticket")
 
 
+def _policy(persona, *, allow=(), ask=()):
+    """The persona's tool policy (DP-496): the wildcard `_confirm_persona`
+    set, plus `allow`/`ask` listings by name."""
+    persona.set_tool_policy({"default": "allow", "allow": ["*", *allow], "ask": list(ask)})
+    return persona
+
+
+def _allowed(chat_system):
+    return _policy(_confirm_persona(chat_system), allow=["create_ticket"])
+
+
 def _tool(chat_system, ticket="CD-001", payload=None):
     """Install a handler under the REAL `ToolManager.execute_tool`, so the
     loop and the approval path see the `{"result": ...}` envelope production
@@ -49,9 +61,9 @@ async def _turn(chat_system, user="adam"):
 
 
 @pytest.mark.asyncio
-async def test_auto_approved_write_runs_in_the_turn_and_parks_its_deferral(mocked_chat_system, auto_approvable):
+async def test_a_write_under_allow_runs_in_the_turn_and_parks_its_deferral(mocked_chat_system, auto_approvable):
     chat_system, mem_manager = mocked_chat_system
-    _confirm_persona(chat_system).set_auto_approve(True)
+    _allowed(chat_system)
     executed = _tool(chat_system)
 
     events = await _turn(chat_system)
@@ -70,7 +82,7 @@ async def test_auto_approved_write_runs_in_the_turn_and_parks_its_deferral(mocke
 @pytest.mark.asyncio
 async def test_its_deferral_resumes_once_with_the_outcome(mocked_chat_system, auto_approvable):
     chat_system, mem_manager = mocked_chat_system
-    _confirm_persona(chat_system).set_auto_approve(True)
+    _allowed(chat_system)
     executed = _tool(chat_system)
     await _turn(chat_system)
 
@@ -88,9 +100,14 @@ async def test_its_deferral_resumes_once_with_the_outcome(mocked_chat_system, au
 
 
 @pytest.mark.asyncio
-async def test_with_the_switch_off_the_write_parks_for_approval(mocked_chat_system, auto_approvable):
+@pytest.mark.parametrize("allow, ask", [
+    ((), ["create_ticket"]),                   # under ask
+    ((), ()),                                  # only the wildcard: not an explicit allow
+    (["create_ticket"], ["create_ticket"]),    # under both: ask wins
+], ids=["ask", "wildcard", "both"])
+async def test_a_write_not_explicitly_allowed_parks_for_approval(mocked_chat_system, auto_approvable, allow, ask):
     chat_system, _ = mocked_chat_system
-    _confirm_persona(chat_system)
+    _policy(_confirm_persona(chat_system), allow=allow, ask=ask)
     executed = _tool(chat_system)
 
     events = await _turn(chat_system)
@@ -100,9 +117,11 @@ async def test_with_the_switch_off_the_write_parks_for_approval(mocked_chat_syst
 
 
 @pytest.mark.asyncio
-async def test_the_switch_does_not_reach_a_write_that_is_not_auto_approvable(mocked_chat_system):
+async def test_allow_does_not_reach_a_write_that_is_not_auto_approvable(mocked_chat_system):
+    """Scope (DP-496): only the marked writes follow allow/ask; every other
+    write still prompts, whatever the policy lists."""
     chat_system, _ = mocked_chat_system
-    _confirm_persona(chat_system).set_auto_approve(True)
+    _allowed(chat_system)
     executed = _tool(chat_system)
 
     events = await _turn(chat_system)
@@ -111,9 +130,9 @@ async def test_the_switch_does_not_reach_a_write_that_is_not_auto_approvable(moc
 
 
 @pytest.mark.asyncio
-async def test_a_failed_auto_approved_write_parks_nothing(mocked_chat_system, auto_approvable):
+async def test_a_failed_unprompted_write_parks_nothing(mocked_chat_system, auto_approvable):
     chat_system, _ = mocked_chat_system
-    _confirm_persona(chat_system).set_auto_approve(True)
+    _allowed(chat_system)
     _tool(chat_system, payload={"status": "error", "message": "nope"})
 
     await _turn(chat_system)
@@ -123,7 +142,7 @@ async def test_a_failed_auto_approved_write_parks_nothing(mocked_chat_system, au
 
 @pytest.mark.asyncio
 async def test_an_approved_write_through_the_real_envelope_re_parks_its_deferral(mocked_chat_system):
-    """The approval path, with the switch off: approving runs the write, and
+    """The approval path, the tool not under allow: approving runs the write, and
     the deferral its handler declared — inside the envelope — becomes the
     park the codr agent settles. Before DP-493 it was patched as done."""
     chat_system, mem_manager = mocked_chat_system

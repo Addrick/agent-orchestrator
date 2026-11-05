@@ -335,7 +335,6 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 | `chat_template <name>` | An instruct-preset name | **Only the thinking switch is used now (DP-417).** The local model server applies the model's own chat template (a KoboldCPP server must run with `--jinja --jinja_tools` — see [Local model server](#local-model-server-requirements)), so a preset no longer changes the prompt format. Its one remaining effect: the `*-nothink` presets (`chatml-nothink`, `gemma4-nothink`, `gemma4-e-nothink`) turn thinking off, `gemma4-think` turns it on, and every other preset (`chatml`, `alpaca`, `llama3`, …) leaves the server's default (Qwen thinks by default). `thinking_level` overrides it. Unknown names are still rejected and existing values stay valid. `GET /api/v1/chat_templates` lists the names, and the persona editor renders them as a dropdown. Only affects `model local`. |
 | `thinking_level <value>` | `none`, `minimal`, `low`, `medium`, `high` | Extended-thinking level passed through to the provider. Gemma takes it as its thinking level. **On `model local` (DP-417)** it becomes `reasoning_effort`, and `none` turns thinking off; it takes precedence over `chat_template`. Which levels a local server distinguishes is up to the server (KoboldCPP: `none`–`medium`; Strata: `none`, `low`–`high`). **On `agy-*` (DP-425)** it becomes `agy --effort`: `low`–`high` (plus `agy`'s `xhigh`, `max`) pass through, `none`/`minimal` run as `low`, and unset means `AGY_DEFAULT_EFFORT` (`low`) — see [Antigravity](#antigravity-agy--oauth-tier-provider). Clears when set to a non-value. |
 | `long_term_memory <on\|off>` | on/off | Per-persona long-term-memory switch. Off disables both retrieval *and* retain for this persona — it stops contributing to and drawing from the memory store. |
-| `auto_approve <on\|off>` | on/off | Lets the persona run the writes marked auto-approvable without an approval prompt. Today that is only stagr's `queue_codr_task` (DP-493): turn it on once you and stagr have agreed a sequence of tickets, and stagr queues each one as codr finishes the last. Default off, and **never saved**: a restart or deploy turns it off again, so the next `queue_codr_task` parks for your approval. A dev command only, not in the portal. Writes that cannot be undone, and the always-confirm tools, can never be marked auto-approvable. |
 | `include_ambient_memory <on\|off>` | on/off | Whether ambient-channel memories (messages logged under persona `ambient`) are eligible for this persona's automatic per-message recall. Default on. **No effect in practice:** Hindsight has no ambient bank and ignores it, and on the SQLite backend there are ambient memories only if an `AMBIENT_LOGGING_CHANNELS` channel is also in the consolidator's `allowed_channels` — so it is a dev command only, not shown in the portal. Kept for possible future use (tech debt, DP-491). |
 | `ltm_max_items <integer\|none>` | 1 - 50, or `none` | **DP-491.** How many long-term memories are recalled and inserted into each new message's `<memory>` block. `none` clears it back to the global default (`MEMORY_MAX_SUMMARIES_IN_CONTEXT`, 5). For all three `ltm_*` settings an invalid value is refused and the current value is kept — from the dev command and from the portal alike. Fewer items means a shorter prompt; more means more background, at the cost of tokens and noise. |
 | `ltm_max_tokens <integer\|none>` | 100 - 32000, or `none` | **DP-491. Hindsight only.** Token cap Hindsight packs recalled memories into, before `ltm_max_items` trims the list. `none` = `ltm_max_items × LTM_TOKENS_PER_ITEM` (500). The SQLite backend ignores it. |
@@ -1066,7 +1065,7 @@ only thing that talks to both:
   failed attempt that codr will retry does not wake it. stagr's reply is saved in
   that conversation and also posted to codr's channel, under codr's result line,
   as `stagr [CD-NNN]: <reply>`; if the turn parked an approval (with
-  `auto_approve` off, that is the next `queue_codr_task`), the post says so, and
+  `queue_codr_task` under ask, that is the next ticket), the post says so, and
   you approve it in stagr's channel. A ticket you copied into the queue by hand
   wakes no one. stagr waits up to 14 days for a ticket to end; past that the
   wait expires and it is not woken. **While stagr's turn runs, codr starts no
@@ -1077,10 +1076,12 @@ only thing that talks to both:
   preparation between them can all be queued at once (chained with
   `depends_on`); codr runs them in order, and stagr still hears each result
   before the next starts. Or stagr feeds them one at a time: plan the tickets with stagr, have it
-  queue the first, and approve that one. If the sequence looks right, turn on
-  `set auto_approve on` for stagr: from then on stagr queues each next ticket
-  itself when codr finishes the one before, with no prompt, until it runs out,
-  a ticket fails, or a restart turns the switch off. Only one of stagr's tickets
+  queue the first, and approve that one. If the sequence looks right, set
+  `queue_codr_task` to **allow** for stagr (the Inspector's Tools tab, or
+  `set tool_policy`): from then on stagr queues each next ticket itself when
+  codr finishes the one before, with no prompt, until it runs out or a ticket
+  fails. The setting is saved like any tool policy, so it stays until you set
+  it back to **ask**. Only one of stagr's tickets
   is in the queue at a time this way, so its preparation (packages, a repo copied
   in) happens between codr's tickets, when `codr_shell` and `copy_to_codr` are
   allowed. codr may still be generating for a moment after its result is posted,
@@ -1395,6 +1396,14 @@ The budget (15 unless the persona sets its own) is a stopping condition, not a h
 The system tracks the "trustworthiness" of the conversation context. If a persona uses a tool that retrieves potentially untrusted content (like `web_search` or `recall_memory` containing past external input), the current turn is marked as **tainted**. 
 - Taint is "sticky" for the duration of the conversation.
 - When a turn is tainted, any subsequent write-tool approval request will carry a warning: `⚠️ Context contains untrusted content from: [source]`.
+
+### Allow vs ask
+The Inspector's per-tool setting (off · allow · ask; `allow`/`ask` in
+`set tool_policy`) decides whether a persona has a tool at all. Whether a call
+waits for approval is decided by the tool: every write asks, whatever the
+setting says. The one exception today is stagr's four gated tools, which run
+without a prompt when listed by name under allow (DP-496, see
+[stagr Tools](#stagr-tools-requires-service_bindings-stagr-dp-456)); the `*` wildcard does not count as listing them.
 
 ### Insecure Composition Blocking
 To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
@@ -1777,17 +1786,28 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 |---|---|---|
 | `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
 | `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
-| `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
-| `request_network` | yes | Ask to turn the setup box's LAN or WAN on, with a reason |
+| `request_web_access` | ask: yes · allow: no | Allow one more host until the setup box's WAN goes off |
+| `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
-| `copy_from_codr` | yes | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
-| `queue_codr_task` | yes (no with `auto_approve` on) | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
+| `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
+| `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
 
 Two more tools sit behind the same binding for the portal's INFRA panel only,
 and no persona is given them: `sandbox_net_status` (both boxes' switches,
 allowlists, open connections, proxy log) and `set_sandbox_net` (flip any
 switch of either box; the operator's click is the approval).
+
+**ask or allow (DP-496).** stagr ships with its four gated tools
+(`request_web_access`, `request_network`, `copy_from_codr`, `queue_codr_task`)
+under **ask**: each call waits for your approval. Set one to **allow** in the
+Inspector's Tools tab (or with `set tool_policy`) and stagr runs it straight
+away, with no prompt; that includes `request_network`'s LAN+WAN warning, which
+appears only in the prompt. Only a tool listed **by name** under allow counts: a
+policy whose allow list is the `*` wildcard still asks. The choice is saved with
+the persona and survives a restart. A `queue_codr_task` run without a prompt
+still wakes stagr when its ticket ends. For every other tool of every persona,
+ask and allow make no difference to approval: a write always asks.
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 

@@ -1,15 +1,17 @@
 # tests/test_stagr_codr_handoff.py
 """DP-493: stagr hears when codr finishes a ticket it queued, and may queue
-the next without a prompt when its `auto_approve` switch is on.
+the next without a prompt when its tool policy lists `queue_codr_task` under
+`allow` (DP-496; the same holds for its other three gated tools).
 
 The resume itself is the DP-345 deferral mechanism, pinned end to end in
-tests/integration/test_auto_approve_deferral.py. Here: the pieces around it —
-which tickets wake stagr, what the wake carries, the switch, the flag's guard
-and the deferral's longer lifetime."""
+tests/integration/test_unprompted_write_deferral.py. Here: the pieces around
+it — which tickets wake stagr, what the wake carries, the allow/ask gate, the
+flag's guard and the deferral's longer lifetime."""
 
 import asyncio
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -21,9 +23,10 @@ from src.deferral_kinds import DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_TICKET
 from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
 from src.persona import Persona
 from src.persona_fields import PERSONA_FIELDS
-from src.personas.store import to_dict
 from src.stagr.codr_ticket import ATTEMPT_ACTION, attempt_context
-from src.tools.definitions import is_auto_approvable, validate_tool_capabilities
+from src.tool_policy import ToolPolicy
+from src.tools.definitions import ALL_TOOL_DEFINITIONS, is_auto_approvable, validate_tool_capabilities
+from src.tools.tool_loop import _runs_unprompted
 from tests.test_codr_agent import _agent, _task
 
 
@@ -184,32 +187,61 @@ def test_wake_result_tolerates_an_unreadable_payload():
     assert result["ticket"] == "CD-009" and result["last_outcome"] == "pass"
 
 
-# --- the switch -------------------------------------------------------------
+# --- the allow/ask gate (DP-496) --------------------------------------------
 
-FIELDS_BY_NAME = {f.name: f for f in PERSONA_FIELDS}
-
-
-def _persona():
-    return Persona(persona_name="stagr", model_name="local", prompt="p")
+GATED = ("queue_codr_task", "request_network", "request_web_access", "copy_from_codr")
+_STAGR_JSON = Path(__file__).resolve().parents[1] / "config" / "optional_personas" / "stagr.json"
 
 
-def test_auto_approve_is_off_by_default_and_set_by_the_dev_command():
-    persona = _persona()
-    assert persona.get_auto_approve() is False
-    reply, mutated = FIELDS_BY_NAME["auto_approve"].set_cli(["auto_approve", "on"], persona)
-    assert persona.get_auto_approve() is True and mutated and "until the next restart" in reply
+def _persona(**policy):
+    persona = Persona(persona_name="stagr", model_name="local", prompt="p")
+    persona.set_tool_policy({"default": "deny", **policy})
+    return persona
 
 
-def test_auto_approve_is_never_saved_so_a_restart_turns_it_off():
-    persona = _persona()
-    persona.set_auto_approve(True)
-    (saved,) = to_dict({"stagr": persona})
-    assert not any("auto_approve" in key for key in saved)
+@pytest.mark.parametrize("name", GATED)
+def test_a_gated_stagr_tool_under_allow_runs_unprompted(name):
+    assert _runs_unprompted(_persona(allow=[name]), name)
 
 
-def test_auto_approve_has_no_patch_key():
-    """Portal PATCH cannot reach it: the toggle is a dev command only."""
-    assert FIELDS_BY_NAME["auto_approve"].patch_key is None
+@pytest.mark.parametrize("name", GATED)
+def test_a_gated_stagr_tool_under_ask_parks(name):
+    assert not _runs_unprompted(_persona(ask=[name]), name)
+
+
+def test_listed_under_both_ask_wins():
+    assert not _runs_unprompted(_persona(allow=["queue_codr_task"], ask=["queue_codr_task"]), "queue_codr_task")
+
+
+def test_the_wildcard_is_not_an_explicit_allow():
+    persona = _persona(allow=["*"])
+    persona.set_tool_policy({"default": "allow", "allow": ["*"]})
+    assert not any(_runs_unprompted(persona, name) for name in GATED)
+
+
+@pytest.mark.parametrize("name", ["create_ticket", "set_sandbox_net", "merge_tickets"])
+def test_any_other_write_under_allow_still_parks(name):
+    """Scope: only the marked tools follow allow/ask."""
+    assert not _runs_unprompted(_persona(allow=[name]), name)
+
+
+def test_a_stand_in_persona_never_runs_a_write_unprompted():
+    assert not _runs_unprompted(SimpleNamespace(), "queue_codr_task")
+    assert not _runs_unprompted(SimpleNamespace(get_tool_policy=lambda: {"allow": list(GATED)}), "queue_codr_task")
+
+
+def test_the_shipped_stagr_lists_its_gated_tools_under_ask():
+    """Default behaviour is DP-493's: every gated tool parks until Adam sets
+    it to allow."""
+    policy = ToolPolicy(**json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]["tool_policy"])
+    assert set(policy.ask) == set(GATED) and not set(policy.allow) & set(GATED)
+    persona = _persona(**policy.to_dict())
+    assert not any(_runs_unprompted(persona, name) for name in GATED)
+
+
+def test_there_is_no_auto_approve_field_any_more():
+    assert "auto_approve" not in {f.name for f in PERSONA_FIELDS}
+    assert not hasattr(Persona, "set_auto_approve")
 
 
 # --- the flag ---------------------------------------------------------------
@@ -220,10 +252,11 @@ def _tool(**extra):
                              "locality": "network", "sensitivity": "internal"}, **extra}
 
 
-def test_only_queue_codr_task_is_auto_approvable():
-    assert is_auto_approvable("queue_codr_task")
-    assert not is_auto_approvable("request_network")
-    assert not is_auto_approvable("copy_from_codr")
+def test_exactly_stagrs_gated_tools_are_auto_approvable():
+    marked = {t["function"]["name"] for t in ALL_TOOL_DEFINITIONS if t.get("auto_approvable")}
+    assert marked == set(GATED)
+    assert all(is_auto_approvable(name) for name in GATED)
+    assert not is_auto_approvable("create_ticket")
 
 
 @pytest.mark.parametrize("tool", [

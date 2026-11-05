@@ -783,23 +783,6 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
     ),
     PersonaField(
-        # DP-493: runtime only (not saved, no PATCH key): a restart turns it off.
-        name='auto_approve',
-        describe=lambda p: (
-            f"Auto-approve for '{p.get_name()}' is {'on' if p.get_auto_approve() else 'off'} "
-            "(writes marked auto-approvable, e.g. queue_codr_task, run without a prompt; "
-            "off again after a restart)."
-        ),
-        set_cli=_bool_setter(
-            apply=lambda p, v: p.set_auto_approve(v),
-            missing_msg="Error: Please specify 'on' or 'off' for auto_approve.",
-            state_msg=lambda v, name: (
-                f"Auto-approve {'on' if v else 'off'} for {name}"
-                + (" until the next restart." if v else ".")
-            ),
-        ),
-    ),
-    PersonaField(
         name='inject_timestamp',
         describe=lambda p: (
             f"Timestamp injection for '{p.get_name()}' is "

@@ -142,9 +142,10 @@ def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
 
 def _validate_auto_approvable(name: str, tool: Dict[str, Any]) -> None:
     """Assert an optional top-level `auto_approvable` (DP-493) is bool, and
-    only on a reversible write: it lets a persona's `auto_approve` switch run
-    this write without the approval prompt, which must never reach a tool
-    whose effect cannot be taken back."""
+    only on a reversible write: it lets the persona's tool policy run this
+    write without the approval prompt when it lists the tool under `allow`
+    (DP-496), which must never reach a tool whose effect cannot be taken
+    back."""
     if "auto_approvable" not in tool:
         return
     flag = tool["auto_approvable"]
@@ -321,8 +322,9 @@ def is_write_tool(tool_name: str) -> bool:
 
 def is_auto_approvable(tool_name: str) -> bool:
     """Whether a write may run without the approval prompt when the persona's
-    `auto_approve` switch is on (DP-493). Only reversible writes can carry
-    the flag (`_validate_auto_approvable`)."""
+    tool policy lists it under `allow` (DP-493, DP-496; the check is
+    `tool_loop._runs_unprompted`). Every other write always prompts. Only
+    reversible writes can carry the flag (`_validate_auto_approvable`)."""
     tool = _REGISTRY.get(tool_name)
     return bool(tool and tool.get("auto_approvable") is True and tool.get("is_write"))
 
