@@ -115,6 +115,14 @@ class HistoryWindow:
     messages: List[Dict[str, Any]] = field(default_factory=list)
     sources: List[Optional[int]] = field(default_factory=list)
 
+    @property
+    def oldest_id(self) -> Optional[int]:
+        """The smallest interaction id shown, not rows[0]'s: the window is
+        ordered by timestamp, ids by insertion, and they disagree when a
+        platform timestamp (Discord `created_at`) lands out of insertion order."""
+        ids = [r['interaction_id'] for r in self.rows if r.get('interaction_id') is not None]
+        return min(ids) if ids else None
+
 
 @dataclass
 class ContinueTurn:
@@ -379,11 +387,7 @@ class RequestBuilder:
         window = self.load_history_window(
             persona, user_identifier, channel, server_id, history_limit, advance=advance,
         )
-        ids = [r['interaction_id'] for r in window.rows if r.get('interaction_id') is not None]
-        # The smallest id, not rows[0]'s: the window is ordered by timestamp,
-        # ids by insertion, and they disagree when a platform timestamp
-        # (Discord `created_at`) lands out of insertion order.
-        return window.messages, (min(ids) if ids else None)
+        return window.messages, window.oldest_id
 
     def load_history_window(
             self,
@@ -886,9 +890,7 @@ class RequestBuilder:
             ctx.server_id, ctx.history_limit, advance=advance
         )
         ctx.conversation_history = list(ctx.history_window.messages)
-        window_ids = [r['interaction_id'] for r in ctx.history_window.rows
-                      if r.get('interaction_id') is not None]
-        ctx.oldest_interaction_id = min(window_ids) if window_ids else None
+        ctx.oldest_interaction_id = ctx.history_window.oldest_id
         # Taken before the new turn and the memory block are added: every
         # other token in the prompt is "fixed" for the block cut below.
         window_tokens = sum(message_tokens(m) for m in ctx.conversation_history)

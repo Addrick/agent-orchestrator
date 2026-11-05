@@ -1701,11 +1701,14 @@ class MemoryManager:
 
     @staticmethod
     def _requeue_block(conn: sqlite3.Connection, block_id: int) -> None:
-        # A fresh request id: Hindsight answers a resubmitted operation_id
-        # with the original operation and does no new work.
+        # A fresh request id, even for a block still queued: Hindsight answers
+        # a resubmitted operation_id with the original operation and does no
+        # new work, so a block whose earlier POST landed unacknowledged would
+        # otherwise resend under the old id and keep the old content. A send
+        # in flight sees the id change and leaves the block queued.
         conn.execute(
             "UPDATE Retain_Block SET status = 'queued', request_id = ?, done_at = NULL"
-            " WHERE block_id = ? AND status != 'queued'",
+            " WHERE block_id = ?",
             (str(uuid.uuid4()), block_id),
         )
 
@@ -1985,17 +1988,22 @@ class MemoryManager:
                 + " LIMIT 1",
                 (block_id,),
             ).fetchone() is not None
+            # What landed is recorded even when the block was re-queued
+            # mid-send: the resend must keep its document ids (`first_ts`) and
+            # delete the parts it no longer produces (`document_ids`).
             conn.execute(
-                "UPDATE Retain_Block SET status = ?, request_id = ?, op_ids = ?,"
-                " first_ts = COALESCE(first_ts, ?), document_ids = ?,"
-                " untrusted = MAX(untrusted, ?), sent_at = ?"
+                "UPDATE Retain_Block SET first_ts = COALESCE(first_ts, ?), document_ids = ?,"
+                " untrusted = MAX(untrusted, ?) WHERE block_id = ? AND status = 'queued'",
+                (to_utc(first_ts).isoformat() if first_ts is not None else None,
+                 json.dumps(list(document_ids)), int(untrusted), block_id),
+            )
+            conn.execute(
+                "UPDATE Retain_Block SET status = ?, request_id = ?, op_ids = ?, sent_at = ?"
                 " WHERE block_id = ? AND request_id = ? AND status = 'queued'",
                 ("queued" if stale else "sent",
                  str(uuid.uuid4()) if stale else block["request_id"],
-                 json.dumps(list(op_ids)),
-                 to_utc(first_ts).isoformat() if first_ts is not None else None,
-                 json.dumps(list(document_ids)), int(untrusted),
-                 to_utc(now).isoformat(), block_id, block["request_id"]),
+                 json.dumps(list(op_ids)), to_utc(now).isoformat(),
+                 block_id, block["request_id"]),
             )
 
     def set_retain_block_status(self, block_id: int, status: str, *,

@@ -263,8 +263,10 @@ class HindsightRESTClient:
     async def adelete_document(self, bank_id: str, document_id: str) -> Dict[str, Any]:
         # DELETE .../documents/{id} -> DeleteDocumentResponse
         # {success, message, document_id, memory_units_deleted}
+        # Encoded like aget_document: DP-495 block ids embed channel/user ids.
         return await self._request(
-            "DELETE", f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{document_id}"
+            "DELETE",
+            f"{HINDSIGHT_API_PREFIX}/banks/{bank_id}/documents/{_path_segment(document_id)}",
         )
 
     async def alist_operations(

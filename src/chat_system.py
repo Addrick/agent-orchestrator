@@ -1534,16 +1534,22 @@ class ChatSystem:
             return mark <= now and (since is None or mark > since)
 
         for key, sc in scopes.items():
-            last = mm.scope_last_activity(sc)
-            if last is None:
-                continue
-            if crossed(last, RETAIN_IDLE_TRIM_SECONDS):
-                persona = self.personas.get(sc.persona_name)
-                if persona is not None:
-                    self.request_builder.idle_trim(persona, sc)
-            final_due = last + timedelta(seconds=RETAIN_IDLE_FINAL_SECONDS) <= now
-            if final_due and (crossed(last, RETAIN_IDLE_FINAL_SECONDS) or key in unsent):
-                mm.final_retain_block(sc, now)
+            # Per scope: the caller advances `since` after this pass, so a
+            # failure that aborted the loop would skip every later scope's
+            # mark for good.
+            try:
+                last = mm.scope_last_activity(sc)
+                if last is None:
+                    continue
+                if crossed(last, RETAIN_IDLE_TRIM_SECONDS):
+                    persona = self.personas.get(sc.persona_name)
+                    if persona is not None:
+                        self.request_builder.idle_trim(persona, sc)
+                final_due = last + timedelta(seconds=RETAIN_IDLE_FINAL_SECONDS) <= now
+                if final_due and (crossed(last, RETAIN_IDLE_FINAL_SECONDS) or key in unsent):
+                    mm.final_retain_block(sc, now)
+            except Exception as e:  # noqa: BLE001 — one scope never stops the sweep
+                logger.warning(f"Idle retain sweep failed for {sc.persona_name}:{sc.key}: {e}")
 
     async def run_retain_maintenance(self) -> None:
         """The retain upkeep loop (DP-495), hosted by AppManager. Its first
