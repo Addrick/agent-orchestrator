@@ -54,6 +54,7 @@ from src.agents.base import Agent
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET
+from src.engine.providers.local import REQUESTER_HEADER, requester_header
 from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
@@ -398,7 +399,9 @@ def workspace_files(cfg: Dict[str, Any]) -> Dict[str, str]:
         "provider": {"kcpp-pool": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "Inference router (any free local server)",
-            "options": {"baseURL": cfg["pool_url"], "headerTimeout": _POOL_HEADER_TIMEOUT_MS},
+            # The router names each job's requester in its status (DP-499): codr and its subagents.
+            "options": {"baseURL": cfg["pool_url"], "headerTimeout": _POOL_HEADER_TIMEOUT_MS,
+                        "headers": {REQUESTER_HEADER: requester_header(cfg["persona"])}},
             "models": {"local": {"name": "the model the router is serving",
                                  "limit": {"context": int(cfg["pool_context"]), "output": 16384}}},
         }},

@@ -233,6 +233,51 @@ def _prefill_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+_KCPP_PERF_FIELDS = (
+    "last_process", "last_eval", "last_token_count", "last_input_count", "last_process_time",
+    "last_eval_time", "last_process_speed", "last_eval_speed", "last_seed", "total_gens",
+    "stop_reason", "queue", "idle", "uptime", "idletime",
+)
+
+
+def _servers_from_router_status(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Project the inference router's ``/router/status`` onto the portal's
+    per-server contract (DP-499). Re-projected field by field, so a future
+    router field — or a box's URL — never reaches the browser by accident.
+    Raises TypeError/ValueError on a non-numeric counter; the route degrades."""
+    def _jobs(raw: Any) -> List[Dict[str, Any]]:
+        return [{
+            "requester": str(j.get("requester") or "unknown"),
+            "kind": "background" if j.get("kind") == "background" else "chat",
+            "elapsed_s": float(j.get("elapsed_s") or 0),
+        } for j in (raw if isinstance(raw, list) else []) if isinstance(j, dict)]
+
+    servers = []
+    for b in body["backends"]:
+        if not isinstance(b, dict):
+            continue
+        metrics = b.get("metrics")
+        raw_perf = b.get("perf")
+        # kcpp's own perf sample, kept to the fields the portal reads (KoboldPerf).
+        perf = ({k: float(raw_perf[k]) for k in _KCPP_PERF_FIELDS if k in raw_perf}
+                if isinstance(raw_perf, dict) else _perf_from_strata_metrics(metrics))
+        age = b.get("sample_age_s")
+        state = b.get("state")
+        servers.append({
+            "name": str(b.get("name") or "?"),
+            "primary": bool(b.get("primary")),
+            "healthy": bool(b.get("healthy")),
+            "state": state if state in ("up", "unloaded", "down") else ("up" if b.get("healthy") else "down"),
+            "sample_age_s": float(age) if age is not None else None,
+            "model": b.get("model") if isinstance(b.get("model"), str) else None,
+            "external_busy": bool(b.get("external_busy")),
+            "jobs": _jobs(b.get("jobs")),
+            "perf": perf,
+            "prefill": _prefill_from_strata_metrics(metrics),
+        })
+    return {"available": True, "held": _jobs(body.get("held")), "servers": servers}
+
+
 def _kobold_progress_url() -> str:
     """Base URL of the kcpp-progress sidecar, or "" when not deployed.
 
@@ -1637,6 +1682,43 @@ class KoboldEngineAdapter:
             if base:
                 return JSONResponse(content={"available": False, "reason": "unreachable"})
             return JSONResponse(content={"available": False, "reason": "not_configured"})
+
+        @self.app.get("/api/v1/inference/servers")
+        async def get_inference_servers() -> Any:
+            """DP-499: one entry per box behind the inference router, for the
+            statusline's per-server rows: the router's own view (health, the
+            jobs running there and who they are for, held requests) plus that
+            box's counters in the `/api/extra/perf` + `/api/extra/prefill`
+            shapes the single-server line already reads.
+
+            The counters come from the router's 3 s poll of each box, not from
+            here: the R9700 sits behind a loopback proxy on CT100 that derpr's
+            container cannot reach. `prefill` is Strata's live block only: the
+            kcpp-progress sidecar (`KOBOLD_PROGRESS_URL`) names no router box, so
+            a kcpp row shows last-completed counters, not a live ingest bar.
+            `available: false` whenever the local URL
+            is not a router (the statusline switch pinned one box) — the portal
+            then shows its single row from `/api/extra/perf`."""
+            try:
+                r = await self._http.get(f"{local_base_url()}/router/status", timeout=_PERF_TIMEOUT_S)
+                body = r.json() if r.status_code == 200 and r.content else None
+            except Exception as e:
+                # Generic reason only: the exception text can carry the upstream URL.
+                logger.debug(f"router status fetch failed: {e}")
+                return JSONResponse(content={"available": False, "reason": "unreachable"})
+            if not isinstance(body, dict) or not isinstance(body.get("backends"), list):
+                return JSONResponse(content={"available": False, "reason": "not_a_router"})
+            # A router from before DP-499 reports no jobs or metrics: its rows
+            # would all read "no metrics", worse than the single line it replaces.
+            if not any(isinstance(b, dict) and "jobs" in b for b in body["backends"]):
+                return JSONResponse(content={"available": False, "reason": "router_too_old"})
+            try:
+                return JSONResponse(content=_servers_from_router_status(body))
+            except (TypeError, ValueError, AttributeError) as e:
+                # A malformed sample (a counter as a non-numeric string) degrades
+                # like its sibling routes do, rather than 500ing every poll.
+                logger.warning(f"router status could not be projected: {e}")
+                return JSONResponse(content={"available": False, "reason": "unreadable"})
 
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")

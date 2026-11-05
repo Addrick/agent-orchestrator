@@ -249,10 +249,10 @@ class Harness:
         for engine in self.engines.values():
             engine.server.close()
 
-    async def open(self, payload=b"", method="POST", path="/v1/chat/completions"):
+    async def open(self, payload=b"", method="POST", path="/v1/chat/completions", headers=b""):
         reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
         writer.write(f"{method} {path} HTTP/1.1\r\nHost: 10.0.0.70:5001\r\nConnection: keep-alive\r\n"
-                     f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+                     f"Content-Length: {len(payload)}\r\n".encode() + headers + b"\r\n" + payload)
         await writer.drain()
         return reader, writer
 
@@ -562,7 +562,8 @@ def test_strata_is_recognised_by_its_metrics_engine_block():
     router = ir.Router([box("r9700")], MOVE, QUIET)
     router.note_poll(router.primary, {"data": [{"id": MODEL}]}, {"engine": {"version": "0.1.52"}, "live": {}})
     assert router.primary.strata is True
-    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None)  # kcpp: no /metrics JSON
+    # A swap to kcpp (a new model id, no /metrics JSON) flips at once; a missed poll does not.
+    router.note_poll(router.primary, {"data": [{"id": "koboldcpp/" + MODEL}]}, None)
     assert router.primary.strata is False
 
 
@@ -731,7 +732,7 @@ async def test_a_chat_that_falls_back_onto_a_background_box_preempts_its_job():
         client = _CapturingWriter()
         task = asyncio.ensure_future(ir.Server(h.router)._forward(
             [dead, h.router.primary], [], ir.rewrite_head([b"POST /v1/chat/completions HTTP/1.1"], 0),
-            True, b"/v1/chat/completions", asyncio.StreamReader(), client))
+            ir.Job("derpr", "chat", 0.0), b"/v1/chat/completions", asyncio.StreamReader(), client))
         bg_raw = await asyncio.wait_for(bg_reader.read(), 5)
         assert bg_raw.startswith(b"HTTP/1.1 503")
         await asyncio.wait_for(task, 5)
@@ -815,3 +816,133 @@ async def test_the_chat_port_never_runs_background_rules():
     async with BackgroundHarness({"r9700": engine}) as h:
         await h.fetch(HS_JOB)
     assert "strata_checkpoint" not in json.loads(engine.requests[0][1])
+
+
+# --- who each job is for (DP-499 statusline) ---------------------------------------
+
+
+@pytest.mark.parametrize("headers,background,expected", [
+    ([b"X-Inference-Requester: stagr"], False, "stagr"),
+    ([b"x-inference-requester:  codr "], True, "codr"),  # a named client wins on either port
+    ([], True, "hindsight"),
+    ([], False, "10.0.0.5"),
+    ([b"X-Inference-Requester: <script>" + b"a" * 100], False, "script" + "a" * 42),  # cleaned and capped
+    ([b"X-Inference-Requester: <>"], False, "10.0.0.5"),  # nothing left: fall back
+])
+def test_requester_of(headers, background, expected):
+    lines = [b"POST /v1/chat/completions HTTP/1.1", b"Host: x", *headers]
+    assert ir.requester_of(lines, "10.0.0.5", background) == expected
+
+
+async def _status(h):
+    raw = await h.fetch(method="GET", path="/router/status")
+    return json.loads(raw.split(b"\r\n\r\n", 1)[1])
+
+
+@pytest.mark.asyncio
+async def test_status_names_the_running_and_the_held_request_then_forgets_both():
+    engine = FakeEngine()
+    engine.hold = True
+    async with Harness({"r9700": engine}) as h:
+        _, first = await h.open(body("a"), headers=b"X-Inference-Requester: stagr\r\n")
+        await _until(lambda: h.router.primary.jobs)
+        _, second = await h.open(body("b"), headers=b"X-Inference-Requester: codr\r\n")
+        await _until(lambda: h.router.held)
+        status = await _status(h)
+        [running] = status["backends"][0]["jobs"]
+        assert (running["requester"], running["kind"]) == ("stagr", "chat")
+        assert [j["requester"] for j in status["held"]] == ["codr"]
+        first.close()
+        engine.release.set()
+        await _until(lambda: h.router.primary.jobs and h.router.primary.jobs[0].requester == "codr")
+        assert h.router.held == []
+        second.close()
+        await _until(lambda: not h.router.primary.jobs)
+        assert (await _status(h))["backends"][0]["jobs"] == []
+
+
+@pytest.mark.asyncio
+async def test_status_names_a_background_job_hindsight_while_it_runs():
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        h.router.holdoff_s = 0
+        _, bg_writer = await h.open_bg(HS_JOB)
+        await asyncio.wait_for(engine.started.wait(), 5)
+        [job] = (await _status(h))["backends"][0]["jobs"]
+        assert (job["requester"], job["kind"]) == ("hindsight", "background")
+        engine.release.set()
+        await _until(lambda: not h.router.primary.jobs)
+        bg_writer.close()
+
+
+def test_poll_keeps_strata_live_and_last_run_but_not_its_history():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    metrics = {"engine": {}, "time": 5.0, "live": {"state": "idle"}, "totals": {"requests": 3},
+               "requests": [{"output_tokens": 9}, {"output_tokens": 1}], "other": "x"}
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, metrics)
+    assert router.primary.metrics == {"time": 5.0, "live": {"state": "idle"}, "totals": {"requests": 3},
+                                      "requests": [{"output_tokens": 9}]}
+    assert router.primary.perf is None
+
+
+def test_poll_keeps_kcpp_perf_and_drops_it_when_the_box_goes_down():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None, perf={"idle": 1, "total_gens": 2})
+    assert router.primary.perf == {"idle": 1, "total_gens": 2} and router.primary.metrics is None
+    for _ in range(ir.POLL_FAILURES_DOWN):
+        router.note_poll(router.primary, None, None)
+    assert router.primary.perf is None
+
+
+STRATA_METRICS = {"engine": {}, "time": 5.0, "live": {"state": "idle"}, "totals": {"requests": 3}}
+
+
+def test_one_missed_metrics_poll_keeps_a_strata_box_strata_and_its_sample():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    models = {"data": [{"id": MODEL}]}
+    router.note_poll(router.primary, models, STRATA_METRICS)
+    for _ in range(ir.POLL_FAILURES_DOWN - 1):
+        router.note_poll(router.primary, models, None)
+        assert router.primary.strata is True and router.primary.metrics is not None
+    router.note_poll(router.primary, models, None)
+    assert router.primary.strata is False and router.primary.metrics is None
+
+
+def test_a_kcpp_box_generating_for_someone_else_is_busy():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None, perf={"idle": 0})
+    assert router.primary.external_busy is True
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None, perf={"idle": 1})
+    assert router.primary.external_busy is False
+
+
+@pytest.mark.parametrize("polls,state", [
+    ([{"data": [{"id": MODEL}]}], "up"),
+    ([{"data": [{"id": MODEL, "status": {"value": "unloaded"}}]}], "unloaded"),  # lazy: answers, not loaded
+    ([None] * ir.POLL_FAILURES_DOWN, "down"),
+    ([], "down"),  # never answered a poll
+])
+def test_status_tells_a_dead_box_from_an_unloaded_one(polls, state):
+    router = ir.Router([box("r9700", healthy=False)], MOVE, QUIET)
+    for models in polls:
+        router.note_poll(router.primary, models, None, now=NOW)
+    assert router.status()["backends"][0]["state"] == state
+
+
+def test_status_reports_how_old_each_boxs_sample_is():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    assert router.status()["backends"][0]["sample_age_s"] is None
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, STRATA_METRICS, now=ir.time.monotonic() - 4)
+    assert router.status()["backends"][0]["sample_age_s"] >= 4
+
+
+@pytest.mark.parametrize("name", ["stagr", "café bot", "a" * 100, "x<y>z", " codr ", "ü"])
+def test_the_engines_requester_header_survives_the_routers_cleaning_unchanged(name):
+    """The router is a standalone file and cannot import the engine's helper, so the two
+    sanitizers are written twice; this keeps the engine's output inside what the router keeps."""
+    from src.engine.providers.local import requester_header
+    sent = requester_header(name)
+    assert len(sent) <= ir.MAX_REQUESTER_CHARS
+    if sent:
+        assert ir.requester_of([b"POST / HTTP/1.1", b"X-Inference-Requester: " + sent.encode()], "ip", False) == sent

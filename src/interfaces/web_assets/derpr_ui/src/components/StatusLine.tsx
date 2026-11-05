@@ -6,7 +6,10 @@
  * is the only remote source, and what it cannot tell us).
  */
 import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import type { InferenceJob, InferenceServer, KoboldPerf, KoboldPrefill } from '../types/contracts'
 import {
+  serversBusy,
   useKoboldPerf,
   stopReasonLabel,
   fmtDur,
@@ -31,13 +34,45 @@ function useNow(active: boolean, ms: number): number {
 }
 
 export function StatusLine() {
-  const { perf, prefill, stale, sampledAt, refresh } = useKoboldPerf()
+  const { perf, prefill, stale, sampledAt, servers, refresh } = useKoboldPerf()
   const backendSwitch = <LocalBackendSwitch onSwitched={refresh} />
   const busy = !!perf && perf.idle === 0
-  const tick = useNow(!!perf, busy ? 250 : 5000)
+  const tick = useNow(!!perf || !!servers, busy || (!!servers && serversBusy(servers)) ? 250 : 5000)
   // Before the first tick lands, anchor on the sample itself so nothing renders
   // a 1970 timestamp for a frame.
   const now = tick || sampledAt
+
+  if (servers) {
+    // DP-499: one row per box that is up. The primary keeps its row while down
+    // so an outage stays visible; any box with work on it keeps one too.
+    const rows = (servers.servers ?? []).filter((b) => b.healthy || b.primary || b.jobs.length > 0)
+    const held = servers.held ?? []
+    const late = Math.max(0, (now - sampledAt) / 1000)
+    return (
+      <div className="statusline-stack">
+        {rows.map((b, i) => (
+          <ServerRow
+            key={b.name}
+            server={b}
+            lead={i === 0 ? backendSwitch : null}
+            tail={
+              i === 0 && held.length > 0 ? (
+                <span
+                  className="sl-chip sl-busy"
+                  title="chat requests the router is holding for a free box, oldest first"
+                >
+                  waiting: <b>{held.map((j) => `${j.requester} ${fmtDur(j.elapsed_s + late)}`).join(', ')}</b>
+                </span>
+              ) : null
+            }
+            sampledAt={sampledAt}
+            stale={stale}
+            now={now}
+          />
+        ))}
+      </div>
+    )
+  }
 
   if (!perf) {
     return (
@@ -50,6 +85,107 @@ export function StatusLine() {
     )
   }
 
+  return (
+    <div className="statusline" role="status">
+      {backendSwitch}
+      <PerfChips perf={perf} prefill={prefill} stale={stale} sampledAt={sampledAt} now={now} />
+    </div>
+  )
+}
+
+/** A row's sample older than this (about three missed router polls) is shown as stale. */
+const SAMPLE_STALE_S = 10
+
+/** Label for who a job is for. A background job on the router is Hindsight's
+ *  unless its client named itself. */
+function jobLabel(j: InferenceJob): string {
+  return j.kind === 'background' ? `${j.requester} job` : j.requester
+}
+
+/** DP-499: one box behind the router — its name, who its work is for, then the
+ *  same chips as the single-server line, read from that box. */
+function ServerRow({
+  server,
+  lead,
+  tail,
+  sampledAt,
+  stale,
+  now,
+}: {
+  server: InferenceServer
+  lead: ReactNode
+  tail: ReactNode
+  sampledAt: number
+  stale: boolean
+  now: number
+}) {
+  const [job, ...more] = server.jobs
+  const late = Math.max(0, (now - sampledAt) / 1000)
+  // The counters are the router's sample, taken `sample_age_s` before it
+  // answered: anchor their clocks there, so a row's elapsed agrees with its job
+  // chip. Older than a few missed polls (3 s each) is not live any more.
+  const age = server.sample_age_s ?? 0
+  const perfAt = sampledAt - age * 1000
+  const perfStale = stale || age > SAMPLE_STALE_S
+  return (
+    <div className="statusline" role="status">
+      {lead}
+      <span
+        className={`sl-chip sl-server ${server.primary ? 'sl-primary' : ''}`}
+        title={`${server.name}${server.primary ? ' (primary)' : ''}${server.model ? ` · ${server.model}` : ''}`}
+      >
+        <b>{server.name}</b>
+      </span>
+      {server.state === 'unloaded' ? (
+        <span className="sl-chip sl-muted" title="the server answers, but its model is not loaded; the router will not load it">
+          <span className="dot" /> model not loaded
+        </span>
+      ) : !server.healthy ? (
+        <span className="sl-chip sl-stale">
+          <span className="dot" /> down
+        </span>
+      ) : (
+        <>
+          {job ? (
+            <span
+              className="sl-chip sl-busy"
+              title={`${job.kind === 'background' ? 'background job' : 'chat request'} for ${job.requester}, running ${fmtDur(job.elapsed_s + late)}`}
+            >
+              for <b>{jobLabel(job)}</b>
+              {more.length > 0 && <span className="sl-sub"> +{more.length}</span>}
+            </span>
+          ) : server.external_busy ? (
+            <span className="sl-chip sl-busy" title="busy with work that did not come through the router">
+              for <b>external</b>
+            </span>
+          ) : null}
+          {server.perf ? (
+            <PerfChips perf={server.perf} prefill={server.prefill} stale={perfStale} sampledAt={perfAt} now={now} />
+          ) : (
+            <span className="sl-chip sl-muted">no metrics from this server</span>
+          )}
+        </>
+      )}
+      {tail}
+    </div>
+  )
+}
+
+/** The single-server chips: state, ingest, gen, stop, gens/uptime. */
+function PerfChips({
+  perf,
+  prefill,
+  stale,
+  sampledAt,
+  now,
+}: {
+  perf: KoboldPerf
+  prefill: KoboldPrefill | null
+  stale: boolean
+  sampledAt: number
+  now: number
+}) {
+  const busy = perf.idle === 0
   // `idletime` is sampled server-side; extrapolate with the wall clock so the
   // reading does not visibly freeze between polls.
   const since = perf.idletime + Math.max(0, (now - sampledAt) / 1000)
@@ -77,8 +213,7 @@ export function StatusLine() {
   const decoding = !!live && live.phase === 'generate' && ((live.generate_total ?? 0) > 0 || (live.generated ?? 0) > 0)
 
   return (
-    <div className="statusline" role="status">
-      {backendSwitch}
+    <>
       <span className={`sl-chip ${busy ? 'sl-busy' : ''} ${stale ? 'sl-stale' : ''}`}>
         <span className="dot" />
         {stale
@@ -201,6 +336,6 @@ export function StatusLine() {
       <span className="sl-chip sl-muted" title="backend uptime and completed generations">
         {perf.total_gens} gens · up {fmtAgo(perf.uptime).replace(' ago', '')}
       </span>
-    </div>
+    </>
   )
 }

@@ -143,6 +143,12 @@ button { font-family: inherit; cursor: pointer; }
 }
 .sl-switch:hover { border-color: var(--line-2); color: var(--ink-dim); }
 .sl-stale .dot { background: var(--write); box-shadow: 0 0 7px var(--write); animation: none; }
+/* DP-499: behind the inference router, one row per box. Rows share the band's
+   background; only the last keeps the border, so the stack reads as one bar. */
+.statusline-stack { display: flex; flex-direction: column; flex: none; }
+.statusline-stack > .statusline:not(:last-child) { border-bottom-color: transparent; height: 22px; }
+.sl-server { min-width: 44px; text-transform: lowercase; }
+.sl-server.sl-primary b { color: var(--ink); }
 @keyframes sl-pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
 @media (prefers-reduced-motion: reduce) { .sl-busy .dot { animation: none } }
 

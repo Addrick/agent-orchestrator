@@ -13,8 +13,8 @@
    answers "what is the box doing", not "what is my tab doing".
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getKoboldPerf, getKoboldPrefill } from '../api/client'
-import type { KoboldPerf, KoboldPrefill } from '../types/contracts'
+import { getInferenceServers, getKoboldPerf, getKoboldPrefill } from '../api/client'
+import type { InferenceServers, KoboldPerf, KoboldPrefill } from '../types/contracts'
 
 /** Poll cadence. Busy is polled hard enough for the elapsed clock to read as
  *  live; idle is slow because nothing changes until a gen starts, and this
@@ -27,6 +27,11 @@ const IDLE_MS = 5000
  *  that first sets `KOBOLD_PROGRESS_URL` never shows the live bar again until
  *  it is reloaded. Re-probe rarely instead of never. */
 const NO_SIDECAR_RECHECK_MS = 60_000
+/** DP-499: how long a "no router here" answer (`not_a_router`, `router_too_old`)
+ *  suppresses the per-server poll. Same reasoning as the sidecar snooze: the
+ *  answer changes only on a backend switch (which resets it) or a router
+ *  redeploy, and a pinned box would otherwise get a 404 probe every tick. */
+const NO_ROUTER_RECHECK_MS = 60_000
 
 export interface PerfSnapshot {
   /** Last successful sample, or null before the first one lands. */
@@ -38,12 +43,21 @@ export interface PerfSnapshot {
   /** True once a poll has failed since the last success — the numbers shown
    *  are the last good ones and may be arbitrarily old. */
   stale: boolean
-  /** Wall-clock ms at which `perf` was received. Needed because `idletime` is
-   *  measured at sample time and keeps running afterwards. */
+  /** Wall-clock ms at which `perf` (or `servers`) was received. Needed because
+   *  `idletime` is measured at sample time and keeps running afterwards. */
   sampledAt: number
+  /** DP-499: the inference router's boxes, when derpr talks to a router. While
+   *  set, `perf`/`prefill` are not polled (each row carries its own) and the
+   *  statusline renders one row per box; null means "single-server line". */
+  servers: InferenceServers | null
 }
 
-const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0 }
+const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0, servers: null }
+
+/** Whether any row has work in flight — drives the fast poll cadence. */
+export function serversBusy(s: InferenceServers): boolean {
+  return (s.servers ?? []).some((b) => b.jobs.length > 0 || b.external_busy || b.perf?.idle === 0)
+}
 
 export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
   const [snap, setSnap] = useState<PerfSnapshot>(EMPTY)
@@ -60,6 +74,11 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
   // sidecar here" every second is pure waste, but see NO_SIDECAR_RECHECK_MS for
   // why the answer is a snooze rather than a latch.
   const noSidecarUntilRef = useRef(0)
+  // DP-499: deadline for the per-server poll (see NO_ROUTER_RECHECK_MS), and
+  // whether the last real answer was "router here". While it is, a failed poll
+  // keeps the rows (marked stale) instead of dropping to the single line.
+  const noRouterUntilRef = useRef(0)
+  const routerModeRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -67,6 +86,41 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
     const ctl = new AbortController()
 
     const tick = async () => {
+      // DP-499: behind the router, every box's counters arrive in one call and
+      // the single-server polls below would only repeat the primary's.
+      if (Date.now() >= noRouterUntilRef.current) {
+        let servers: InferenceServers | null = null
+        let failed = false
+        try {
+          const s = await getInferenceServers(ctl.signal)
+          if (s.available && (s.servers?.length ?? 0) > 0) {
+            servers = s
+          } else if (s.reason === 'not_a_router' || s.reason === 'router_too_old') {
+            noRouterUntilRef.current = Date.now() + NO_ROUTER_RECHECK_MS
+            routerModeRef.current = false
+          } else {
+            failed = true // the router did not answer, or answered garbage
+          }
+        } catch {
+          failed = true
+        }
+        if (cancelled) return
+        if (servers) {
+          routerModeRef.current = true
+          busyRef.current = serversBusy(servers)
+          setSnap({ perf: null, prefill: null, stale: false, sampledAt: Date.now(), servers })
+          timer = setTimeout(tick, busyRef.current ? BUSY_MS : IDLE_MS)
+          return
+        }
+        if (failed && routerModeRef.current) {
+          // Keep the last rows: a dropped poll is not evidence the router went
+          // away, and the primary-only single line would misreport the others.
+          busyRef.current = false
+          setSnap((s) => (s.stale ? s : { ...s, stale: true }))
+          timer = setTimeout(tick, IDLE_MS)
+          return
+        }
+      }
       try {
         const perf = await getKoboldPerf(ctl.signal)
         if (cancelled) return
@@ -89,13 +143,13 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
           }
         }
         if (cancelled) return
-        setSnap({ perf, prefill, stale: false, sampledAt: Date.now() })
+        setSnap({ perf, prefill, stale: false, sampledAt: Date.now(), servers: null })
       } catch {
         if (cancelled) return
         // Keep the last good sample — a dropped poll is not evidence that the
         // backend's counters reset, only that we could not read them.
         busyRef.current = false
-        setSnap((s) => (s.stale ? s : { ...s, stale: true }))
+        setSnap((s) => (s.stale && !s.servers ? s : { ...s, stale: true, servers: null }))
       }
       if (cancelled) return
       timer = setTimeout(tick, busyRef.current ? BUSY_MS : IDLE_MS)
@@ -111,6 +165,8 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
 
   const refresh = useCallback(() => {
     noSidecarUntilRef.current = 0 // the new box may have a sidecar the old one lacked
+    noRouterUntilRef.current = 0 // ...or be the router again
+    routerModeRef.current = false
     setSnap(EMPTY)
     setEpoch((e) => e + 1)
   }, [])
