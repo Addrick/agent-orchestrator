@@ -52,6 +52,39 @@ BACKGROUND_SETTLE_S = 2.0
 # Sent with every background request: Strata keeps no conversation checkpoint for the call, so
 # a burst of Hindsight jobs cannot evict a parked chat (measured 2026-11-04, DP-405B).
 BACKGROUND_FIELDS = {"strata_checkpoint": False}
+# Who a request is for, for the portal statusline (DP-499). A client names itself in this header
+# (derpr sends the persona, codr's opencode config sends "codr"); otherwise the background
+# listener's work is Hindsight's and anything else is shown as the caller's address.
+REQUESTER_HEADER = b"x-inference-requester"
+BACKGROUND_REQUESTER = "hindsight"
+MAX_REQUESTER_CHARS = 48
+# The parts of a box's /metrics the status carries: the live run and the last completed one.
+# Everything else (per-request history) stays on the box.
+STATUS_METRICS_KEYS = ("time", "live", "totals")
+
+
+@dataclass
+class Job:
+    """One request occupying, or waiting for, a box. Never holds message content."""
+    requester: str
+    kind: str  # "chat" or "background"
+    started: float
+    prompt_chars: int = 0
+
+    def describe(self, now: float) -> dict[str, Any]:
+        return {"requester": self.requester, "kind": self.kind, "elapsed_s": round(now - self.started, 1),
+                "prompt_chars": self.prompt_chars}
+
+
+def requester_of(head_lines: Sequence[bytes], peer: Optional[str], background: bool) -> str:
+    """The name the statusline shows for this request: its header, else Hindsight or the caller's IP."""
+    raw = _headers(head_lines[1:]).get(REQUESTER_HEADER, b"").decode("ascii", "replace")
+    name = "".join(c for c in raw if c.isalnum() or c in "-_.:@ ").strip()[:MAX_REQUESTER_CHARS]
+    if name:
+        return name
+    if background:
+        return BACKGROUND_REQUESTER
+    return peer or "unknown"
 
 
 @dataclass
@@ -70,6 +103,9 @@ class Backend:
     strata: bool = False  # cancels on disconnect and honours strata_checkpoint: may take background work
     background: Optional[asyncio.Event] = None  # set while a background job runs here; set() preempts it
     background_ended: float = float("-inf")
+    jobs: list[Job] = field(default_factory=list)  # chat and background requests running here now
+    metrics: Optional[dict[str, Any]] = None  # last /metrics sample (Strata), trimmed to STATUS_METRICS_KEYS
+    perf: Optional[dict[str, Any]] = None  # last /api/extra/perf sample, for a box with no Strata metrics
 
     @property
     def idle(self) -> bool:
@@ -182,6 +218,7 @@ class Router:
         self.expected_model: Optional[str] = None  # the primary's, kept while it is down
         self.changed = asyncio.Event()  # replaced on each wake; waiters resume in arrival order
         self.waiting = 0
+        self.held: list[Job] = []  # chat requests waiting in _hold, oldest first (DP-499 statusline)
 
     def admit_background(self, now: float) -> Optional[Backend]:
         """A box a background job may start on now, or None: then it is refused, never held.
@@ -222,7 +259,7 @@ class Router:
 
     def note_poll(
         self, backend: Backend, models: Optional[dict[str, Any]], metrics: Optional[dict[str, Any]],
-        now: Optional[float] = None,
+        now: Optional[float] = None, perf: Optional[dict[str, Any]] = None,
     ) -> None:
         now = time.monotonic() if now is None else now
         entry = _first_model(models)
@@ -232,6 +269,7 @@ class Router:
                 backend.healthy = False
                 backend.external_busy = False
                 backend.strata = False
+                backend.metrics = backend.perf = None
             return
         backend.poll_failures = 0
         # A lazy or unloaded server must refuse rather than load on a router request.
@@ -243,6 +281,13 @@ class Router:
         # Strata's /metrics is JSON with an "engine" block; kcpp has none. Only Strata is known to
         # cancel on disconnect (verified on CT102 2026-11-04) and to honour strata_checkpoint.
         backend.strata = isinstance((metrics or {}).get("engine"), dict)
+        backend.metrics = ({k: metrics[k] for k in STATUS_METRICS_KEYS if k in metrics}
+                           if backend.strata and metrics else None)
+        if backend.metrics is not None:
+            last = (metrics or {}).get("requests")
+            if isinstance(last, list) and last:
+                backend.metrics["requests"] = last[:1]  # the last completed run, for the stop/gen chips
+        backend.perf = perf if isinstance(perf, dict) and "idle" in perf else None
         live = (metrics or {}).get("live") or {}
         ours = (backend.inflight > 0 or backend.background is not None
                 or now - backend.background_ended < BACKGROUND_SETTLE_S)
@@ -255,11 +300,15 @@ class Router:
             "waiting": self.waiting,
             "background": {"boxes": sorted(self.background_names), "holdoff_s": self.holdoff_s,
                            **self.background_counts},
+            "held": [job.describe(now) for job in self.held],
             "backends": [{
                 "name": b.name, "url": f"http://{b.host}:{b.port}", "healthy": b.healthy, "model": b.model,
                 "n_ctx": b.n_ctx, "inflight": b.inflight, "external_busy": b.external_busy,
                 "strata": b.strata, "background_running": b.background is not None,
                 "idle_s": None if b.last_active == float("-inf") else round(now - b.last_active, 1),
+                "primary": b is self.primary,
+                "jobs": [job.describe(now) for job in b.jobs],
+                "metrics": b.metrics, "perf": b.perf,
             } for b in self.backends],
         }
 
@@ -527,7 +576,9 @@ class Server:
         try:
             request = await read_request(reader)
             if request:
-                await self._serve(request[0], request[1], reader, writer)
+                peer = writer.get_extra_info("peername")
+                requester = requester_of(request[0], peer[0] if isinstance(peer, tuple) else None, self.background)
+                await self._serve(request[0], request[1], reader, writer, requester)
         except (ValueError, asyncio.IncompleteReadError):
             _respond(writer, b"400 Bad Request", {"error": "unreadable request"})
         except ConnectionError:
@@ -537,6 +588,7 @@ class Server:
 
     async def _serve(
         self, lines: list[bytes], body: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        requester: str = "unknown",
     ) -> None:
         method, target = (lines[0].split() + [b"", b""])[:2]
         if target == b"/router/status":
@@ -544,10 +596,11 @@ class Server:
             return
         generation = _is_generation(method, target)
         if generation and self.background:
-            await self._background(lines, body, reader, writer)
+            await self._background(lines, body, reader, writer, requester)
             return
-        if generation:
-            held = await self._hold(body, reader)
+        job = Job(requester, "chat", time.monotonic(), len(body)) if generation else None
+        if job is not None:
+            held = await self._hold(body, reader, job)
             if held is None:  # the client left while waiting; no box ever saw it
                 return
             order, chain = held
@@ -557,14 +610,16 @@ class Server:
         if not order:
             _respond(writer, b"503 Service Unavailable", {"error": "no inference server is up"})
             return
-        await self._forward(order, chain, rewrite_head(lines, len(body)) + body, generation, target, reader, writer)
+        await self._forward(order, chain, rewrite_head(lines, len(body)) + body, job, target, reader, writer)
 
     async def _hold(
-        self, body: bytes, reader: asyncio.StreamReader,
+        self, body: bytes, reader: asyncio.StreamReader, job: Optional[Job] = None,
     ) -> Optional[tuple[list[Backend], list[tuple[str, int]]]]:
         """Wait here until the chosen box is free. Sent on, a request is stuck in that box's queue."""
         gone = asyncio.ensure_future(_client_closed(reader))
         self.router.waiting += 1
+        if job is not None:
+            self.router.held.append(job)
         try:
             while True:
                 order, chain = self.router.route(body, time.monotonic())
@@ -579,10 +634,13 @@ class Server:
                     return None
         finally:
             self.router.waiting -= 1
+            if job is not None:
+                self.router.held.remove(job)
             gone.cancel()
 
     async def _background(
         self, lines: list[bytes], body: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        requester: str = BACKGROUND_REQUESTER,
     ) -> None:
         """Run a Hindsight job if a box is free of chat; refuse it at once otherwise.
 
@@ -598,6 +656,8 @@ class Server:
             return
         router.background_counts["admitted"] += 1
         preempt = backend.background = asyncio.Event()
+        job = Job(requester, "background", time.monotonic(), len(body))
+        backend.jobs.append(job)
         payload = background_body(body)
         request = rewrite_head(with_host(lines, upstream_host(backend)), len(payload)) + payload
         upstream_writer = None
@@ -634,27 +694,32 @@ class Server:
             if upstream_writer:
                 upstream_writer.close()  # before the chat goes in: this is what stops the generation
             backend.background = None
+            backend.jobs.remove(job)
             backend.background_ended = time.monotonic()
             router.wake()
 
     async def _forward(
-        self, order: list[Backend], chain: list[tuple[str, int]], request: bytes, generation: bool, target: bytes,
+        self, order: list[Backend], chain: list[tuple[str, int]], request: bytes, job: Optional[Job], target: bytes,
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> None:
         for backend in order:
-            sent = await self._dispatch(backend, chain, request, generation, target, reader, writer)
+            sent = await self._dispatch(backend, chain, request, job, target, reader, writer)
             if sent:
                 return
-            if generation:
+            if job is not None:
                 backend.healthy = False  # the next poll restores it
         _respond(writer, b"503 Service Unavailable", {"error": "no inference server answered"})
 
     async def _dispatch(
-        self, backend: Backend, chain: list[tuple[str, int]], request: bytes, counted: bool, target: bytes,
+        self, backend: Backend, chain: list[tuple[str, int]], request: bytes, job: Optional[Job], target: bytes,
         reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     ) -> bool:
+        """`job` is None for a request that does not occupy a box (status reads, model lists)."""
         matched = backend.matched(chain)
-        if counted:
+        counted = job is not None
+        if job is not None:
+            job.started = time.monotonic()  # from here it is running, not waiting
+            backend.jobs.append(job)
             backend.inflight += 1
             backend.last_active = time.monotonic()
             self.router.preempt(backend)  # a fallback box: _hold only cleared the first choice
@@ -683,7 +748,8 @@ class Server:
         finally:
             if upstream_writer:
                 upstream_writer.close()
-            if counted:
+            if job is not None:
+                backend.jobs.remove(job)
                 backend.inflight -= 1
                 backend.last_active = time.monotonic()
                 self.router.wake()
@@ -727,8 +793,10 @@ async def poll_forever(router: Router) -> None:
         for backend in router.backends:
             models = await _get_json(backend, "/v1/models")
             metrics = await _get_json(backend, "/metrics") if models else None
+            # kcpp has no JSON /metrics; its perf counters stand in for the statusline (DP-499).
+            perf = await _get_json(backend, "/api/extra/perf") if models and not (metrics or {}).get("engine") else None
             was = backend.healthy
-            router.note_poll(backend, models, metrics)
+            router.note_poll(backend, models, metrics, perf=perf)
             if was != backend.healthy:
                 log.info("%s is %s (%s)", backend.name, "up" if backend.healthy else "down", backend.model)
         router.wake()  # busy flags and quiet timers change without a request ending

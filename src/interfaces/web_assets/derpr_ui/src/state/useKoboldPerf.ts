@@ -13,8 +13,8 @@
    answers "what is the box doing", not "what is my tab doing".
    ============================================================ */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getKoboldPerf, getKoboldPrefill } from '../api/client'
-import type { KoboldPerf, KoboldPrefill } from '../types/contracts'
+import { getInferenceServers, getKoboldPerf, getKoboldPrefill } from '../api/client'
+import type { InferenceServers, KoboldPerf, KoboldPrefill } from '../types/contracts'
 
 /** Poll cadence. Busy is polled hard enough for the elapsed clock to read as
  *  live; idle is slow because nothing changes until a gen starts, and this
@@ -38,12 +38,21 @@ export interface PerfSnapshot {
   /** True once a poll has failed since the last success — the numbers shown
    *  are the last good ones and may be arbitrarily old. */
   stale: boolean
-  /** Wall-clock ms at which `perf` was received. Needed because `idletime` is
-   *  measured at sample time and keeps running afterwards. */
+  /** Wall-clock ms at which `perf` (or `servers`) was received. Needed because
+   *  `idletime` is measured at sample time and keeps running afterwards. */
   sampledAt: number
+  /** DP-499: the inference router's boxes, when derpr talks to a router. While
+   *  set, `perf`/`prefill` are not polled (each row carries its own) and the
+   *  statusline renders one row per box; null means "single-server line". */
+  servers: InferenceServers | null
 }
 
-const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0 }
+const EMPTY: PerfSnapshot = { perf: null, prefill: null, stale: false, sampledAt: 0, servers: null }
+
+/** Whether any row has work in flight — drives the fast poll cadence. */
+export function serversBusy(s: InferenceServers): boolean {
+  return (s.servers ?? []).some((b) => b.jobs.length > 0 || b.external_busy || b.perf?.idle === 0)
+}
 
 export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
   const [snap, setSnap] = useState<PerfSnapshot>(EMPTY)
@@ -67,6 +76,22 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
     const ctl = new AbortController()
 
     const tick = async () => {
+      // DP-499: behind the router, every box's counters arrive in one call and
+      // the single-server polls below would only repeat the primary's.
+      let servers: InferenceServers | null = null
+      try {
+        const s = await getInferenceServers(ctl.signal)
+        if (s.available && (s.servers?.length ?? 0) > 0) servers = s
+      } catch {
+        /* an old engine without the route, or a dropped poll: single line */
+      }
+      if (cancelled) return
+      if (servers) {
+        busyRef.current = serversBusy(servers)
+        setSnap({ perf: null, prefill: null, stale: false, sampledAt: Date.now(), servers })
+        timer = setTimeout(tick, busyRef.current ? BUSY_MS : IDLE_MS)
+        return
+      }
       try {
         const perf = await getKoboldPerf(ctl.signal)
         if (cancelled) return
@@ -89,13 +114,13 @@ export function useKoboldPerf(): PerfSnapshot & { refresh: () => void } {
           }
         }
         if (cancelled) return
-        setSnap({ perf, prefill, stale: false, sampledAt: Date.now() })
+        setSnap({ perf, prefill, stale: false, sampledAt: Date.now(), servers: null })
       } catch {
         if (cancelled) return
         // Keep the last good sample — a dropped poll is not evidence that the
         // backend's counters reset, only that we could not read them.
         busyRef.current = false
-        setSnap((s) => (s.stale ? s : { ...s, stale: true }))
+        setSnap((s) => (s.stale ? s : { ...s, stale: true, servers: null }))
       }
       if (cancelled) return
       timer = setTimeout(tick, busyRef.current ? BUSY_MS : IDLE_MS)

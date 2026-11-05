@@ -367,6 +367,38 @@ export interface KoboldPerf {
   idletime: number
 }
 
+/** DP-499 — GET /api/v1/inference/servers: the inference router's boxes, for
+ *  one statusline row each. `perf`/`prefill` are that box's counters in the
+ *  shapes above, from the router's own 3 s poll (null where the box reports
+ *  none). `available: false` when derpr is not talking to a router (the
+ *  backend switch pinned one box): render the single-server line instead. */
+export interface InferenceJob {
+  /** persona name, `codr`, `hindsight`, or the caller's IP */
+  requester: string
+  kind: 'chat' | 'background'
+  elapsed_s: number
+}
+
+export interface InferenceServer {
+  name: string
+  primary: boolean
+  healthy: boolean
+  model: string | null
+  /** busy with work that did not come through the router (direct use of the box) */
+  external_busy: boolean
+  jobs: InferenceJob[]
+  perf: KoboldPerf | null
+  prefill: KoboldPrefill | null
+}
+
+export interface InferenceServers {
+  available: boolean
+  reason?: string
+  /** chat requests the router is holding for a free box, oldest first */
+  held?: InferenceJob[]
+  servers?: InferenceServer[]
+}
+
 /** DP-438 — GET/PUT/DELETE /api/v1/local_backend: which server `model local`
  *  talks to. `temporary` is lost on restart; `saved` survives it; `env` and
  *  `default` are LOCAL_LLM_URL / the config default. */

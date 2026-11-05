@@ -38,6 +38,7 @@ import type {
   MemoryDocumentList,
   MemoryOperationList,
   UploadResult,
+  InferenceServers,
   KoboldPerf,
   KoboldPrefill,
   LocalBackendState,
@@ -636,6 +637,22 @@ export async function getKoboldPrefill(signal?: AbortSignal): Promise<KoboldPref
     })
     if (!r.ok) throw new Error(`/api/extra/prefill → ${r.status}`)
     return (await r.json()) as KoboldPrefill
+  } finally {
+    d.done()
+  }
+}
+
+// DP-499 — the inference router's boxes, one statusline row each. Never throws
+// on "no router" (`available: false`, a normal answer); only a failed request does.
+export async function getInferenceServers(signal?: AbortSignal): Promise<InferenceServers> {
+  const d = withDeadline(signal, POLL_TIMEOUT_MS)
+  try {
+    const r = await fetch(`${BASE}/api/v1/inference/servers`, {
+      headers: { Accept: 'application/json' },
+      signal: d.signal,
+    })
+    if (!r.ok) throw new Error(`/api/v1/inference/servers → ${r.status}`)
+    return (await r.json()) as InferenceServers
   } finally {
     d.done()
   }

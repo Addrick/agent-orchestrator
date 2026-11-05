@@ -1055,3 +1055,10 @@ async def test_a_removed_tickets_aborted_turn_is_still_recorded(fake, tmp_path):
              time={"created": 1, "completed": 2}, finish="stop", error={"name": "MessageAbortedError"})
     await agent.deploy()
     assert "**ABORTED**" in router.sent[-1][2] and "no longer in the queue" in router.sent[-1][2]
+
+
+def test_codr_names_itself_to_the_inference_router():
+    """DP-499: the router's status, and the portal's per-server rows, say a job is codr's."""
+    config = json.loads(workspace_files({**codr_agent.DEFAULTS})[".opencode/opencode.json"])
+    headers = config["provider"]["kcpp-pool"]["options"]["headers"]
+    assert headers == {"X-Inference-Requester": "codr"}

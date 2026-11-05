@@ -118,7 +118,10 @@ a POST. Then run `docker restart hindsight-kobold-proxy`.
 
 Update the router: copy the file, `docker restart inference-router`.
 
-Verify: `curl -s 10.0.0.70:5001/router/status`. Logs: `docker logs inference-router`, one line per
+Verify: `curl -s 10.0.0.70:5001/router/status`. Since DP-499 it also lists each box's running `jobs` and the
+`held` queue, each with its `requester` (the `X-Inference-Requester` header, else `hindsight` on the background port,
+else the caller's IP), and each box's last `/metrics` (Strata) or `/api/extra/perf` (kcpp) sample, which the portal's
+per-server statusline rows read. Logs: `docker logs inference-router`, one line per
 request, box and match sizes only; no message content is logged or stored.
 
 **Rollback:** `docker rm -f inference-router r9700-proxy`, then the `r9700-proxy` line above with

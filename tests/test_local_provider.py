@@ -88,6 +88,20 @@ def test_stop_sequences_and_seed_pass_through():
     assert api["stop"] == ["\nUser:"] and api["seed"] == 7
 
 
+@pytest.mark.parametrize("name,header", [
+    ("stagr", "stagr"),
+    ("café bot", "caf bot"),  # httpx refuses non-latin-1 header values; the router keeps ASCII only
+])
+def test_persona_rides_as_the_routers_requester_header(name, header):
+    """DP-499: the inference router names each job's persona in its status."""
+    api = build_local_params({"persona_name": name}, _history(), GenerationParams())
+    assert api["extra_headers"] == {"X-Inference-Requester": header}
+
+
+def test_no_persona_sends_no_requester_header():
+    assert "extra_headers" not in build_local_params({}, _history(), GenerationParams())
+
+
 def test_tools_sent_as_structured_tools_not_prompt_text():
     api = build_local_params({}, _history(), GenerationParams(), tools=[TOOL])
     assert api["tools"] == [TOOL] and api["tool_choice"] == "auto"

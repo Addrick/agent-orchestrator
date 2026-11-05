@@ -42,6 +42,19 @@ if TYPE_CHECKING:
 KOBOLD_SAMPLER_EXTRAS = ("rep_pen", "rep_pen_range", "rep_pen_slope", "min_p", "typical", "tfs")
 
 
+#: Names the persona a request is for, so the inference router's status (and the
+#: portal statusline's per-server rows) can say who each job belongs to (DP-499).
+REQUESTER_HEADER = "X-Inference-Requester"
+
+
+def requester_header(persona_name: Any) -> str:
+    """The persona name as a header value: the characters the router keeps, so
+    a name with spaces or non-ASCII never makes httpx refuse the request."""
+    if not isinstance(persona_name, str):
+        return ""
+    return "".join(c for c in persona_name if c.isascii() and (c.isalnum() or c in "-_.:@ ")).strip()[:48]
+
+
 def local_base_url() -> str:
     """The local model server's base URL, without a trailing ``/v1``. Follows
     the portal's runtime switch (DP-438) before ``LOCAL_LLM_URL``."""
@@ -192,6 +205,10 @@ def build_local_params(
     extra_body["max_context_length"] = min(ctx, global_config.DEFAULT_MAX_CONTEXT_TOKENS)
     extra_body.update(thinking_controls(persona_config))
     api_params["extra_body"] = extra_body
+
+    requester = requester_header(persona_config.get("persona_name"))
+    if requester:
+        api_params["extra_headers"] = {REQUESTER_HEADER: requester}
 
     if params.stop_sequences:
         api_params["stop"] = list(params.stop_sequences)
