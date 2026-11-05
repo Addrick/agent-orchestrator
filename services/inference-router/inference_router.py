@@ -98,6 +98,9 @@ class Backend:
     inflight: int = 0
     external_busy: bool = False  # the server reports work this router did not send
     poll_failures: int = 0
+    metrics_failures: int = 0  # consecutive polls where a Strata box answered /v1/models but not /metrics
+    model_status: Optional[str] = None  # the server's own load state ("loaded", "unloaded", ...), None if unknown
+    polled_at: float = float("-inf")  # when metrics/perf were last sampled, for the statusline's age
     last_active: float = float("-inf")  # chat only: background jobs hold no conversation
     seen: "OrderedDict[str, int]" = field(default_factory=OrderedDict)  # prefix hash -> prefix chars
     strata: bool = False  # cancels on disconnect and honours strata_checkpoint: may take background work
@@ -273,11 +276,24 @@ class Router:
             return
         backend.poll_failures = 0
         # A lazy or unloaded server must refuse rather than load on a router request.
-        backend.healthy = (entry.get("status") or {}).get("value") in (None, "loaded")
+        same_model = backend.model == entry.get("id")
+        backend.model_status = (entry.get("status") or {}).get("value")
+        backend.healthy = backend.model_status in (None, "loaded")
         backend.model = entry.get("id")
         backend.n_ctx = (entry.get("meta") or {}).get("n_ctx")
         if backend is self.primary and backend.healthy:
             self.expected_model = backend.model
+        ours = (backend.inflight > 0 or backend.background is not None
+                or now - backend.background_ended < BACKGROUND_SETTLE_S)
+        if metrics is None and backend.strata and same_model:
+            # A busy Strata can miss one /metrics poll, as it can miss /v1/models: keep the last
+            # sample (and the Strata verdict) rather than flipping on one timeout. A new model id
+            # is a swap (to kcpp, say), which flips at once.
+            backend.metrics_failures += 1
+            if backend.metrics_failures < POLL_FAILURES_DOWN:
+                return
+        backend.metrics_failures = 0
+        backend.polled_at = now
         # Strata's /metrics is JSON with an "engine" block; kcpp has none. Only Strata is known to
         # cancel on disconnect (verified on CT102 2026-11-04) and to honour strata_checkpoint.
         backend.strata = isinstance((metrics or {}).get("engine"), dict)
@@ -287,11 +303,12 @@ class Router:
             last = (metrics or {}).get("requests")
             if isinstance(last, list) and last:
                 backend.metrics["requests"] = last[:1]  # the last completed run, for the stop/gen chips
-        backend.perf = perf if isinstance(perf, dict) and "idle" in perf else None
+        backend.perf = perf if not backend.strata and isinstance(perf, dict) and "idle" in perf else None
         live = (metrics or {}).get("live") or {}
-        ours = (backend.inflight > 0 or backend.background is not None
-                or now - backend.background_ended < BACKGROUND_SETTLE_S)
-        backend.external_busy = not ours and live.get("state", "idle") not in ("idle", "unloaded")
+        # Strata reports its run state; kcpp has no /metrics, but its perf says idle 0 while generating.
+        reported_busy = (live.get("state", "idle") not in ("idle", "unloaded")
+                         or (backend.perf is not None and backend.perf.get("idle") == 0))
+        backend.external_busy = not ours and reported_busy
 
     def status(self) -> dict[str, Any]:
         now = time.monotonic()
@@ -307,6 +324,11 @@ class Router:
                 "strata": b.strata, "background_running": b.background is not None,
                 "idle_s": None if b.last_active == float("-inf") else round(now - b.last_active, 1),
                 "primary": b is self.primary,
+                # "down": cannot answer. "unloaded": answers, but its model is not loaded (lazy).
+                "state": "up" if b.healthy else (
+                    "unloaded" if b.poll_failures < POLL_FAILURES_DOWN and b.model_status not in (None, "loaded")
+                    else "down"),
+                "sample_age_s": None if b.polled_at == float("-inf") else round(now - b.polled_at, 1),
                 "jobs": [job.describe(now) for job in b.jobs],
                 "metrics": b.metrics, "perf": b.perf,
             } for b in self.backends],
@@ -793,8 +815,10 @@ async def poll_forever(router: Router) -> None:
         for backend in router.backends:
             models = await _get_json(backend, "/v1/models")
             metrics = await _get_json(backend, "/metrics") if models else None
-            # kcpp has no JSON /metrics; its perf counters stand in for the statusline (DP-499).
-            perf = await _get_json(backend, "/api/extra/perf") if models and not (metrics or {}).get("engine") else None
+            # kcpp has no JSON /metrics; its perf counters stand in for the statusline (DP-499). A
+            # Strata box that missed one /metrics poll is still Strata: it has no perf route to ask.
+            kcpp = models and not (metrics or {}).get("engine") and not (metrics is None and backend.strata)
+            perf = await _get_json(backend, "/api/extra/perf") if kcpp else None
             was = backend.healthy
             router.note_poll(backend, models, metrics, perf=perf)
             if was != backend.healthy:

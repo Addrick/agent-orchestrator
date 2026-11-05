@@ -233,10 +233,18 @@ def _prefill_from_strata_metrics(body: Any) -> Optional[Dict[str, Any]]:
     }
 
 
+_KCPP_PERF_FIELDS = (
+    "last_process", "last_eval", "last_token_count", "last_input_count", "last_process_time",
+    "last_eval_time", "last_process_speed", "last_eval_speed", "last_seed", "total_gens",
+    "stop_reason", "queue", "idle", "uptime", "idletime",
+)
+
+
 def _servers_from_router_status(body: Dict[str, Any]) -> Dict[str, Any]:
     """Project the inference router's ``/router/status`` onto the portal's
     per-server contract (DP-499). Re-projected field by field, so a future
-    router field — or a box's URL — never reaches the browser by accident."""
+    router field — or a box's URL — never reaches the browser by accident.
+    Raises TypeError/ValueError on a non-numeric counter; the route degrades."""
     def _jobs(raw: Any) -> List[Dict[str, Any]]:
         return [{
             "requester": str(j.get("requester") or "unknown"),
@@ -249,11 +257,18 @@ def _servers_from_router_status(body: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(b, dict):
             continue
         metrics = b.get("metrics")
-        perf = b.get("perf") if isinstance(b.get("perf"), dict) else _perf_from_strata_metrics(metrics)
+        raw_perf = b.get("perf")
+        # kcpp's own perf sample, kept to the fields the portal reads (KoboldPerf).
+        perf = ({k: float(raw_perf[k]) for k in _KCPP_PERF_FIELDS if k in raw_perf}
+                if isinstance(raw_perf, dict) else _perf_from_strata_metrics(metrics))
+        age = b.get("sample_age_s")
+        state = b.get("state")
         servers.append({
             "name": str(b.get("name") or "?"),
             "primary": bool(b.get("primary")),
             "healthy": bool(b.get("healthy")),
+            "state": state if state in ("up", "unloaded", "down") else ("up" if b.get("healthy") else "down"),
+            "sample_age_s": float(age) if age is not None else None,
             "model": b.get("model") if isinstance(b.get("model"), str) else None,
             "external_busy": bool(b.get("external_busy")),
             "jobs": _jobs(b.get("jobs")),
@@ -1678,7 +1693,10 @@ class KoboldEngineAdapter:
 
             The counters come from the router's 3 s poll of each box, not from
             here: the R9700 sits behind a loopback proxy on CT100 that derpr's
-            container cannot reach. `available: false` whenever the local URL
+            container cannot reach. `prefill` is Strata's live block only: the
+            kcpp-progress sidecar (`KOBOLD_PROGRESS_URL`) names no router box, so
+            a kcpp row shows last-completed counters, not a live ingest bar.
+            `available: false` whenever the local URL
             is not a router (the statusline switch pinned one box) — the portal
             then shows its single row from `/api/extra/perf`."""
             try:
@@ -1694,7 +1712,13 @@ class KoboldEngineAdapter:
             # would all read "no metrics", worse than the single line it replaces.
             if not any(isinstance(b, dict) and "jobs" in b for b in body["backends"]):
                 return JSONResponse(content={"available": False, "reason": "router_too_old"})
-            return JSONResponse(content=_servers_from_router_status(body))
+            try:
+                return JSONResponse(content=_servers_from_router_status(body))
+            except (TypeError, ValueError, AttributeError) as e:
+                # A malformed sample (a counter as a non-numeric string) degrades
+                # like its sibling routes do, rather than 500ing every poll.
+                logger.warning(f"router status could not be projected: {e}")
+                return JSONResponse(content={"available": False, "reason": "unreadable"})
 
         @self.app.post("/chat/completions")
         @self.app.post("/v1/chat/completions")

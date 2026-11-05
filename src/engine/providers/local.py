@@ -49,7 +49,10 @@ REQUESTER_HEADER = "X-Inference-Requester"
 
 def requester_header(persona_name: Any) -> str:
     """The persona name as a header value: the characters the router keeps, so
-    a name with spaces or non-ASCII never makes httpx refuse the request."""
+    a name with spaces or non-ASCII never makes httpx refuse the request.
+    Mirrors `requester_of` / `MAX_REQUESTER_CHARS` in the standalone router;
+    `test_the_engines_requester_header_survives_the_routers_cleaning_unchanged`
+    keeps the two in step."""
     if not isinstance(persona_name, str):
         return ""
     return "".join(c for c in persona_name if c.isascii() and (c.isalnum() or c in "-_.:@ ")).strip()[:48]

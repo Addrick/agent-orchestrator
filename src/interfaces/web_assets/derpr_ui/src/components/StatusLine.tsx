@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { InferenceJob, InferenceServer, KoboldPerf, KoboldPrefill } from '../types/contracts'
 import {
+  serversBusy,
   useKoboldPerf,
   stopReasonLabel,
   fmtDur,
@@ -36,7 +37,7 @@ export function StatusLine() {
   const { perf, prefill, stale, sampledAt, servers, refresh } = useKoboldPerf()
   const backendSwitch = <LocalBackendSwitch onSwitched={refresh} />
   const busy = !!perf && perf.idle === 0
-  const tick = useNow(!!perf || !!servers, busy || !!servers ? 250 : 5000)
+  const tick = useNow(!!perf || !!servers, busy || (!!servers && serversBusy(servers)) ? 250 : 5000)
   // Before the first tick lands, anchor on the sample itself so nothing renders
   // a 1970 timestamp for a frame.
   const now = tick || sampledAt
@@ -65,6 +66,7 @@ export function StatusLine() {
               ) : null
             }
             sampledAt={sampledAt}
+            stale={stale}
             now={now}
           />
         ))}
@@ -91,6 +93,9 @@ export function StatusLine() {
   )
 }
 
+/** A row's sample older than this (about three missed router polls) is shown as stale. */
+const SAMPLE_STALE_S = 10
+
 /** Label for who a job is for. A background job on the router is Hindsight's
  *  unless its client named itself. */
 function jobLabel(j: InferenceJob): string {
@@ -104,16 +109,24 @@ function ServerRow({
   lead,
   tail,
   sampledAt,
+  stale,
   now,
 }: {
   server: InferenceServer
   lead: ReactNode
   tail: ReactNode
   sampledAt: number
+  stale: boolean
   now: number
 }) {
   const [job, ...more] = server.jobs
   const late = Math.max(0, (now - sampledAt) / 1000)
+  // The counters are the router's sample, taken `sample_age_s` before it
+  // answered: anchor their clocks there, so a row's elapsed agrees with its job
+  // chip. Older than a few missed polls (3 s each) is not live any more.
+  const age = server.sample_age_s ?? 0
+  const perfAt = sampledAt - age * 1000
+  const perfStale = stale || age > SAMPLE_STALE_S
   return (
     <div className="statusline" role="status">
       {lead}
@@ -123,7 +136,11 @@ function ServerRow({
       >
         <b>{server.name}</b>
       </span>
-      {!server.healthy ? (
+      {server.state === 'unloaded' ? (
+        <span className="sl-chip sl-muted" title="the server answers, but its model is not loaded; the router will not load it">
+          <span className="dot" /> model not loaded
+        </span>
+      ) : !server.healthy ? (
         <span className="sl-chip sl-stale">
           <span className="dot" /> down
         </span>
@@ -143,7 +160,7 @@ function ServerRow({
             </span>
           ) : null}
           {server.perf ? (
-            <PerfChips perf={server.perf} prefill={server.prefill} stale={false} sampledAt={sampledAt} now={now} />
+            <PerfChips perf={server.perf} prefill={server.prefill} stale={perfStale} sampledAt={perfAt} now={now} />
           ) : (
             <span className="sl-chip sl-muted">no metrics from this server</span>
           )}

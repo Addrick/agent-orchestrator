@@ -2994,7 +2994,7 @@ def test_inference_servers_projects_each_box_with_who_its_work_is_for(monkeypatc
     adapter, mm = _perf_adapter()
     strata = {"time": 1000.0, "live": {"state": "prefill", "prompt_read": 50, "prompt_total": 200},
               "totals": {"requests": 4, "since": 100.0}, "requests": [{"output_tokens": 9, "finish": "stop"}]}
-    kcpp_perf = {"idle": 1, "uptime": 60, "total_gens": 2}
+    kcpp_perf = {"idle": 1, "uptime": 60, "total_gens": 2, "future_field": "x"}
     _router_get(monkeypatch, adapter, 200, {
         "waiting": 1,
         "held": [{"requester": "codr", "kind": "chat", "elapsed_s": 3.2, "prompt_chars": 10}],
@@ -3002,6 +3002,7 @@ def test_inference_servers_projects_each_box_with_who_its_work_is_for(monkeypatc
             {"name": "r9700", "url": "http://127.0.0.1:5006", "primary": True, "healthy": True, "model": "m",
              "jobs": [{"requester": "stagr", "kind": "chat", "elapsed_s": 12.0}], "metrics": strata, "perf": None},
             {"name": "dt21", "url": "http://10.0.0.69:5001", "healthy": True, "external_busy": True,
+             "state": "up", "sample_age_s": 1.5,
              "jobs": [], "metrics": None, "perf": kcpp_perf},
         ],
     })
@@ -3013,7 +3014,10 @@ def test_inference_servers_projects_each_box_with_who_its_work_is_for(monkeypatc
     r9700, dt21 = out["servers"]
     assert (r9700["name"], r9700["primary"], r9700["jobs"][0]["requester"]) == ("r9700", True, "stagr")
     assert r9700["perf"]["idle"] == 0 and r9700["prefill"]["processed"] == 50
-    assert dt21["perf"] == kcpp_perf and dt21["prefill"] is None and dt21["external_busy"] is True
+    assert dt21["perf"] == {"idle": 1, "uptime": 60, "total_gens": 2}, "only KoboldPerf fields pass"
+    assert dt21["prefill"] is None and dt21["external_busy"] is True
+    assert (dt21["state"], dt21["sample_age_s"]) == ("up", 1.5)
+    assert r9700["state"] == "up" and r9700["sample_age_s"] is None  # derived when the router omits it
     assert "10.0.0.69" not in r.text and "127.0.0.1" not in r.text, "box URLs stay server-side"
     mm.close()
 
@@ -3022,6 +3026,7 @@ def test_inference_servers_projects_each_box_with_who_its_work_is_for(monkeypatc
     (404, {"detail": "Not Found"}, None),       # the switch pinned one box: no router in the path
     (200, {"idle": 1}, None),                   # answered, but not a router status
     (200, {"backends": [{"name": "r9700", "healthy": True}]}, None),  # a pre-DP-499 router: no jobs/metrics
+    (200, {"backends": [{"name": "r9700", "jobs": [{"elapsed_s": "soon"}]}]}, None),  # unreadable counter
     (0, None, RuntimeError("connect to http://internal-kobold.lan:5001 failed")),
 ])
 def test_inference_servers_is_unavailable_without_a_router(monkeypatch, status, body, exc):

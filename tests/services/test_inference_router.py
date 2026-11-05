@@ -562,7 +562,8 @@ def test_strata_is_recognised_by_its_metrics_engine_block():
     router = ir.Router([box("r9700")], MOVE, QUIET)
     router.note_poll(router.primary, {"data": [{"id": MODEL}]}, {"engine": {"version": "0.1.52"}, "live": {}})
     assert router.primary.strata is True
-    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None)  # kcpp: no /metrics JSON
+    # A swap to kcpp (a new model id, no /metrics JSON) flips at once; a missed poll does not.
+    router.note_poll(router.primary, {"data": [{"id": "koboldcpp/" + MODEL}]}, None)
     assert router.primary.strata is False
 
 
@@ -892,3 +893,56 @@ def test_poll_keeps_kcpp_perf_and_drops_it_when_the_box_goes_down():
     for _ in range(ir.POLL_FAILURES_DOWN):
         router.note_poll(router.primary, None, None)
     assert router.primary.perf is None
+
+
+STRATA_METRICS = {"engine": {}, "time": 5.0, "live": {"state": "idle"}, "totals": {"requests": 3}}
+
+
+def test_one_missed_metrics_poll_keeps_a_strata_box_strata_and_its_sample():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    models = {"data": [{"id": MODEL}]}
+    router.note_poll(router.primary, models, STRATA_METRICS)
+    for _ in range(ir.POLL_FAILURES_DOWN - 1):
+        router.note_poll(router.primary, models, None)
+        assert router.primary.strata is True and router.primary.metrics is not None
+    router.note_poll(router.primary, models, None)
+    assert router.primary.strata is False and router.primary.metrics is None
+
+
+def test_a_kcpp_box_generating_for_someone_else_is_busy():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None, perf={"idle": 0})
+    assert router.primary.external_busy is True
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, None, perf={"idle": 1})
+    assert router.primary.external_busy is False
+
+
+@pytest.mark.parametrize("polls,state", [
+    ([{"data": [{"id": MODEL}]}], "up"),
+    ([{"data": [{"id": MODEL, "status": {"value": "unloaded"}}]}], "unloaded"),  # lazy: answers, not loaded
+    ([None] * ir.POLL_FAILURES_DOWN, "down"),
+    ([], "down"),  # never answered a poll
+])
+def test_status_tells_a_dead_box_from_an_unloaded_one(polls, state):
+    router = ir.Router([box("r9700", healthy=False)], MOVE, QUIET)
+    for models in polls:
+        router.note_poll(router.primary, models, None, now=NOW)
+    assert router.status()["backends"][0]["state"] == state
+
+
+def test_status_reports_how_old_each_boxs_sample_is():
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    assert router.status()["backends"][0]["sample_age_s"] is None
+    router.note_poll(router.primary, {"data": [{"id": MODEL}]}, STRATA_METRICS, now=ir.time.monotonic() - 4)
+    assert router.status()["backends"][0]["sample_age_s"] >= 4
+
+
+@pytest.mark.parametrize("name", ["stagr", "café bot", "a" * 100, "x<y>z", " codr ", "ü"])
+def test_the_engines_requester_header_survives_the_routers_cleaning_unchanged(name):
+    """The router is a standalone file and cannot import the engine's helper, so the two
+    sanitizers are written twice; this keeps the engine's output inside what the router keeps."""
+    from src.engine.providers.local import requester_header
+    sent = requester_header(name)
+    assert len(sent) <= ir.MAX_REQUESTER_CHARS
+    if sent:
+        assert ir.requester_of([b"POST / HTTP/1.1", b"X-Inference-Requester: " + sent.encode()], "ip", False) == sent

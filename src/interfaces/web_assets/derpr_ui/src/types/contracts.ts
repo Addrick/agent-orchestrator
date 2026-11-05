@@ -383,6 +383,10 @@ export interface InferenceServer {
   name: string
   primary: boolean
   healthy: boolean
+  /** `down`: cannot answer. `unloaded`: answers, but its model is not loaded (lazy) */
+  state: 'up' | 'unloaded' | 'down'
+  /** seconds between the router's sample of this box and the router answering; null before one */
+  sample_age_s: number | null
   model: string | null
   /** busy with work that did not come through the router (direct use of the box) */
   external_busy: boolean
