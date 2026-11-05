@@ -37,7 +37,10 @@ class FakeStrata:
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 action = self.path.split("action=")[1]
                 fake.calls.append((action, payload["filename"], self.headers["Content-Type"]))
-                path = Path(fake.slot_dir) / payload["filename"]
+                root = os.path.realpath(fake.slot_dir)
+                path = Path(os.path.realpath(os.path.join(root, payload["filename"])))
+                if not str(path).startswith(root + os.sep):  # llama-server refuses these too
+                    return self._json(400, {})
                 if action == "save" and fake.save_status == 200:
                     path.write_bytes(b"session")
                 code = fake.save_status if action == "save" else (200 if path.exists() else 404)
