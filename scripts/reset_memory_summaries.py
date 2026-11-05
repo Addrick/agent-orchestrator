@@ -6,7 +6,7 @@ SqliteConsolidator will re-process everything from scratch on next deploy().
 Usage:
     python -m scripts.reset_memory_summaries [--db PATH]
 
-Defaults to the production database at data/user_memory.db.
+Defaults to config.global_config.MEMORY_DATABASE_FILE.
 Creates a timestamped backup before wiping.
 """
 
@@ -17,7 +17,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_DB = Path(__file__).resolve().parent.parent / "data" / "user_memory.db"
+# Add project root to sys.path so config is importable when run directly as a script
+repo_root = str(Path(__file__).resolve().parent.parent)
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from config.global_config import MEMORY_DATABASE_FILE  # noqa: E402
+
+DEFAULT_DB = Path(MEMORY_DATABASE_FILE)
 
 
 def reset(db_path: Path, *, skip_backup: bool = False) -> None:
@@ -87,9 +94,14 @@ def reset(db_path: Path, *, skip_backup: bool = False) -> None:
     conn.close()
 
 
-if __name__ == "__main__":
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Reset memory summaries for re-processing")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Path to user_memory.db")
     parser.add_argument("--no-backup", action="store_true", help="Skip backup creation")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_parser()
     args = parser.parse_args()
     reset(args.db, skip_backup=args.no_backup)
