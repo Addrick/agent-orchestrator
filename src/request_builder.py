@@ -232,17 +232,25 @@ class RequestBuilder:
         is_group_chat = memory_mode in ("server", "global", "ticket") or (
                     memory_mode == "channel" and server_id is not None)
 
+        has_user_turn = False
         for msg in raw_history:
             emitted = len(final_history)
-            self._format_row(msg, final_history, persona_name, is_group_chat, stamp)
+            has_user_turn = self._format_row(
+                msg, final_history, persona_name, is_group_chat, stamp, has_user_turn
+            )
             if sources is not None:
                 sources.extend([msg.get('interaction_id')] * (len(final_history) - emitted))
         return final_history
 
     @staticmethod
     def _format_row(msg: Dict[str, Any], final_history: List[Dict[str, Any]],
-                    persona_name: str, is_group_chat: bool, stamp: bool) -> None:
-        """Append one history row's messages to `final_history`."""
+                    persona_name: str, is_group_chat: bool, stamp: bool,
+                    has_user_turn: bool = False) -> bool:
+        """Append one history row's messages to `final_history`.
+
+        Returns True if `final_history` contains at least one user-role message
+        (either from a prior row or emitted by this row).
+        """
         author_role = msg.get('author_role')
         author_name = msg.get('author_name')
         content = msg.get('content', '')
@@ -257,25 +265,31 @@ class RequestBuilder:
             if stamp:
                 formatted_content = _stamped(formatted_content, msg.get('timestamp'))
             final_history.append({'role': 'user', 'content': formatted_content})
+            has_user_turn = True
         elif author_role == 'assistant':
             if author_name == persona_name:
                 tool_context_json = msg.get('tool_context')
                 if tool_context_json:
-                    # A replayed tool block must follow a user turn *or a
-                    # function-response turn*. The history limit slices raw
+                    # DP-296 / DP-474: A replayed tool block must follow a user
+                    # turn in the history window. The history limit slices raw
                     # rows, so an assistant row carrying tool_context can end
                     # up oldest — replaying it then opens the wire array with
-                    # a function call and Gemini rejects the request outright
-                    # ("function call turn must come immediately after a user
-                    # turn or after a function response turn"). Drop the
-                    # orphan instead.
+                    # a function call (or an assistant text turn followed by a
+                    # function call, which build_google_history merges into a
+                    # single model Content turn at index 0) and Gemini rejects
+                    # the request outright ("function call turn must come
+                    # immediately after a user turn or after a function response
+                    # turn").
                     #
-                    # Both legal predecessors matter: a DP-296 park row has
-                    # empty content, so its own emitted block ends on a
-                    # `tool` message. Accepting only 'user' would drop the
-                    # tool context of every row that follows a park — the
-                    # exact memory this feature exists to keep.
-                    if final_history and final_history[-1].get('role') in ('user', 'tool'):
+                    # Conversely, once at least one user turn precedes it in
+                    # the window, consecutive assistant rows from DP-297
+                    # non-blocking parks / approval-resume continuations
+                    # (assistant(text) followed by assistant(tool_calls)) are
+                    # legal: OpenAI accepts consecutive assistant messages, and
+                    # build_google_history merges them into a single model turn
+                    # following the user (or tool) turn. Drop tool_context only
+                    # when no preceding user turn survived the limit.
+                    if has_user_turn:
                         final_history.extend(replayable_tool_context(tool_context_json))
                     else:
                         logger.debug(
@@ -292,6 +306,8 @@ class RequestBuilder:
                 if stamp:
                     formatted_content = _stamped(formatted_content, msg.get('timestamp'))
                 final_history.append({'role': 'user', 'content': formatted_content})
+                has_user_turn = True
+        return has_user_turn
 
     def fetch_raw_history(
             self,

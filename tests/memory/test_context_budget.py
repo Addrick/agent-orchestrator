@@ -300,3 +300,57 @@ def test_orphan_head_preamble_only_history_is_untouched():
     out, dropped = drop_orphaned_tool_head(msgs, injected=(memory,))
     assert dropped == 0
     assert out == msgs
+
+
+def test_orphan_head_drops_tool_span_behind_leading_assistant_text():
+    """DP-474: an orphaned tool call/result behind leading plain assistant text
+    messages (before the first conversational user turn) must be dropped, while
+    preserving preamble, leading assistant texts, and any tool calls after the user turn.
+    """
+    sys_msg = {"role": "system", "content": "system prompt"}
+    injected_mem = {"role": "user", "content": "[Recalled memory]"}
+    asst1 = {"role": "assistant", "content": "Approved 1."}
+    call_orphan = {"role": "assistant", "tool_calls": [{"id": "c1", "name": "t1", "arguments": {}}]}
+    tool_orphan = {"role": "tool", "tool_call_id": "c1", "name": "t1", "content": "{}"}
+    asst2 = {"role": "assistant", "content": "Approved 2."}
+    user_turn = {"role": "user", "content": "Next"}
+    call_valid = {"role": "assistant", "tool_calls": [{"id": "c2", "name": "t2", "arguments": {}}]}
+    tool_valid = {"role": "tool", "tool_call_id": "c2", "name": "t2", "content": "{}"}
+
+    msgs = [
+        sys_msg, injected_mem,
+        asst1, call_orphan, tool_orphan, asst2,
+        user_turn, call_valid, tool_valid,
+    ]
+
+    out, dropped = drop_orphaned_tool_head(msgs, injected=(injected_mem,))
+    assert dropped == 2
+    assert out == [
+        sys_msg, injected_mem,
+        asst1, asst2,
+        user_turn, call_valid, tool_valid,
+    ]
+
+
+def test_budget_pruning_and_orphan_drop_end_to_end_on_approval_resume_chain():
+    """DP-474 end-to-end: when truncate_messages_to_budget evicts the leading user turn
+    ahead of an approval-resume sequence [assistant("text"), assistant(tool_calls), tool],
+    drop_orphaned_tool_head strips the orphaned tool span while preserving the leading
+    assistant text and current user turn.
+    """
+    user_old = _msg("user", 200)  # 50 tokens
+    asst_text = {"role": "assistant", "content": "Prior approved."}
+    call = {"role": "assistant", "tool_calls": [{"id": "c1", "name": "list_dirs", "arguments": {}}]}
+    result = {"role": "tool", "tool_call_id": "c1", "name": "list_dirs", "content": "{}"}
+    user_curr = _msg("user", 40)  # 10 tokens
+
+    # Budget of 45 tokens forces eviction of user_old (50 tokens)
+    msgs = [user_old, asst_text, call, result, user_curr]
+    pruned, dropped_budget = truncate_messages_to_budget(msgs, max_tokens=45)
+    assert user_old not in pruned
+    assert pruned[0] is asst_text
+
+    repaired, dropped_orphan = drop_orphaned_tool_head(pruned)
+    assert dropped_orphan == 2
+    assert repaired == [asst_text, user_curr]
+    assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in repaired)

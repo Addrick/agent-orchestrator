@@ -1437,25 +1437,114 @@ def test_format_raw_history_drops_orphaned_tool_context(chat_system_with_mocks):
     assert not any('tool_calls' in m for m in formatted)
 
 
-def test_format_raw_history_tool_context_after_assistant_is_dropped(chat_system_with_mocks):
-    """Two assistant rows in a row: the second one's tool block would follow an
-    assistant turn, which is equally invalid. Drop it too."""
+def test_format_raw_history_approval_resume_replays_every_tool_context(chat_system_with_mocks):
+    """DP-474: consecutive assistant rows from non-blocking parks / approval resumes
+    must replay every row's tool_context once preceded by a user turn.
+
+    user -> parked assistant (with tool_context + prose) -> first approval continuation assistant
+    (text, or tool_context + text) -> second approval continuation assistant (with tool_context
+    for e.g. list_directives + reply text). Every row's tool_context is replayed in order.
+    """
     system, _, _, _, _ = chat_system_with_mocks
-    tool_ctx = json.dumps([
-        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
-        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'}
+    park_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "create_directive", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "create_directive",
+         "content": '{"status": "not_executed", "reason": "awaiting_approval"}'},
+    ])
+    resume1_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c2", "name": "create_directive", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c2", "name": "create_directive", "content": '{"ok": true}'},
+    ])
+    resume2_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c3", "name": "list_directives", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c3", "name": "list_directives", "content": '{"directives": ["d1"]}'},
     ])
     raw_history = [
-        {'author_role': 'user', 'author_name': 'Alice', 'content': 'search please'},
-        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'One moment',
-         'tool_context': None},
-        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Here are results',
-         'tool_context': tool_ctx},
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'create directive'},
+        # Parked assistant row with tool_context and non-empty prose (DP-297)
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'I have proposed the directive.',
+         'tool_context': park_ctx},
+        # First approval continuation row (resumed write + prose)
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Directive created. Checking list.',
+         'tool_context': resume1_ctx},
+        # Second approval continuation row (verification read + reply text)
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Verification read ran. All good.',
+         'tool_context': resume2_ctx},
     ]
 
     formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
 
-    assert [m['role'] for m in formatted] == ['user', 'assistant', 'assistant']
+    # user + (c1 assistant + tool + text) + (c2 assistant + tool + text) + (c3 assistant + tool + text) = 10 messages
+    assert [m['role'] for m in formatted] == [
+        'user',
+        'assistant', 'tool', 'assistant',
+        'assistant', 'tool', 'assistant',
+        'assistant', 'tool', 'assistant',
+    ]
+    tool_call_ids = [c['id'] for m in formatted if m.get('tool_calls') for c in m['tool_calls']]
+    assert tool_call_ids == ['c1', 'c2', 'c3']
+    tool_result_ids = [m['tool_call_id'] for m in formatted if m.get('role') == 'tool']
+    assert tool_result_ids == ['c1', 'c2', 'c3']
+
+
+def test_format_raw_history_leading_assistants_without_user_drop_tool_context(chat_system_with_mocks):
+    """DP-474: when the history window opens on assistant rows with no preceding user turn,
+    tool_context must be dropped (preventing build_google_history from merging function_call
+    into contents[0] with no preceding user turn). Plain assistant texts survive, and any
+    tool_context after a later user turn is preserved.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx1 = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "list_directives", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "list_directives", "content": '{"directives": []}'},
+    ])
+    tool_ctx2 = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c2", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c2", "name": "web_search", "content": '{"result": "found"}'},
+    ])
+    raw_history = [
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'First approved.',
+         'tool_context': None},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Second.',
+         'tool_context': tool_ctx1},
+        {'author_role': 'user', 'author_name': 'Alice', 'content': 'Next'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Found it.',
+         'tool_context': tool_ctx2},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "channel", "test_persona", None)
+
+    # tool_ctx1 is dropped (no preceding user turn). tool_ctx2 is kept (preceded by user 'Next').
+    # Wire messages: assistant("First approved."), assistant("Second."), user("Next"), assistant(c2), tool(c2), assistant("Found it.")
+    assert [m['role'] for m in formatted] == [
+        'assistant', 'assistant', 'user', 'assistant', 'tool', 'assistant',
+    ]
+    tool_call_ids = [c['id'] for m in formatted if m.get('tool_calls') for c in m['tool_calls']]
+    assert tool_call_ids == ['c2']
+    assert formatted[0] == {'role': 'assistant', 'content': 'First approved.'}
+    assert formatted[1] == {'role': 'assistant', 'content': 'Second.'}
+
+
+def test_format_raw_history_group_chat_other_persona_counts_as_user_turn(chat_system_with_mocks):
+    """DP-474: in group chat, another persona's assistant row emits role='user' on the wire,
+    which satisfies the requirement for a preceding user turn to replay tool_context.
+    """
+    system, _, _, _, _ = chat_system_with_mocks
+    tool_ctx = json.dumps([
+        {"role": "assistant", "tool_calls": [{"id": "c1", "name": "web_search", "arguments": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": '{"result": "ok"}'},
+    ])
+    raw_history = [
+        {'author_role': 'assistant', 'author_name': 'other_persona', 'content': 'Can you check this?'},
+        {'author_role': 'assistant', 'author_name': 'test_persona', 'content': 'Checking now.',
+         'tool_context': tool_ctx},
+    ]
+
+    formatted = system.request_builder.format_raw_history_for_llm(raw_history, "server", "test_persona", "srv1")
+
+    assert [m['role'] for m in formatted] == ['user', 'assistant', 'tool', 'assistant']
+    assert formatted[0]['content'] == 'other_persona: Can you check this?'
+    assert any('tool_calls' in m for m in formatted)
 
 
 def test_format_raw_history_tool_context_after_park_row_is_kept(chat_system_with_mocks):

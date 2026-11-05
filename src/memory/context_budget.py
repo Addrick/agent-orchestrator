@@ -204,15 +204,24 @@ def drop_orphaned_tool_head(
     * `truncate_messages_to_budget` above treats an `assistant`+`tool_calls`
       message and its `tool` answers as one atomic span (DP-296), so the token
       pruner no longer splits a pair;
-    * `build_conversation_history` refuses to replay an assistant row's
-      `tool_context` unless a `user` or `tool` turn precedes it (DP-296), which
-      closes the DB sliding-window case at the source.
+    * `format_raw_history_for_llm` refuses to replay an assistant row's
+      `tool_context` unless a preceding `user` turn exists in the window
+      (DP-296 / DP-474), closing the DB sliding-window case at the source.
 
-    The path where this function is still load-bearing is `client_messages`
-    (a non-streaming OAI client supplies its own array, which `prepare_request` takes verbatim
-    apart from stripping one leading system message) — neither guard above runs
-    on it. Keeping the repair as the last stop before the wire also means any
-    future producer of an unpaired head fails safe.
+    This function remains load-bearing in two places:
+
+    * `client_messages` (a non-streaming OAI client supplies its own array,
+      which `prepare_request` takes verbatim apart from stripping one leading
+      system message) — neither guard above runs on it;
+    * The DB path whenever `truncate_messages_to_budget` evicts the leading
+      `user` turn ahead of an approval-resume chain (`user` -> `assistant(text)`
+      -> `assistant(tool_calls)` -> `tool` -> ...). Pruning the `user` turn
+      leaves `assistant(text)` at the head ahead of `assistant(tool_calls)`.
+      Scanning past leading plain assistant text messages ensures that any
+      orphaned tool calls or results behind them are dropped before
+      `build_google_history` merges consecutive assistant entries into a
+      leading `model` turn carrying `function_call` without a preceding `user`
+      turn.
 
     Providers reject that shape: Google returns 400 "function call turn must
     come immediately after a user turn" for a leading `function_call`, and
@@ -236,28 +245,29 @@ def drop_orphaned_tool_head(
     continuing the scan is what makes the repair fire in the cases that
     actually reach a provider.
 
-    Returns `(repaired_messages, dropped_count)`. The skipped preamble is
-    preserved in the result; only the orphaned tool messages are removed.
+    Returns `(repaired_messages, dropped_count)`. The skipped preamble and any
+    leading plain assistant messages are preserved in the result; only the
+    orphaned tool messages are removed.
     """
     injected_ids = {id(m) for m in (injected or ())}
 
-    # Walk past preamble that cannot serve as the orphan's originating turn.
-    preamble = 0
-    for msg in messages:
-        if msg.get("role") == "system" or id(msg) in injected_ids:
-            preamble += 1
-            continue
-        break
+    first_user_idx = None
+    for idx, msg in enumerate(messages):
+        if msg.get("role") == "user" and id(msg) not in injected_ids:
+            first_user_idx = idx
+            break
 
-    start = preamble
-    for msg in messages[preamble:]:
+    boundary = len(messages) if first_user_idx is None else first_user_idx
+    kept_head: List[Dict[str, Any]] = []
+    dropped = 0
+    for msg in messages[:boundary]:
         role = msg.get("role")
         if role == "tool" or (role == "assistant" and msg.get("tool_calls")):
-            start += 1
+            dropped += 1
             continue
-        break
+        kept_head.append(msg)
 
-    dropped = start - preamble
     if dropped == 0:
         return messages, 0
-    return messages[:preamble] + messages[start:], dropped
+
+    return kept_head + messages[boundary:], dropped

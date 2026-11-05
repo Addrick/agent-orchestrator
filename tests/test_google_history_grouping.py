@@ -252,3 +252,73 @@ async def test_call_only_model_turn_gains_no_empty_text_part():
     parts = history_for_api[0]['parts']
     assert len(parts) == 1
     assert parts[0].function_call['name'] == 'pve_status'
+
+
+@pytest.mark.asyncio
+async def test_approval_resume_wire_shape_grouped_for_google():
+    """DP-474: approval-resume wire sequence
+    user -> assistant(text) -> assistant(content + tool_calls) -> tool -> assistant(text)
+    is merged by _build_google_history into:
+    [user, model([text, text, function_call]), tool([function_response]), model([text])]
+    ensuring every function_call-bearing model turn immediately follows user or tool.
+    """
+    engine = TextEngine()
+
+    history = [
+        {
+            "role": "user",
+            "content": "Create a directive for monitoring",
+        },
+        {
+            "role": "assistant",
+            "content": "Parked reply: I will create this directive.",
+        },
+        {
+            "role": "assistant",
+            "content": "Checking directives",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "name": "list_directives",
+                    "arguments": {"filter": "monitoring"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "list_directives",
+            "content": '{"directives": []}',
+        },
+        {
+            "role": "assistant",
+            "content": "Done creating directive.",
+        },
+    ]
+
+    with patch('src.engine.TextEngine._download_image', new_callable=AsyncMock):
+        history_for_api, serializable_history = await engine._build_google_history(
+            "system prompt", history, None
+        )
+
+    # 4 turns: user -> model (merged text + call) -> tool -> model
+    assert len(history_for_api) == 4
+    assert history_for_api[0]['role'] == 'user'
+    assert history_for_api[1]['role'] == 'model'
+    assert history_for_api[2]['role'] == 'tool'
+    assert history_for_api[3]['role'] == 'model'
+
+    # The merged model turn contains text from both assistant rows plus the function_call
+    merged_parts = history_for_api[1]['parts']
+    assert len(merged_parts) == 3
+    assert merged_parts[0].text == "Parked reply: I will create this directive."
+    assert merged_parts[1].text == "Checking directives"
+    assert merged_parts[2].function_call['name'] == 'list_directives'
+    assert merged_parts[2].function_call['args'] == {"filter": "monitoring"}
+
+    # The tool turn contains the function response
+    assert len(history_for_api[2]['parts']) == 1
+    assert history_for_api[2]['parts'][0].function_response['name'] == 'list_directives'
+
+    # The final model turn
+    assert len(history_for_api[3]['parts']) == 1
+    assert history_for_api[3]['parts'][0].text == "Done creating directive."
