@@ -1690,6 +1690,10 @@ class KoboldEngineAdapter:
                 return JSONResponse(content={"available": False, "reason": "unreachable"})
             if not isinstance(body, dict) or not isinstance(body.get("backends"), list):
                 return JSONResponse(content={"available": False, "reason": "not_a_router"})
+            # A router from before DP-499 reports no jobs or metrics: its rows
+            # would all read "no metrics", worse than the single line it replaces.
+            if not any(isinstance(b, dict) and "jobs" in b for b in body["backends"]):
+                return JSONResponse(content={"available": False, "reason": "router_too_old"})
             return JSONResponse(content=_servers_from_router_status(body))
 
         @self.app.post("/chat/completions")

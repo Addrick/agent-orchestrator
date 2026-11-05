@@ -3021,6 +3021,7 @@ def test_inference_servers_projects_each_box_with_who_its_work_is_for(monkeypatc
 @pytest.mark.parametrize("status,body,exc", [
     (404, {"detail": "Not Found"}, None),       # the switch pinned one box: no router in the path
     (200, {"idle": 1}, None),                   # answered, but not a router status
+    (200, {"backends": [{"name": "r9700", "healthy": True}]}, None),  # a pre-DP-499 router: no jobs/metrics
     (0, None, RuntimeError("connect to http://internal-kobold.lan:5001 failed")),
 ])
 def test_inference_servers_is_unavailable_without_a_router(monkeypatch, status, body, exc):
