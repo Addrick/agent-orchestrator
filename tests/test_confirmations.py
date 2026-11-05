@@ -19,7 +19,7 @@ from config.global_config import PARK_ROW_RETENTION, PENDING_ACTION_TTL
 from src.confirmations import (
     DENIAL_INSTRUCTION, ConfirmationManager, Decision, ParkedWrite,
 )
-from src.memory.memory_manager import MemoryManager, PARK_DB_UNKNOWN
+from src.memory.memory_manager import MemoryManager
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_QUARANTINED,
 )
@@ -1663,7 +1663,9 @@ def test_a_legacy_row_with_no_kind_column_rebuilds_as_an_approval(manager):
     park = ParkedWrite.from_row(row)
     assert park.kind == "approval"
 
+
 # ---- DP-226: park preserves taint_sources --------------------------------
+
 
 def test_parked_write_taint_sources_normalization_and_audit_sync():
     """ParkedWrite normalizes taint_sources, deduplicates order-preserving,
@@ -1823,3 +1825,35 @@ async def test_apply_untainted_turn_keeps_taint_sources_empty(manager, mem_manag
     assert row is not None
     meta = json.loads(row["metadata"])
     assert meta["taint_sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_non_approval_produces_untrusted_adds_tool_name_and_taints(
+    manager, mem_manager, monkeypatch,
+):
+    """A non-approval deferral (e.g. node_job) for a tool with produces_untrusted=True
+    sets turn_tainted=True, adds tool_name to taint_sources, and syncs audit_info."""
+    monkeypatch.setattr(
+        "src.confirmations.get_tool_capabilities",
+        lambda name: {"produces_untrusted": True} if name == "node_tool" else {},
+    )
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _deferral(token="tok-node1", kind="node_job", tool="node_tool", call_id="c1")
+    parked.parked_assistant_id = row_id
+    manager.park(parked)
+
+    decision = Decision(park=parked, approved=False, outcome_status="done", result={"job_status": "completed"})
+    await manager.apply(decision)
+
+    assert parked.turn_tainted is True
+    assert "node_tool" in parked.taint_sources
+    assert parked.audit_info["tainted"] is True
+    assert "node_tool" in parked.audit_info["taint_sources"]
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision' ORDER BY rowid DESC"
+    ).fetchone()
+    assert row is not None
+    meta = json.loads(row["metadata"])
+    assert meta["turn_tainted"] is True
+    assert "node_tool" in meta["taint_sources"]

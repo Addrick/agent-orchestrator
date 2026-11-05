@@ -569,8 +569,6 @@ class ChatSystem:
                 # Inherit taint from any resolved park in the batch whose
                 # proposing turn or approved execution was tainted, so the
                 # summary turn is marked like the turn that proposed it.
-                if any(d.park.turn_tainted for d in continuation.batch):
-                    ctx.turn_tainted = True
                 for d in continuation.batch:
                     if d.park.turn_tainted:
                         ctx.turn_tainted = True

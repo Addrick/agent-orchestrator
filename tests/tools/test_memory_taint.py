@@ -29,7 +29,6 @@ from tests.helpers import make_chat_system, offer_tools, route_stream_through_ge
 _OFFERED = [{"type": "function", "function": {"name": n}} for n in ("create_ticket", "web_search")]
 
 
-
 def _make_persona(execution_mode=ExecutionMode.AUTONOMOUS):
     p = MagicMock()
     p.get_config_for_engine.return_value = {"model_name": "local"}
@@ -48,6 +47,7 @@ def _stream(events: List[Dict[str, Any]]):
 def _make_engine(streams: List[List[Dict[str, Any]]]):
     engine = MagicMock()
     iterator = iter(streams)
+
     def stream_messages(*args, **kwargs):
         return _stream(next(iterator))
     engine.stream_messages.side_effect = stream_messages
@@ -56,6 +56,7 @@ def _make_engine(streams: List[List[Dict[str, Any]]]):
 
 def _make_tool_manager(results: Dict[str, Any] | None = None):
     manager = MagicMock()
+
     async def execute(name, _offered, **kwargs):
         if results and name in results:
             return results[name]
@@ -313,6 +314,7 @@ async def test_park_preserves_taint_sources_across_resume_end_to_end():
             ({"type": "text", "content": "Proposed update."}, {}),
         ]
         iterator = iter(scripted)
+
         async def fake_generate(*args, **kwargs):
             return next(iterator)
         text_engine.generate_response = AsyncMock(side_effect=fake_generate)

@@ -86,6 +86,16 @@ INTERRUPTED_DEFERRAL_INSTRUCTION = (
 )
 
 
+def _normalize_sources(raw: Any) -> List[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    deduped: List[str] = []
+    for s in raw:
+        if isinstance(s, str) and s not in deduped:
+            deduped.append(s)
+    return deduped
+
+
 @dataclass
 class ParkedWrite:
     """One deferred tool call — a call whose real result arrives after the turn.
@@ -145,26 +155,33 @@ class ParkedWrite:
     persisted: bool = True
 
     def __post_init__(self) -> None:
+        raw_audit = self.audit_info if isinstance(self.audit_info, dict) else {}
+        sources = self.taint_sources or raw_audit.get("taint_sources")
+        self.taint_sources = _normalize_sources(sources)
         if self.taint_sources:
-            deduped: List[str] = []
-            for s in self.taint_sources:
-                if isinstance(s, str) and s not in deduped:
-                    deduped.append(s)
-            self.taint_sources = deduped
+            self.turn_tainted = True
             if isinstance(self.audit_info, dict):
-                self.audit_info = {**self.audit_info, "taint_sources": list(self.taint_sources)}
-        elif isinstance(self.audit_info, dict):
-            raw = self.audit_info.get("taint_sources")
-            if isinstance(raw, list):
-                extracted: List[str] = []
-                for s in raw:
-                    if isinstance(s, str) and s not in extracted:
-                        extracted.append(s)
-                self.taint_sources = extracted
-            else:
-                self.taint_sources = []
-        else:
-            self.taint_sources = []
+                self.audit_info = {
+                    **self.audit_info,
+                    "tainted": True,
+                    "taint_sources": list(self.taint_sources),
+                }
+        elif isinstance(self.audit_info, dict) and "taint_sources" in self.audit_info:
+            self.audit_info = {
+                **self.audit_info,
+                "taint_sources": list(self.taint_sources),
+            }
+
+    def add_taint_source(self, source: str) -> None:
+        self.turn_tainted = True
+        if isinstance(source, str) and source not in self.taint_sources:
+            self.taint_sources.append(source)
+        if isinstance(self.audit_info, dict):
+            self.audit_info = {
+                **self.audit_info,
+                "tainted": True,
+                "taint_sources": list(self.taint_sources),
+            }
 
     @property
     def key(self) -> ConversationKey:
@@ -241,18 +258,10 @@ class ParkedWrite:
                 "; the column did not decode"
                 if "duplicate_refs" in undecodable else "",
             )
-        audit_info = row.get("audit_info") or {}
-        taint_sources: List[str] = []
-        if isinstance(audit_info, dict):
-            raw = audit_info.get("taint_sources")
-            if isinstance(raw, list):
-                for s in raw:
-                    if isinstance(s, str) and s not in taint_sources:
-                        taint_sources.append(s)
         return cls(
             token=str(row["token"]),
             write_call=write_call,
-            audit_info=audit_info,
+            audit_info=row.get("audit_info") or {},
             confirmation_text=row.get("confirmation_text") or "",
             user_identifier=str(row["user_identifier"]),
             persona_name=str(row["persona_name"]),
@@ -263,7 +272,6 @@ class ParkedWrite:
             # represent is approvals.
             kind=str(row.get("kind") or DEFERRAL_KIND_APPROVAL),
             turn_tainted=bool(row.get("turn_tainted")),
-            taint_sources=taint_sources,
             parked_assistant_id=row.get("parked_assistant_id"),
             duplicate_refs=kept,
             created_at=float(row["created_at"]),
@@ -974,11 +982,7 @@ class ConfirmationManager:
             # would newly taint DENIALS, which execute nothing and read no
             # external bytes at all.
             if get_tool_capabilities(tool_name).get("produces_untrusted"):
-                park.turn_tainted = True
-                if tool_name not in park.taint_sources:
-                    park.taint_sources.append(tool_name)
-                if isinstance(park.audit_info, dict):
-                    park.audit_info = {**park.audit_info, "taint_sources": list(park.taint_sources)}
+                park.add_taint_source(tool_name)
         elif decision.approved:
             tool_manager = self._tool_manager_lookup()
             try:
@@ -1039,11 +1043,7 @@ class ConfirmationManager:
                 decision.result = {"error": f"Tool execution failed: {e}"}
                 decision.ok = False
             if get_tool_capabilities(tool_name).get("produces_untrusted"):
-                park.turn_tainted = True
-                if tool_name not in park.taint_sources:
-                    park.taint_sources.append(tool_name)
-                if isinstance(park.audit_info, dict):
-                    park.audit_info = {**park.audit_info, "taint_sources": list(park.taint_sources)}
+                park.add_taint_source(tool_name)
         else:
             # The standing instruction lives HERE, in the patched entry, not in
             # the continuation nudge. The nudge is ephemeral by design, so a

@@ -592,7 +592,7 @@ def _render_confirmation_text(
     if turn_tainted:
         lines.append(
             f"\n⚠️ Context contains untrusted content from: "
-            f"{', '.join(taint_sources)}"
+            f"{', '.join(taint_sources) if taint_sources else 'prior conversation'}"
         )
     return "\n".join(lines)
 
