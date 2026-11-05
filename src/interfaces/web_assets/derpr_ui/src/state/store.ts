@@ -449,6 +449,32 @@ export function usePortalStore() {
     }
   }, [])
 
+  // DP-498: the navigation-time (empty-query) LTM block, fetched in the
+  // background after loadAll has rendered. A newer load, a draft preview
+  // (previewLtm) or a persona switch (cancelLtmPreview) aborts it, so a slow
+  // recall can never overwrite a fresher block or land on the wrong view.
+  const ltmLoadAbort = useRef<AbortController | null>(null)
+  const loadLtmBlock = useCallback((p: string, chan: string) => {
+    ltmLoadAbort.current?.abort()
+    const ctl = new AbortController()
+    ltmLoadAbort.current = ctl
+    api.getLtmBlock(p, '', chan, ctl.signal).then(
+      (blk) => {
+        if (
+          ctl.signal.aborted ||
+          !ltmOnRef.current ||
+          activePersonaRef.current !== p ||
+          activeChannelRef.current !== chan
+        )
+          return
+        setLtmBlock(blk)
+      },
+      () => {}, // preview-only — an empty LTM row is the failure mode
+    ).finally(() => {
+      if (ltmLoadAbort.current === ctl) ltmLoadAbort.current = null
+    })
+  }, [])
+
   const loadAll = useCallback(
     async (p: string) => {
       setLoading(true)
@@ -485,13 +511,17 @@ export function usePortalStore() {
           resolvedChunks = await api.getTranscript(p, undefined, 'web_ui')
         }
         const isLtmOn = persObj.long_term_memory ?? true
-        const blk = isLtmOn ? await api.getLtmBlock(p, '', resolvedChan) : null
         setPersona(persObj)
         setChannels(chanList)
         setChunks(resolvedChunks)
         setLtmOn(isLtmOn)
-        setLtmBlock(blk)
+        // DP-498: the LTM block is a full Hindsight recall (2-7 s on a big
+        // bank) and only feeds the preview row / budget bar, so it must not
+        // gate the transcript. Clear the previous persona's block now and
+        // fill it in when the recall lands.
+        setLtmBlock(null)
         setOffline(api.usingMock())
+        if (isLtmOn) loadLtmBlock(p, resolvedChan)
         // DP-487: pick up a reply still being written (reload mid-turn).
         if (!api.usingMock()) void resumeRef.current(p, resolvedChan, 'check')
       } catch {
@@ -500,7 +530,7 @@ export function usePortalStore() {
         setLoading(false)
       }
     },
-    [],
+    [loadLtmBlock],
   )
 
   // initial boot
@@ -590,6 +620,7 @@ export function usePortalStore() {
     if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
     ltmPreviewPending.current = null
     ltmPreviewAbort.current?.abort()
+    ltmLoadAbort.current?.abort()
   }, [])
   const previewLtm = useCallback((draft: string) => {
     if (ltmPreviewTimer.current) clearTimeout(ltmPreviewTimer.current)
@@ -597,6 +628,7 @@ export function usePortalStore() {
     // Blank draft → leave the existing empty-query preview in place; don't fire.
     if (!trimmed) return
     ltmPreviewTimer.current = setTimeout(() => {
+      ltmLoadAbort.current?.abort() // the draft's block supersedes the load's
       ltmPreviewPending.current = trimmed
       if (ltmPreviewBusy.current) return // the running loop picks it up
       ltmPreviewBusy.current = true
