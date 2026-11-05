@@ -60,7 +60,8 @@ from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
 from src.stagr.codr_ticket import (
-    ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, render_task_md, ticket_id, ticket_number,
+    ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, parse_positive_int,
+    render_task_md, ticket_id, ticket_number,
 )
 from src.stagr.net import BOXES, ZONES, SandboxNet
 
@@ -474,15 +475,10 @@ class StagrToolHandler:
 
     @staticmethod
     def _positive_int(value: Any, name: str) -> Union[int, Dict[str, Any]]:
-        if isinstance(value, bool):
-            return _error(f"{name} must be a whole number.")
         try:
-            n = int(value)
-        except (TypeError, ValueError):
-            return _error(f"{name} must be a whole number.")
-        if n < 1:
-            return _error(f"{name} must be at least 1.")
-        return n
+            return parse_positive_int(value, name)
+        except ValueError as e:
+            return _error(str(e))
 
     def _ticket(self, title: Any, project: Any, depends_on: Any, spec: Any, plan: Any, packages: Any,
                 check_sh: Any, max_attempts: Any, max_seconds: Any = None) -> Union[Dict[str, Any], Tuple[str, List[str]]]:

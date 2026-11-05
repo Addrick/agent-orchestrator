@@ -978,6 +978,7 @@ async def test_task_max_seconds_overrides_agent_config(fake, tmp_path):
     # Started 15s ago: past task's 10s max_seconds, well under agent's 604800s
     auto_msg = _auto_messages(fake, sid)[0]
     auto_part = agent._auto_part(auto_msg)
+    assert auto_part["metadata"][AUTO]["max_seconds"] == 10
     auto_part["metadata"][AUTO]["started"] = time.time() - 15
 
     await agent.deploy()
@@ -992,6 +993,36 @@ def test_max_seconds_single_line_legacy_header(tmp_path):
     assert errors == {}
     assert tasks[0].max_seconds == 10
     assert tasks[0].text == "Build it."
+
+
+def test_task_failed_helper_is_standalone_safe():
+    assert not codr_agent._task_failed(["pass"], 1)
+    assert not codr_agent._task_failed(["fail", "pass"], 2)
+    assert codr_agent._task_failed(["fail"], 1)
+    assert codr_agent._task_failed(["fail", "fail"], 2)
+    assert codr_agent._task_failed(["timed_out"], 3)
+    assert codr_agent._task_failed(["stuck"], 3)
+
+
+async def test_a_removed_ticket_stuck_in_loop_is_recorded_as_aborted(fake, tmp_path):
+    """If the ticket folder is deleted while running, second strike records aborted."""
+    import shutil
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    for _ in range(3):
+        _tool_step(fake, sid)
+    await agent.deploy()
+    shutil.rmtree(tmp_path / "01-a")
+    for _ in range(3):
+        _tool_step(fake, sid, inp={"command": "cat x"})
+    await agent.deploy()
+    assert _auto_messages(fake, sid)[1]["parts"][0]["metadata"][AUTO]["result"] == "aborted"
+    (row,) = agent.memory_manager.rows
+    assert row["outcome"] == "aborted"
+    assert "**ABORTED**" in router.sent[-1][2]
 
 
 # --- DP-484: a session and a channel per ticket --------------------------------

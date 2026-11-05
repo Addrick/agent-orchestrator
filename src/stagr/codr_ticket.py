@@ -31,9 +31,10 @@ import them from there.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 TICKET_PREFIX = "CD"
 TICKET_ID_RE = re.compile(rf"^{TICKET_PREFIX}-(\d{{3,}})$")
@@ -43,6 +44,24 @@ SECTIONS = ("Spec", "Plan", "Packages")
 
 CODR_AGENT_NAME = "codr"
 ATTEMPT_ACTION = "task_attempt"
+
+
+def parse_positive_int(value: Any, label: str) -> int:
+    """Parse a strictly positive whole number (>= 1).
+    Raises ValueError on bad input."""
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a whole number of at least 1, not {value!r}")
+    if isinstance(value, int):
+        if value >= 1:
+            return value
+    elif isinstance(value, float):
+        if math.isfinite(value) and value.is_integer() and int(value) >= 1:
+            return int(value)
+    elif isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"\d+", s) and int(s) >= 1:
+            return int(s)
+    raise ValueError(f"{label} must be a whole number of at least 1, not {value!r}")
 
 
 _HEADER_LINE = re.compile(r"([a-z][a-z_]*):[ \t]*(.*?)\s*")

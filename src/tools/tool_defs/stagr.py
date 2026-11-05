@@ -297,7 +297,7 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
                     "max_attempts": {"type": "integer", "description": "Attempts before it counts as failed. Default 3."},
                     "max_seconds": {
                         "type": "integer",
-                        "description": "Seconds an attempt may run before it is stopped as timed_out (ending the ticket). Overrides codr's max_turn_seconds.",
+                        "description": "Seconds an attempt may run before it is stopped as timed_out (ending the ticket). Overrides the default attempt time limit.",
                     },
                 },
                 "required": ["title", "project", "spec", "plan", "packages", "check_sh"],

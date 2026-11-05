@@ -45,7 +45,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -57,7 +57,7 @@ from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET
 from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
-from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header
+from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header, parse_positive_int
 from src.agents.codr_transcript import TranscriptMirror
 from src.engine.providers.opencode import (
     AUTO_FIELD, INJECTED_FIELD, OpencodeClient, auth_headers, current_turn_start,
@@ -158,28 +158,17 @@ def _ticket_id_error(ticket_id: str) -> Optional[str]:
     return None
 
 
-def _positive_int_header(header: Dict[str, str], key: str) -> Optional[int]:
-    if key not in header:
-        return None
-    val = header[key]
-    if not re.fullmatch(r"\d+", val) or int(val) < 1:
-        raise ValueError(f"`{key}:` must be a whole number of at least 1, not {val!r}")
-    return int(val)
-
-
 def _ticket_fields(ticket_id: str, header: Dict[str, str], default_attempts: int) -> Dict[str, Any]:
     """The header's values, checked. Raises ValueError naming what is wrong."""
     unknown = sorted(set(header) - set(HEADER_KEYS))
     if unknown:
         raise ValueError(f"unknown header key(s): {', '.join(unknown)} (known: {', '.join(HEADER_KEYS)})")
-    attempts = _positive_int_header(header, "max_attempts")
     fields: Dict[str, Any] = {
-        "max_attempts": default_attempts if attempts is None else attempts,
+        "max_attempts": parse_positive_int(header["max_attempts"], "`max_attempts:`") if "max_attempts" in header else default_attempts,
         "title": header.get("title", ""),
     }
-    seconds = _positive_int_header(header, "max_seconds")
-    if seconds is not None:
-        fields["max_seconds"] = seconds
+    if "max_seconds" in header:
+        fields["max_seconds"] = parse_positive_int(header["max_seconds"], "`max_seconds:`")
     project = header.get("project", "") or default_project(ticket_id)
     if not PROJECT_RE.fullmatch(project):
         raise ValueError(f"project name {project!r} must be lowercase letters, digits and '-'")
@@ -248,11 +237,12 @@ FINAL_STATES = (PASSED, FAILED, BLOCKED, REMOVED)
 
 
 def _task_failed(done: List[str], max_attempts: int) -> bool:
-    return len(done) >= max_attempts or any(o != "fail" for o in done)
+    return "pass" not in done and (len(done) >= max_attempts or any(o != "fail" for o in done))
 
 
 def _dep_state(dep: str, path: Tuple[str, ...], by_id: Dict[str, CodrTask],
-               outcomes: Dict[str, List[str]], state_fn: Any) -> Tuple[str, str]:
+               outcomes: Dict[str, List[str]],
+               state_fn: Callable[[str, Tuple[str, ...]], Tuple[str, str]]) -> Tuple[str, str]:
     """What `dep` makes of the ticket at the end of `path`."""
     if dep in path:
         return BLOCKED, f"its dependencies form a cycle ({' -> '.join(path + (dep,))})"
@@ -1178,6 +1168,8 @@ class CodrAgent(Agent):
             first = not any(message_meta(m, AUTO_FIELD) for m in msgs)
             context = parse_context(await client.run_shell(context_script(task))) if first else None
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
+            if task.max_seconds is not None:
+                meta["max_seconds"] = task.max_seconds
             await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous, context), meta)
             await self._mirror(client, sid, task.id)
         logger.info("codr agent: started task %s attempt %d", task.id, attempt)
@@ -1213,11 +1205,13 @@ class CodrAgent(Agent):
 
     # -- watch
 
-    def _stuck_reason(self, turn: List[Dict[str, Any]], auto: Dict[str, Any],
-                      task: Optional[CodrTask] = None) -> Tuple[Optional[str], bool]:
+    def _stuck_reason(self, turn: List[Dict[str, Any]], auto: Dict[str, Any]) -> Tuple[Optional[str], bool]:
         """(reason, nudgeable). An overrun is never nudged: the attempt is out of time."""
-        limit = task.max_seconds if (task is not None and task.max_seconds is not None) else self.cfg["max_turn_seconds"]
-        if time.time() - float(auto.get("started") or time.time()) > float(limit):
+        raw_limit = auto.get("max_seconds")
+        limit = raw_limit if raw_limit is not None else self.cfg["max_turn_seconds"]
+        started = auto.get("started")
+        started_ts = time.time() if started is None else float(started)
+        if time.time() - started_ts > float(limit):
             return f"the attempt ran past {int(limit)} s", False
         reason = detect_loop(turn)
         if reason:
@@ -1233,24 +1227,21 @@ class CodrAgent(Agent):
 
     async def _watch(self, client: OpencodeClient, sid: str, msgs: List[Dict[str, Any]],
                      start: int, auto: Dict[str, Any]) -> None:
-        task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
-        reason, nudgeable = self._stuck_reason(msgs[start + 1:], auto, task=task)
+        reason, nudgeable = self._stuck_reason(msgs[start + 1:], auto)
         if not reason:
             return
         # Held from the abort to the nudge being in the session: with the turn
         # stopped, a chat message would otherwise start a turn in between and
         # the nudge would land inside it.
         async with workspace_lock(self.directory):
-            await self._stop(client, sid, msgs, start, auto, reason, nudgeable, task=task)
+            await self._stop(client, sid, msgs, start, auto, reason, nudgeable)
 
     async def _stop(self, client: OpencodeClient, sid: str, msgs: List[Dict[str, Any]], start: int,
-                    auto: Dict[str, Any], reason: str, nudgeable: bool,
-                    task: Optional[CodrTask] = None) -> None:
+                    auto: Dict[str, Any], reason: str, nudgeable: bool) -> None:
         await client.abort(sid)
         await self._wait_idle(client, sid)
         start_part = self._auto_part(msgs[start])
-        if task is None:
-            task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
+        task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
         persona = self.chat_system.personas.get(self.persona_name)
         if nudgeable and int(auto.get("nudges", 0)) == 0 and task and persona:
             await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": "nudged", "reason": reason}})
@@ -1259,7 +1250,12 @@ class CodrAgent(Agent):
             await self._prompt(client, sid, persona, nudge, {**auto, "nudges": 1})
             logger.info("codr agent: nudged task %s: %s", task.id, reason)
             return
-        outcome = "stuck" if nudgeable else "timed_out"
+        if not nudgeable:
+            outcome = "timed_out"
+        elif task is None:
+            outcome = "aborted"
+        else:
+            outcome = "stuck"
         await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": outcome, "reason": reason}})
         await self._record(auto, outcome, {"reason": reason}, task)
         if task is not None:

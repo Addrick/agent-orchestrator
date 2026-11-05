@@ -445,6 +445,8 @@ async def test_depends_on_must_name_a_known_ticket(queue, action_log):
     ({"max_seconds": 0}, "max_seconds"),
     ({"max_seconds": "fast"}, "max_seconds"),
     ({"max_seconds": True}, "max_seconds"),
+    ({"max_seconds": 1.5}, "max_seconds"),
+    ({"max_seconds": float("inf")}, "max_seconds"),
 ])
 async def test_a_bad_ticket_is_refused_and_writes_nothing(queue, action_log, fields, word):
     result = await _queue(StagrToolHandler(memory_manager=action_log), **fields)
