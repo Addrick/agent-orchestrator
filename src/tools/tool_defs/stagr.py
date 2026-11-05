@@ -295,6 +295,10 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
                     },
                     "check_sh": {"type": "string", "description": "The bash check. Exit code 0 means pass."},
                     "max_attempts": {"type": "integer", "description": "Attempts before it counts as failed. Default 3."},
+                    "max_seconds": {
+                        "type": "integer",
+                        "description": "Seconds an attempt may run before it is stopped as timed_out (ending the ticket). Overrides codr's max_turn_seconds.",
+                    },
                 },
                 "required": ["title", "project", "spec", "plan", "packages", "check_sh"],
             },

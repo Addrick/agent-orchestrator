@@ -358,6 +358,7 @@ async def test_a_ticket_is_written_in_the_shared_format(queue, action_log):
     handler = StagrToolHandler(memory_manager=action_log)
     assert (await _queue(handler))["queued"] == "CD-001"
     result = await _queue(handler, title="Add --total", depends_on=["CD-001"], max_attempts=2,
+                          max_seconds=1800,
                           packages="python3-click (apt), installed and imported on codr")
     assert result["status"] == "ok" and result["queued"] == "CD-002" and "CD-002" in result["note"]
     assert (queue / "CD-002" / "TASK.md").read_text(encoding="utf-8") == (
@@ -365,6 +366,7 @@ async def test_a_ticket_is_written_in_the_shared_format(queue, action_log):
         "project: click-cli\n"
         "depends_on: CD-001\n"
         "max_attempts: 2\n"
+        "max_seconds: 1800\n"
         "\n"
         "## Spec\n\nIt must count.\n\n"
         "## Plan\n\nEdit cli.py; risk: none.\n\n"
@@ -373,7 +375,9 @@ async def test_a_ticket_is_written_in_the_shared_format(queue, action_log):
         "title: Fix the --count flag\nproject: click-cli\n\n## Spec\n")
     assert (queue / "CD-002" / "check.sh").read_text(encoding="utf-8") == "python3 -I -m unittest\n"
     # The codr agent sees both, and no staging folder is left behind.
-    assert [t.id for t in load_tasks(queue, default_attempts=3)] == ["CD-001", "CD-002"]
+    tasks = load_tasks(queue, default_attempts=3)
+    assert [t.id for t in tasks] == ["CD-001", "CD-002"]
+    assert tasks[1].max_seconds == 1800
     assert sorted(p.name for p in queue.iterdir() if p.is_dir()) == ["CD-001", "CD-002"]
 
 
@@ -437,6 +441,10 @@ async def test_depends_on_must_name_a_known_ticket(queue, action_log):
     ({"depends_on": ["../x"]}, "depends_on"),
     ({"max_attempts": 0}, "max_attempts"),
     ({"max_attempts": "lots"}, "max_attempts"),
+    ({"max_attempts": True}, "max_attempts"),
+    ({"max_seconds": 0}, "max_seconds"),
+    ({"max_seconds": "fast"}, "max_seconds"),
+    ({"max_seconds": True}, "max_seconds"),
 ])
 async def test_a_bad_ticket_is_refused_and_writes_nothing(queue, action_log, fields, word):
     result = await _queue(StagrToolHandler(memory_manager=action_log), **fields)
@@ -475,7 +483,7 @@ def test_the_tool_schema_takes_the_ticket_fields():
     [tool] = [t for t in STAGR_TOOLS if t["function"]["name"] == "queue_codr_task"]
     params = tool["function"]["parameters"]
     assert set(params["properties"]) == {"title", "project", "depends_on", "spec", "plan", "packages",
-                                         "check_sh", "max_attempts"}
+                                         "check_sh", "max_attempts", "max_seconds"}
     assert set(params["required"]) == {"title", "project", "spec", "plan", "packages", "check_sh"}
     assert tool["is_write"] is True
 

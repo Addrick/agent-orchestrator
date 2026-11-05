@@ -115,6 +115,23 @@ async def test_a_ticket_out_of_attempts_wakes_stagr_with_the_check_output(tmp_pa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["timed_out", "stuck"])
+async def test_a_timed_out_or_stuck_ticket_immediately_wakes_stagr(tmp_path, outcome):
+    """DP-482: timed_out and stuck are not retried even with attempts left; they immediately wake stagr."""
+    _task(tmp_path, "CD-001", text="max_attempts: 3\n\nBuild it.")
+    agent, _, resolved = _wired(tmp_path, "CD-001")
+    _attempt(agent, "CD-001", outcome, reason=f"the turn ended as {outcome}")
+
+    await _tick(agent)
+
+    (token, _, status, result), = resolved
+    assert status == "failed"
+    assert result["last_outcome"] == outcome
+    assert result["reason"] == f"the turn ended as {outcome}"
+    assert "Do not queue" in result["instruction"]
+
+
+@pytest.mark.asyncio
 async def test_a_removed_ticket_wakes_stagr_and_a_passed_one_still_counts_as_passed(tmp_path):
     agent, _, resolved = _wired(tmp_path, "CD-001", "CD-002")    # neither folder exists
     _attempt(agent, "CD-002", "pass")
