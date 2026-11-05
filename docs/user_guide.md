@@ -1453,11 +1453,14 @@ it did before: a read (e.g. Hindsight's `recall`, `reflect`, `get_*`) stays
 saved again. A server that never comes back leaves its names as saved.
 
 The Inspector's Tools tab lists such names (any saved tool with no registered
-definition) under **unavailable**, collapsed at the bottom. Saving the tab keeps
-them as they were, whatever else you changed, and the set-all and per-group
-buttons leave them alone. **remove** drops one from the policy on the next save
-(**undo** puts it back). Before this, saving the tab while an MCP server was down
-silently dropped every one of that server's tools from the persona.
+definition) as one more group, **unavailable**, at the bottom. They are ordinary
+tools there: off · allow · ask per row, the group's own bulk buttons, and the
+**set all tools** row covers them too, so "all off" really is all off. Saving the
+tab writes each one back as set; **off** drops it from the policy. Two things
+need a definition the UI does not have yet, so they fall back the way the engine
+does with none: **on** (defaults) sets them to **ask**, and **allow** asks you to
+confirm because the tool may be irreversible. Before this, saving the tab while
+an MCP server was down silently dropped every one of that server's tools.
 
 ### Insecure Composition Blocking
 To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
