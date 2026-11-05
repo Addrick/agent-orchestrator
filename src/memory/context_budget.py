@@ -235,11 +235,11 @@ def drop_orphaned_tool_head(
     * `role == "system"` entries, which `truncate_messages_to_budget`
       deliberately preserves while dropping the conversation around them, and
       of which the `client_messages` path strips only one;
-    * anything in `injected` — head content the request builder prepends after
-      truncation (the long-term-memory recall block, a `user` message that is
-      not a real conversational turn). Matched by **identity**, so a caller can
-      pass a block that may or may not have survived pruning and get the right
-      answer either way.
+    * anything in `injected` — optional non-conversational `user` preamble
+      messages matched by **identity**, so callers injecting head content
+      (such as synthetic prompts or test fixtures) can pass blocks that should
+      not count as conversational user turns. (DP-431 moved LTM recall into the
+      newest user turn, so `prepare_request` no longer passes `injected`).
 
     Neither is a turn the orphan can legally attach to, so skipping them and
     continuing the scan is what makes the repair fire in the cases that

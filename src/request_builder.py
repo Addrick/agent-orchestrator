@@ -1038,10 +1038,11 @@ class RequestBuilder:
 
         # Last stop before the wire: a history that STARTS on an
         # assistant-with-tool_calls / tool message whose user turn is gone is
-        # rejected outright by Google. DP-296 closed the two DB-side producers
-        # (atomic tool spans in the pruner, the tool_context replay guard in
-        # build_conversation_history); the client_messages path above has
-        # neither guard, and this also fails safe for any future producer.
+        # rejected outright by Google. DP-296 / DP-474: format_raw_history_for_llm
+        # drops tool_context when no user turn precedes it in the window;
+        # drop_orphaned_tool_head handles client_messages (which has no such guard)
+        # as well as the DB path whenever truncate_messages_to_budget evicts the
+        # leading user turn ahead of an approval-resume chain.
         # Runs after the token-prune.
         ctx.conversation_history, orphaned = drop_orphaned_tool_head(
             ctx.conversation_history,

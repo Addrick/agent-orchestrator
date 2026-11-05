@@ -295,10 +295,9 @@ async def test_approval_resume_wire_shape_grouped_for_google():
         },
     ]
 
-    with patch('src.engine.TextEngine._download_image', new_callable=AsyncMock):
-        history_for_api, serializable_history = await engine._build_google_history(
-            "system prompt", history, None
-        )
+    history_for_api, serializable_history = await engine._build_google_history(
+        "system prompt", history, None
+    )
 
     # 4 turns: user -> model (merged text + call) -> tool -> model
     assert len(history_for_api) == 4
