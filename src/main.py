@@ -326,6 +326,14 @@ def _install_shutdown_handlers(
                 logger.warning(f"Could not install a handler for {sig!r}: {e}")
 
 
+def _register_retain_maintenance(app: Any, bot: Any) -> None:
+    """DP-495: the block-retain upkeep loop, stoppable at its next pass."""
+    app.register_task(
+        "retain_maintenance", bot.run_retain_maintenance(),
+        stop=bot.stop_retain_maintenance,
+    )
+
+
 async def main() -> None:
     """Main asynchronous function to initialize and run the application."""
     logger.info("Starting application...")
@@ -357,14 +365,6 @@ async def main() -> None:
         text_engine=text_engine,
         embedding_service=embedding_service,
     )
-
-    # DP-423 boot pass: retain the queued turns of conversations that went
-    # idle while the process was down (including any a down Hindsight
-    # refused). Evicted turns of still-active conversations are retried by
-    # that conversation's next turn. Every turn re-runs this sweep; this
-    # covers a process that comes up and sees no traffic. Backgrounded:
-    # startup never waits on it.
-    bot.turn_persistence.schedule_flush()
 
     # 5. Register service integrations
     if zammad_client is not None:
@@ -528,6 +528,14 @@ async def main() -> None:
             stop=consolidator.stop,
             drain_timeout=MemoryConsolidator.DRAIN_TIMEOUT_SECONDS,
         )
+
+    # 9.1 DP-495 block-retain upkeep: sends queued blocks, polls Hindsight
+    # until each block's extraction completes (the block then leaves the
+    # prompt), and trims / retains conversations idle 48 h / 72 h. Its first
+    # pass runs at once and is the boot pass: blocks a restart interrupted, a
+    # down Hindsight refused, or conversations that went quiet while the
+    # process was down. Every turn also sends and polls (schedule_flush).
+    _register_retain_maintenance(app, bot)
 
     # 10. Optionally update the model list on startup
     if UPDATE_MODELS_ON_STARTUP:

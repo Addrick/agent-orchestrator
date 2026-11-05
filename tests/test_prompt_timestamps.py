@@ -11,6 +11,7 @@ from config import global_config
 from src.persona import Persona
 from src.request_builder import RequestBuilder, RequestContext, _PROMPT_STAMP
 from src.utils.timeutil import prompt_stamp
+from tests.helpers import stub_retain_window
 
 T1 = datetime(2026, 10, 14, 18, 5, tzinfo=timezone.utc)   # Wed 14:05 EDT
 T2 = datetime(2026, 10, 15, 13, 30)                       # naive UTC, Thu 09:30 EDT
@@ -24,6 +25,7 @@ def eastern(monkeypatch):
 def _builder(rows=()):
     mm = MagicMock()
     mm.get_channel_history.return_value = [dict(r) for r in rows]
+    stub_retain_window(mm)
     tools = MagicMock()
     tools.get_tool_definitions.return_value = []
     return RequestBuilder(

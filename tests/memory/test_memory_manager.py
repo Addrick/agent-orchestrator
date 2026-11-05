@@ -3380,84 +3380,181 @@ def test_quarantined_is_its_own_terminal_state():
         manager.close()
 
 
-# --- Deferred retain queue (DP-423) ---
+# --- Block retain queue (DP-423 queue, DP-495 blocks) ---
 
 def _log(manager, content, *, role="user", user="u1", channel="c1",
-         persona="p", ts=None):
+         persona="p", ts=None, server_id=None):
     return manager.log_message(
         user_identifier=user, persona_name=persona, channel=channel,
         author_role=role, author_name=user if role == "user" else persona,
         content=content, timestamp=ts or datetime.now(timezone.utc),
+        server_id=server_id,
     )
 
 
-def test_migration_creates_pending_retain(legacy_mem_manager):
-    """A pre-DP-423 DB gains Pending_Retain + its index, keeps its rows,
-    treats them as already retained, and the queue works on it."""
-    conn = legacy_mem_manager._get_connection()
-    conn.execute(
-        "INSERT INTO User_Interactions (user_identifier, persona_name, channel,"
-        " author_role, content, timestamp) VALUES ('u1', 'p', 'c1', 'user', 'old', ?)",
-        (datetime.now(timezone.utc),),
-    )
+def _scope(mode=None, **kw):
+    from src.memory.retain_blocks import retain_scope
+    from src.persona import MemoryMode
+    args = {"persona_name": "p", "channel": "c1", "user_identifier": "u1", "server_id": None}
+    args.update(kw)
+    return retain_scope(mode or MemoryMode.CHANNEL_ISOLATED, **args)
+
+
+def _queued(manager, *contents, **kw):
+    ids = []
+    for c in contents:
+        i = _log(manager, c, **kw)
+        manager.queue_retain(i, "p", kw.get("channel", "c1"), untrusted=False)
+        ids.append(i)
+    return ids
+
+
+def test_migration_from_dp423_keeps_queued_turns(tmp_path):
+    """A DP-423 database: Pending_Retain without block columns, holding
+    turns still queued. Migration adds the columns, the index and the window
+    and block tables; the queued turns survive and the first cut sends them
+    (nothing lost); turns DP-423 had already retained (dequeued) are not
+    queued again (nothing sent twice); idempotent."""
+    db = str(tmp_path / "dp423.db")
+    mm = MemoryManager(db_path=db)
+    mm.create_schema()
+    conn = mm._get_connection()
+    conn.executescript("""
+        DROP TABLE Pending_Retain;
+        DROP TABLE Retain_Window;
+        DROP TABLE Retain_Block;
+        CREATE TABLE Pending_Retain (
+            interaction_id INTEGER PRIMARY KEY,
+            persona_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            untrusted INTEGER NOT NULL DEFAULT 0,
+            retain_text TEXT,
+            source_content TEXT,
+            generation INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (interaction_id) REFERENCES User_Interactions(interaction_id) ON DELETE CASCADE
+        );
+        CREATE INDEX idx_pending_retain_scope ON Pending_Retain (persona_name, channel, interaction_id);
+    """)
+    retained = _log(mm, "already retained by DP-423")
+    waiting = _log(mm, "still queued")
+    conn.execute("INSERT INTO Pending_Retain (interaction_id, persona_name, channel, generation)"
+                 " VALUES (?, 'p', 'c1', 2)", (waiting,))
     conn.commit()
 
-    legacy_mem_manager.create_schema()
-    legacy_mem_manager.create_schema()  # idempotent
+    mm.create_schema()
+    mm.create_schema()  # idempotent
 
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(Pending_Retain)")}
+    assert {"block_id", "sent_generation"} <= cols
     names = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master")}
-    assert "Pending_Retain" in names
-    assert "idx_pending_retain_scope" in names
-    # Existing data preserved, and NOT queued: it was retained live before.
-    assert conn.execute("SELECT content FROM User_Interactions").fetchone()[0] == "old"
-    assert legacy_mem_manager.pending_retains("p", channel="c1") == []
+    assert {"Retain_Window", "Retain_Block", "idx_pending_retain_block",
+            "idx_retain_block_status"} <= names
+    assert mm.is_retain_pending(waiting)
+    assert not mm.is_retain_pending(retained)
 
-    new_id = _log(legacy_mem_manager, "new")
-    legacy_mem_manager.queue_retain(new_id, "p", "c1", untrusted=False)
-    taken = legacy_mem_manager.pending_retains("p", channel="c1")
-    assert [t["text"] for t in taken] == ["new"]
+    scope = _scope()
+    start, floor = mm.retain_window(scope)
+    assert start <= retained and floor == start   # DP-423's window is still shown
+    newer = _queued(mm, "after the upgrade")[0]
+    block = mm.cut_retain_block(scope, expected_start=start, new_start=newer)
+    members = mm.retain_block_members(block)
+    assert [m["interaction_id"] for m in members] == [waiting]
+    assert members[0]["generation"] == 2
+    mm.close()
 
 
-def test_pending_retains_bounds_and_explicit_dequeue(mem_manager):
-    ids = [_log(mem_manager, f"m{i}") for i in range(4)]
-    for i in ids:
-        mem_manager.queue_retain(i, "p", "c1", untrusted=False)
-    other = _log(mem_manager, "elsewhere", channel="c2")
-    mem_manager.queue_retain(other, "p", "c2", untrusted=False)
+def test_first_seen_scope_starts_at_dp423_window(mem_manager):
+    """A scope without a window row starts where DP-423's 15-row window did,
+    or lower if an older turn is still queued — so already-retained history
+    is not pulled back in, and nothing unsent is hidden."""
+    ids = [_log(mem_manager, f"m{i}") for i in range(20)]
+    start, _ = mem_manager.retain_window(_scope(), persist=False)
+    assert start == ids[5]
+    mem_manager.queue_retain(ids[2], "p", "c1", untrusted=False)
+    start, _ = mem_manager.retain_window(_scope(), persist=False)
+    assert start == ids[2]
+    # persist=False wrote nothing.
+    assert mem_manager.retain_windows() == []
 
-    taken = mem_manager.pending_retains("p", channel="c1", before_id=ids[2])
-    assert [t["interaction_id"] for t in taken] == ids[:2]
-    # Reading is not dequeuing: a turn leaves only once its retain is confirmed.
-    assert mem_manager.is_retain_pending(ids[0])
-    mem_manager.delete_pending_retains(taken)
-    assert not mem_manager.is_retain_pending(ids[0])
+
+def test_first_seen_scope_uses_the_personas_own_dp423_window(mem_manager):
+    """DP-423's window was the persona's own `context` (at most the old
+    default 15): a persona on 5 had turns 6-15 retained already, so its
+    first DP-495 prompt must not pull them back in. 0 showed nothing."""
+    from src.memory.retain_blocks import legacy_window
+    ids = [_log(mem_manager, f"m{i}") for i in range(20)]
+    assert legacy_window(5) == 5 and legacy_window(1000) == 15 and legacy_window(0) == 0
+    start, _ = mem_manager.retain_window(_scope(legacy=legacy_window(5)), persist=False)
+    assert start == ids[15]
+    start, _ = mem_manager.retain_window(_scope(legacy=0), persist=False)
+    assert start == ids[-1] + 1
+    # A turn still queued pulls the start back down, whatever the window.
+    mem_manager.queue_retain(ids[17], "p", "c1", untrusted=False)
+    start, _ = mem_manager.retain_window(_scope(legacy=0), persist=False)
+    assert start == ids[17]
+
+
+def test_cut_collects_queued_turns_and_moves_the_start(mem_manager):
+    ids = _queued(mem_manager, "a", "b", "c", "d")
+    other = _queued(mem_manager, "elsewhere", channel="c2")[0]
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=ids[2])
+    assert [m["interaction_id"] for m in mem_manager.retain_block_members(block)] == ids[:2]
+    (row,) = mem_manager.retain_blocks(statuses=("queued",))
+    assert (row["seq"], row["lo_id"], row["hi_id"], row["kind"]) == (1, start, ids[2], "trim")
+    # The block stays shown: the floor stays put while the start moves.
+    assert mem_manager.retain_window(scope) == (ids[2], start)
+    # Another channel's turn is untouched.
     assert mem_manager.is_retain_pending(other)
-    assert [t["interaction_id"] for t in mem_manager.pending_retains("p", channel="c1")] == ids[2:]
+    assert mem_manager.retain_block_members(block)[0]["skip"] is False
+
+    # A concurrent request that read the old start is refused.
+    assert mem_manager.cut_retain_block(scope, expected_start=start, new_start=ids[3]) is None
+    # The next cut is block 2.
+    nxt = mem_manager.cut_retain_block(scope, expected_start=ids[2], new_start=ids[3])
+    assert mem_manager.retain_blocks(statuses=("queued",), block_id=nxt)[0]["seq"] == 2
 
 
-def test_pending_retains_filters_by_user(mem_manager):
-    a = _log(mem_manager, "from a", user="a")
-    b = _log(mem_manager, "from b", user="b")
-    for i in (a, b):
-        mem_manager.queue_retain(i, "p", "c1", untrusted=False)
-    taken = mem_manager.pending_retains("p", channel="c1", user_identifier="a")
-    assert [t["interaction_id"] for t in taken] == [a]
-    assert mem_manager.is_retain_pending(b)
+def test_block_done_moves_the_floor(mem_manager):
+    ids = _queued(mem_manager, "a", "b")
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=ids[1])
+    row = mem_manager.retain_blocks(block_id=block)[0]
+    mem_manager.mark_retain_block_sent(
+        row, members=mem_manager.retain_block_members(block), op_ids=["op1"],
+        document_ids=["d"], first_ts=datetime.now(timezone.utc), untrusted=False,
+    )
+    assert mem_manager.retain_window(scope) == (ids[1], start)   # sent: still shown
+    assert not mem_manager.is_retain_pending(ids[0])
+    mem_manager.set_retain_block_status(block, "done", expect="sent")
+    assert mem_manager.retain_window(scope) == (ids[1], ids[1])  # done: dropped
 
 
-def test_pending_retains_reads_the_row_at_flush_time(mem_manager):
-    """Edits inside the window are honoured; deleted and emptied rows are
+def test_cut_without_queued_turns_is_done_and_unnumbered(mem_manager):
+    ids = [_log(mem_manager, "never queued (an errored reply)") for _ in range(2)]
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=ids[1])
+    assert mem_manager.retain_blocks(statuses=("done",), block_id=block)[0]["seq"] is None
+    assert mem_manager.retain_window(scope) == (ids[1], ids[1])
+
+
+def test_block_members_read_the_row_at_send_time(mem_manager):
+    """Edits inside the prompt are honoured; deleted and emptied rows are
     skipped; untrusted survives the queue."""
-    edited = _log(mem_manager, "first draft")
-    deleted = _log(mem_manager, "oops")
+    edited, deleted = _queued(mem_manager, "first draft", "oops")
     tainted = _log(mem_manager, "tool said so", role="assistant")
-    for i in (edited, deleted):
-        mem_manager.queue_retain(i, "p", "c1", untrusted=False)
     mem_manager.queue_retain(tainted, "p", "c1", untrusted=True)
     mem_manager.update_interaction_content(edited, "final draft")
     mem_manager.suppress_interaction(deleted)
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=tainted + 1)
 
-    by_id = {t["interaction_id"]: t for t in mem_manager.pending_retains("p", channel="c1")}
+    by_id = {m["interaction_id"]: m for m in mem_manager.retain_block_members(block)}
     assert by_id[edited]["text"] == "final draft" and not by_id[edited]["skip"]
     assert by_id[deleted]["skip"]
     assert by_id[tainted]["untrusted"] is True
@@ -3475,61 +3572,117 @@ def test_retain_text_applies_only_while_source_content_unchanged(mem_manager):
         mem_manager.queue_retain(i, "p", "c1", untrusted=False,
                                  retain_text="Answer.", source_content=full)
     mem_manager.update_interaction_content(edited, "Rewritten answer.")
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=edited + 1)
 
-    by_id = {t["interaction_id"]: t for t in mem_manager.pending_retains("p", channel="c1")}
+    by_id = {m["interaction_id"]: m for m in mem_manager.retain_block_members(block)}
     assert by_id[kept]["text"] == "Answer."
     assert by_id[edited]["text"] == "Rewritten answer."
 
 
-def test_queue_retain_upsert_replaces_retried_attempt(mem_manager):
-    row = _log(mem_manager, "attempt", role="assistant")
-    mem_manager.queue_retain(row, "p", "c1", untrusted=True)
-    mem_manager.queue_retain(row, "p", "c1", untrusted=False)
-    taken = mem_manager.pending_retains("p", channel="c1")
-    assert len(taken) == 1 and taken[0]["untrusted"] is False
+def _sent_block(mm, *contents):
+    ids = _queued(mm, *contents)
+    scope = _scope()
+    start, _ = mm.retain_window(scope)
+    block = mm.cut_retain_block(scope, expected_start=start, new_start=ids[-1] + 1)
+    row = mm.retain_blocks(block_id=block)[0]
+    mm.mark_retain_block_sent(row, members=mm.retain_block_members(block), op_ids=["op"],
+                              document_ids=["d"], first_ts=datetime.now(timezone.utc),
+                              untrusted=False)
+    return ids, block, row
 
 
-def test_requeue_during_flush_survives_the_dequeue(mem_manager):
-    """A flush read the old attempt; a retry re-queued the row before the
-    flush confirmed. The confirmed dequeue must leave the new attempt."""
-    row = _log(mem_manager, "attempt 1", role="assistant")
-    mem_manager.queue_retain(row, "p", "c1", untrusted=False)
-    read_by_flush = mem_manager.pending_retains("p", channel="c1")
-    mem_manager.queue_retain(row, "p", "c1", untrusted=True)  # the retry
-
-    mem_manager.delete_pending_retains(read_by_flush)
-    assert mem_manager.is_retain_pending(row)
-    assert mem_manager.pending_retains("p", channel="c1")[0]["untrusted"] is True
-
-    mem_manager.discard_pending_retain(row)
-    assert not mem_manager.is_retain_pending(row)
+def test_requeue_of_a_sent_turn_rebuilds_its_block(mem_manager):
+    """A retried reply already sent: its block is queued again under a new
+    request id (Hindsight answers a reused one with the old operation)."""
+    ids, block, row = _sent_block(mem_manager, "q", "attempt 1")
+    mem_manager.queue_retain(ids[1], "p", "c1", untrusted=True)  # the retry
+    assert mem_manager.is_retain_pending(ids[1])
+    (again,) = mem_manager.retain_blocks(statuses=("queued",))
+    assert again["block_id"] == block and again["request_id"] != row["request_id"]
+    assert [m["interaction_id"] for m in mem_manager.retain_block_members(block)] == ids
 
 
-def test_idle_retain_scopes(mem_manager):
-    """Idle = no turn at all in the scope since the cutoff, queued or not."""
+def test_requeue_during_send_requeues_the_block(mem_manager):
+    """A send read attempt 1; a retry re-queued the row before Hindsight
+    accepted. Marking sent must not swallow attempt 2: the block goes again."""
+    ids = _queued(mem_manager, "attempt 1")
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    block = mem_manager.cut_retain_block(scope, expected_start=start, new_start=ids[0] + 1)
+    row = mem_manager.retain_blocks(block_id=block)[0]
+    read_by_send = mem_manager.retain_block_members(block)
+    mem_manager.queue_retain(ids[0], "p", "c1", untrusted=True)  # the retry
+
+    mem_manager.mark_retain_block_sent(row, members=read_by_send, op_ids=["op"],
+                                       document_ids=["d"], first_ts=None, untrusted=False)
+    assert mem_manager.is_retain_pending(ids[0])
+    (again,) = mem_manager.retain_blocks(statuses=("queued",))
+    assert again["request_id"] != row["request_id"]
+
+
+def test_discard_of_a_sent_turn_rebuilds_its_block_without_it(mem_manager):
+    ids, block, _ = _sent_block(mem_manager, "q", "attempt")
+    mem_manager.discard_pending_retain(ids[1])
+    assert not mem_manager.is_retain_pending(ids[1])
+    assert mem_manager.retain_blocks(statuses=("queued",))[0]["block_id"] == block
+    assert [m["interaction_id"] for m in mem_manager.retain_block_members(block)] == ids[:1]
+
+
+def test_untrusted_is_sticky_across_a_rebuild(mem_manager):
+    ids, block, row = _sent_block(mem_manager, "a")
+    mem_manager.queue_retain(ids[0], "p", "c1", untrusted=False)
+    again = mem_manager.retain_blocks(statuses=("queued",))[0]
+    with mem_manager.transaction() as conn:
+        conn.execute("UPDATE Retain_Block SET untrusted = 1 WHERE block_id = ?", (block,))
+    again = mem_manager.retain_blocks(statuses=("queued",))[0]
+    mem_manager.mark_retain_block_sent(again, members=mem_manager.retain_block_members(block),
+                                       op_ids=[], document_ids=[], first_ts=None, untrusted=False)
+    assert mem_manager.retain_blocks(statuses=("sent",))[0]["untrusted"] == 1
+
+
+def test_final_block_keeps_the_start_and_sends_nothing_twice(mem_manager):
+    """72 h: everything unsent goes as one block; the start does not move
+    (the turns stay shown). A later cut over them sends nothing again."""
+    ids = _queued(mem_manager, "a", "b")
+    scope = _scope()
+    start, _ = mem_manager.retain_window(scope)
+    final = mem_manager.final_retain_block(scope)
+    assert [m["interaction_id"] for m in mem_manager.retain_block_members(final)] == ids
+    assert mem_manager.retain_window(scope)[0] == start
+    assert mem_manager.final_retain_block(scope) is None   # nothing left
+
+    later = _queued(mem_manager, "c")
+    trim = mem_manager.cut_retain_block(scope, expected_start=start, new_start=later[0] + 1)
+    assert [m["interaction_id"] for m in mem_manager.retain_block_members(trim)] == later
+
+
+def test_scope_sql_matches_the_history_getters(mem_manager):
+    """Each memory mode's scope selects the rows its history getter shows:
+    server_id NULL is matched as IS NULL; personal mode by user."""
+    from src.persona import MemoryMode
+    web = _log(mem_manager, "web ui")
+    disc = _log(mem_manager, "discord", server_id="guild")
+    other_user = _log(mem_manager, "b's turn", user="b")
+    assert mem_manager.scope_max_id(_scope()) == other_user
+    assert mem_manager.scope_max_id(_scope(server_id="guild")) == disc
+    assert mem_manager.scope_max_id(_scope(MemoryMode.PERSONAL)) == disc
+    assert mem_manager.scope_max_id(_scope(MemoryMode.SERVER_WIDE, server_id=None)) == other_user
+    assert mem_manager.scope_max_id(_scope(MemoryMode.GLOBAL)) == other_user
+    rows = mem_manager.get_channel_history("c1", "p", None, 10, min_id=other_user)
+    assert [r["interaction_id"] for r in rows] == [other_user]
+    assert web < disc
+
+
+def test_unblocked_origins_and_last_activity(mem_manager):
     from datetime import timedelta
     now = datetime.now(timezone.utc)
-    stale = _log(mem_manager, "stale", channel="idle", ts=now - timedelta(days=2))
-    naive = _log(mem_manager, "pre-DP-413 naive", channel="legacy", persona="q",
+    naive = _log(mem_manager, "pre-DP-413 naive", channel="legacy",
                  ts=(now - timedelta(days=2)).replace(tzinfo=None))
-    busy = _log(mem_manager, "older", channel="busy", ts=now - timedelta(days=2))
-    _log(mem_manager, "recent turn, not queued", channel="busy", ts=now)
-    for i, persona, ch in ((stale, "p", "idle"), (naive, "q", "legacy"), (busy, "p", "busy")):
-        mem_manager.queue_retain(i, persona, ch, untrusted=False)
-
-    assert sorted(mem_manager.idle_retain_scopes(now - timedelta(days=1))) == [
-        ("p", "idle"), ("q", "legacy"),
+    mem_manager.queue_retain(naive, "p", "legacy", untrusted=False)
+    assert mem_manager.unblocked_retain_origins() == [
+        {"persona_name": "p", "channel": "legacy", "server_id": None, "user_identifier": "u1"},
     ]
-
-
-def test_pending_retains_server_filter_matches_null(mem_manager):
-    web = _log(mem_manager, "web ui")
-    disc = mem_manager.log_message(
-        user_identifier="u1", persona_name="p", channel="c1", author_role="user",
-        author_name="u1", content="discord", timestamp=datetime.now(timezone.utc),
-        server_id="guild",
-    )
-    for i in (web, disc):
-        mem_manager.queue_retain(i, "p", "c1", untrusted=False)
-    assert [t["interaction_id"] for t in mem_manager.pending_retains("p", server_id=None)] == [web]
-    assert [t["interaction_id"] for t in mem_manager.pending_retains("p", server_id="guild")] == [disc]
+    last = mem_manager.scope_last_activity(_scope(channel="legacy"))
+    assert last is not None and now - last > timedelta(days=1)

@@ -286,9 +286,42 @@ DEFAULT_PERSONA = "You are a helpful LLM assistant."
 # Token generation limits
 DEFAULT_TOKEN_LIMIT = 4096
 
-# Context window limits (number of messages)
-DEFAULT_HISTORY_MESSAGES = 15
-GLOBAL_HISTORY_MESSAGES = 30  # Hard cap for history sent to APIs
+# Context window limits (number of messages). DP-495: history is trimmed by
+# the token budget in blocks (RETAIN_TRIM_*), so the message-count caps are
+# ceilings that normally never bind. A low cap still works (one-shot personas);
+# a cap that binds trims in blocks too (down to half the cap), so the prompt
+# start stays fixed between trims.
+DEFAULT_HISTORY_MESSAGES = 1000
+GLOBAL_HISTORY_MESSAGES = 1000  # Hard cap for history sent to APIs
+
+# DP-495 block trimming. When a new user message takes the prompt past
+# RETAIN_TRIM_HIGH of the prompt budget (max_context_tokens - tokens), the
+# oldest history is cut as one block sized to bring it to RETAIN_TRIM_LOW. The
+# block is retained whole and stays in the prompt until Hindsight reports its
+# extraction complete.
+RETAIN_TRIM_HIGH = 0.9
+RETAIN_TRIM_LOW = 0.5
+# A scope idle this long is trimmed in the background (same cut, to LOW).
+RETAIN_IDLE_TRIM_SECONDS = 48 * 3600
+# A scope idle this long has its remaining unsent turns retained as a final
+# block; those turns stay in the prompt.
+RETAIN_IDLE_FINAL_SECONDS = 72 * 3600
+# Background retain maintenance: block delivery + extraction polling every
+# tick, the idle sweep every RETAIN_IDLE_SWEEP_SECONDS. First tick at boot.
+RETAIN_MAINTENANCE_INTERVAL_SECONDS = 60
+RETAIN_IDLE_SWEEP_SECONDS = 900
+# A block Hindsight refuses (a deterministic 4xx; Hindsight is up) is retried
+# on its own backoff, doubling from MIN to MAX, forever. Once it has been
+# refused for RETAIN_REFUSED_PROMPT_SECONDS it leaves the prompt (still queued).
+RETAIN_REFUSED_BACKOFF_MIN_SECONDS = 60
+RETAIN_REFUSED_BACKOFF_MAX_SECONDS = 3600
+RETAIN_REFUSED_PROMPT_SECONDS = 3600
+# The window size DP-423 used for a persona with no `context` of its own; a
+# scope first seen after DP-495 starts its prompt where that window did.
+RETAIN_LEGACY_WINDOW = 15
+# How much of the conversation before a block (or block part) rides along in
+# the Hindsight item `context` as labelled background.
+RETAIN_CONTEXT_TAIL_CHARS = 4000
 
 # Total per-persona context budget (prompt + reserved response). Same semantic
 # as KoboldCPP's `max_context_length`. Old persona configs without the field
@@ -420,6 +453,17 @@ HINDSIGHT_OVERRIDE_DB = os.environ.get(
 HINDSIGHT_DOC_SCOPE_DB = os.environ.get(
     "HINDSIGHT_DOC_SCOPE_DB", str(DATA_DIR / "hindsight_doc_scope.db")
 )
+
+# DP-495: per-bank `retain_chunk_size` (characters), sent in every persona
+# bank's config and used as derpr's own split size for an oversized chat
+# block. Hindsight 1.2.0 requires the SERVER's
+# HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS to be greater than this number
+# (it compares tokens to chars; config.py validate_retain_completion_token_budget),
+# and that value is sent to the extractor as max_tokens. KoboldCpp clamps a
+# max_tokens >= 80% of its context and then trims the prompt from the FRONT to
+# fit, so the chunk must leave room: prompt (~4k) + chunk/3 + max_tokens <= ctx.
+# 40000 chars with max_tokens 41000 fits a 65536-token extractor.
+HINDSIGHT_RETAIN_CHUNK_SIZE = int(os.environ.get("HINDSIGHT_RETAIN_CHUNK_SIZE", "40000"))
 
 LOCAL_LLM_URL = os.environ.get("LOCAL_LLM_URL", "http://10.0.0.70:5001/v1")
 

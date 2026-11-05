@@ -5,17 +5,23 @@ import json
 import logging
 import threading
 import time
+import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import (Any, Coroutine, Dict, List, Callable, Optional, Sequence, Set, Union, cast,
                     Tuple, Generator)
 from pathlib import Path
 
 # --- NEW: Import the global embedding model variable ---
 from config.global_config import EMBEDDING_MODEL, EMBEDDING_DIMENSION, SEMANTIC_BACKEND, HINDSIGHT_URL
+from config.global_config import (
+    RETAIN_REFUSED_BACKOFF_MAX_SECONDS, RETAIN_REFUSED_BACKOFF_MIN_SECONDS,
+    RETAIN_REFUSED_PROMPT_SECONDS,
+)
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.generation_events import split_think_text
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
+from src.memory.retain_blocks import RetainScope
 from src.security.scrubber import get_scrubber
 from src.utils.timeutil import to_utc
 import sqlite_vec
@@ -473,6 +479,64 @@ class MemoryManager:
             );
             CREATE INDEX IF NOT EXISTS idx_pending_retain_scope
                 ON Pending_Retain (persona_name, channel, interaction_id);
+            -- DP-495: since block retain, a Pending_Retain row is kept after
+            -- its turn is sent (`sent_generation`, `block_id` — both added in
+            -- the ALTER block below), so a retried or discarded reply knows
+            -- which block document to rebuild. "Pending" = never sent, or
+            -- re-queued (generation bumped) since it was.
+
+            -- DP-495: one row per (persona, memory-mode scope). `start_id` pins
+            -- the prompt's history start: rows below it have been cut into a
+            -- block. It only moves at a cut, so the prompt prefix is stable
+            -- between trims. `block_seq` numbers the scope's block documents.
+            -- The scope columns rebuild the scope for the background sweep.
+            CREATE TABLE IF NOT EXISTS Retain_Window (
+                persona_name TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                memory_mode TEXT NOT NULL,
+                channel TEXT,
+                user_identifier TEXT,
+                server_id TEXT,
+                filter_server INTEGER NOT NULL DEFAULT 0,
+                start_id INTEGER NOT NULL DEFAULT 0,
+                block_seq INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (persona_name, scope_key)
+            );
+
+            -- DP-495: a cut block. [lo_id, hi_id) is the id range it took out
+            -- of the prompt; it stays shown until `status` is 'done'. `kind`
+            -- 'final' is the 72 h whole-conversation retain, which leaves its
+            -- rows in the prompt. `request_id` is the client-chosen Hindsight
+            -- operation id (idempotent resubmit); `op_ids` what Hindsight
+            -- returned, polled until complete. `first_ts` (the first sent
+            -- turn's time) is fixed at the first send so a rebuild keeps the
+            -- document ids; `document_ids` are the parts last sent.
+            CREATE TABLE IF NOT EXISTS Retain_Block (
+                block_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                persona_name TEXT NOT NULL,
+                scope_key TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'trim' CHECK(kind IN ('trim', 'final')),
+                seq INTEGER,
+                lo_id INTEGER NOT NULL,
+                hi_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued'
+                    CHECK(status IN ('queued', 'sent', 'done', 'failed')),
+                request_id TEXT,
+                op_ids TEXT,
+                first_ts TEXT,
+                document_ids TEXT,
+                untrusted INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                sent_at TEXT,
+                done_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                refused_since TEXT,
+                next_attempt_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_retain_block_scope
+                ON Retain_Block (persona_name, scope_key, status);
+            CREATE INDEX IF NOT EXISTS idx_retain_block_status
+                ON Retain_Block (status, block_id);
             """
             conn.executescript(schema_sql)
             conn.commit()
@@ -497,6 +561,22 @@ class MemoryManager:
                     "ALTER TABLE Parked_Writes ADD COLUMN kind TEXT NOT NULL "
                     f"DEFAULT '{DEFERRAL_KIND_APPROVAL}'"
                 )
+
+            # Pending_Retain migration (DP-495): rows outlive their send.
+            # Additive: a pre-DP-495 row has both NULL, i.e. queued and never
+            # sent, which is exactly what every surviving DP-423 row is — so
+            # the first block cut in its scope picks it up and nothing queued
+            # is lost or sent twice. The index lives here, after its column.
+            cursor.execute("PRAGMA table_info(Pending_Retain)")
+            pending_cols = {row['name'] for row in cursor.fetchall()}
+            if 'block_id' not in pending_cols:
+                conn.execute("ALTER TABLE Pending_Retain ADD COLUMN block_id INTEGER")
+            if 'sent_generation' not in pending_cols:
+                conn.execute("ALTER TABLE Pending_Retain ADD COLUMN sent_generation INTEGER")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pending_retain_block"
+                " ON Pending_Retain (block_id)"
+            )
 
             # Agent_Actions migrations
             cursor.execute("PRAGMA table_info(Agent_Actions)")
@@ -1450,6 +1530,14 @@ class MemoryManager:
 
     _SUPPRESSION_SUBQUERY = (" AND interaction_id NOT IN (SELECT interaction_id FROM Suppressed_Interactions)")
 
+    @staticmethod
+    def _with_min_id(query: str, params: List[Any],
+                     min_id: Optional[int]) -> Tuple[str, List[Any]]:
+        """The DP-495 window floor: rows before it have left the prompt."""
+        if min_id is None:
+            return query, params
+        return query + " AND interaction_id >= ?", params + [min_id]
+
     # Rows whose content is empty/whitespace. Only DP-296 park rows reach this
     # shape — both the user and assistant commit paths refuse empty text
     # otherwise — so this is precisely "the tool-context-only row".
@@ -1479,8 +1567,8 @@ class MemoryManager:
         prefix = f"{alias}." if alias else ""
         return f" AND {prefix}interaction_id NOT IN (SELECT interaction_id FROM Suppressed_Interactions)"
 
-    def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None) -> List[
-        Dict[str, Any]]:
+    def get_personal_history(self, user_identifier: str, persona_name: str, limit: Optional[int] = None,
+                             min_id: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -1488,6 +1576,7 @@ class MemoryManager:
                      " WHERE user_identifier = ? AND persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [user_identifier, persona_name]
+            query, params = self._with_min_id(query, params, min_id)
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
@@ -1511,7 +1600,8 @@ class MemoryManager:
             return [dict(row) for row in reversed(cursor.fetchall())]
 
     def get_channel_history(self, channel: str, persona_name: str, server_id: Optional[str] = None,
-                            limit: Optional[int] = None) -> List[Dict[str, Any]]:
+                            limit: Optional[int] = None,
+                            min_id: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -1525,44 +1615,13 @@ class MemoryManager:
                 query += " AND server_id IS NULL"
             query += self._SUPPRESSION_SUBQUERY
             query += self._CONTRIBUTES_TO_HISTORY
+            query, params = self._with_min_id(query, params, min_id)
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
                 params.append(limit)
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
-
-    def get_session_turns(self, persona_name: str, channel: str,
-                          since: datetime) -> List[Dict[str, Any]]:
-        """Visible, non-empty turns of one retain scope (persona + channel,
-        like `_DocScopeStore`'s key) at or after `since`, oldest first (DP-409).
-
-        Stored timestamps mix naive and aware forms of UTC (rows written
-        before DP-413 used a bare `datetime.now()`), so walk back by
-        interaction_id — insertion order, the order the turns were retained
-        in — and stop at the first older row.
-        """
-        since = to_utc(since)
-        rows: List[Dict[str, Any]] = []
-        with self._lock:
-            cursor = self._get_connection().cursor()
-            cursor.execute(
-                "SELECT interaction_id, author_role, author_name, user_identifier,"
-                " content, timestamp FROM User_Interactions"
-                " WHERE persona_name = ? AND channel = ?"
-                + self._SUPPRESSION_SUBQUERY + self._NON_EMPTY_CONTENT_FILTER +
-                " ORDER BY interaction_id DESC",
-                (persona_name, channel),
-            )
-            for row in cursor:
-                parsed = self.parse_stored_ts(row["timestamp"])
-                if parsed is None:
-                    continue
-                if parsed < since:
-                    break
-                rows.append({**dict(row), "timestamp": parsed})
-        rows.reverse()
-        return rows
 
     @staticmethod
     def parse_stored_ts(ts: Any) -> Optional[datetime]:
@@ -1579,20 +1638,30 @@ class MemoryManager:
             return None
         return to_utc(parsed)
 
-    # ---------- Deferred retain queue (DP-423) ----------
+    # ---------- Block retain (DP-423 queue, DP-495 blocks) ----------
+    #
+    # A turn is queued in Pending_Retain when it is logged. It is not sent on
+    # its own: a block cut (`cut_retain_block`, `final_retain_block`) assigns
+    # every queued turn of the scope below the cut to one Retain_Block, and
+    # TurnPersistence sends each block as one Hindsight document. The row
+    # stays after the send (`sent_generation`), so a turn re-queued later — a
+    # retried reply — knows its block, and the block is rebuilt whole.
+
+    _UNSENT = "(p.sent_generation IS NULL OR p.sent_generation < p.generation)"
 
     def queue_retain(self, interaction_id: int, persona_name: str, channel: str,
                      *, untrusted: bool, retain_text: Optional[str] = None,
                      source_content: Optional[str] = None) -> None:
-        """Mark a turn for retain once it leaves the history window.
+        """Mark a turn for retain once its block is cut.
 
         Upsert: a retried or resumed turn re-queues the same row, and the
         newest attempt's taint and retain text replace the discarded one's.
-        Each re-queue bumps `generation`, so a flush already holding the old
-        attempt leaves the new one queued (`delete_pending_retains`).
+        Each re-queue bumps `generation`, so a send already holding the old
+        attempt does not mark the new one sent. A re-queued row keeps its
+        block; a block already sent is queued again, and its document is
+        rebuilt from the canonical rows and replaced (DP-409, DP-495).
         """
-        with self._lock:
-            conn = self._get_connection()
+        with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO Pending_Retain"
                 " (interaction_id, persona_name, channel, untrusted, retain_text, source_content)"
@@ -1603,63 +1672,266 @@ class MemoryManager:
                 (interaction_id, persona_name, channel, int(untrusted),
                  retain_text, source_content),
             )
-            conn.commit()
+            self._requeue_block_of(conn, interaction_id)
 
     def is_retain_pending(self, interaction_id: int) -> bool:
+        """Queued and not yet sent in its current version."""
         with self._lock:
             row = self._get_connection().execute(
-                "SELECT 1 FROM Pending_Retain WHERE interaction_id = ?",
+                "SELECT 1 FROM Pending_Retain p WHERE p.interaction_id = ? AND " + self._UNSENT,
                 (interaction_id,),
             ).fetchone()
         return row is not None
 
-    # Sentinel for "any server" — None is a real value (web UI rows store
-    # server_id NULL, which the history getters match with IS NULL).
-    ANY_SERVER: Any = object()
+    def discard_pending_retain(self, interaction_id: int) -> None:
+        """Drop a turn unretained, whatever its generation. A block already
+        sent with it is queued again, so its document is rebuilt without it."""
+        with self.transaction() as conn:
+            self._requeue_block_of(conn, interaction_id)
+            conn.execute(
+                "DELETE FROM Pending_Retain WHERE interaction_id = ?",
+                (interaction_id,),
+            )
 
-    @classmethod
-    def _pending_retain_filters(cls, persona_name: Optional[str],
-                                before_id: Optional[int], channel: Optional[str],
-                                user_identifier: Optional[str],
-                                server_id: Any) -> Tuple[str, List[Any]]:
-        clauses = [
-            (" AND p.persona_name = ?", persona_name),
-            (" AND p.interaction_id < ?", before_id),
-            (" AND p.channel = ?", channel),
-            (" AND u.user_identifier = ?", user_identifier),
-        ]
-        where = "".join(c for c, v in clauses if v is not None)
-        params: List[Any] = [v for _, v in clauses if v is not None]
-        if server_id is None:
-            where += " AND u.server_id IS NULL"
-        elif server_id is not cls.ANY_SERVER:
-            where += " AND u.server_id = ?"
-            params.append(server_id)
+    def _requeue_block_of(self, conn: sqlite3.Connection, interaction_id: int) -> None:
+        row = conn.execute(
+            "SELECT block_id FROM Pending_Retain WHERE interaction_id = ?",
+            (interaction_id,),
+        ).fetchone()
+        if row is not None and row["block_id"] is not None:
+            self._requeue_block(conn, int(row["block_id"]))
+
+    @staticmethod
+    def _requeue_block(conn: sqlite3.Connection, block_id: int) -> None:
+        # A fresh request id, even for a block still queued: Hindsight answers
+        # a resubmitted operation_id with the original operation and does no
+        # new work, so a block whose earlier POST landed unacknowledged would
+        # otherwise resend under the old id and keep the old content. A send
+        # in flight sees the id change and leaves the block queued.
+        # New content may be accepted where the old was refused: the
+        # refusal backoff starts over.
+        conn.execute(
+            "UPDATE Retain_Block SET status = 'queued', request_id = ?, done_at = NULL,"
+            " attempts = 0, refused_since = NULL, next_attempt_at = NULL"
+            " WHERE block_id = ?",
+            (str(uuid.uuid4()), block_id),
+        )
+
+    @staticmethod
+    def _scope_sql(scope: RetainScope, alias: str = "u") -> Tuple[str, List[Any]]:
+        """WHERE clauses (each prefixed ` AND `) matching the rows of `scope`
+        on User_Interactions, the way the history getters match them."""
+        p = f"{alias}." if alias else ""
+        where = f" AND {p}persona_name = ?"
+        params: List[Any] = [scope.persona_name]
+        if scope.channel is not None:
+            where += f" AND {p}channel = ?"
+            params.append(scope.channel)
+        if scope.user_identifier is not None:
+            where += f" AND {p}user_identifier = ?"
+            params.append(scope.user_identifier)
+        if scope.filter_server:
+            if scope.server_id is None:
+                where += f" AND {p}server_id IS NULL"
+            else:
+                where += f" AND {p}server_id = ?"
+                params.append(scope.server_id)
         return where, params
 
-    def pending_retains(self, persona_name: Optional[str] = None, *,
-                        before_id: Optional[int] = None,
-                        channel: Optional[str] = None,
-                        user_identifier: Optional[str] = None,
-                        server_id: Any = ANY_SERVER) -> List[Dict[str, Any]]:
-        """Waiting turns that have left the history window, oldest first.
+    def _initial_start(self, conn: sqlite3.Connection, scope: RetainScope) -> int:
+        """Where a scope's prompt starts the first time it is seen: the
+        oldest turn still queued, or DP-423's window (`scope.legacy_window`),
+        whichever is older, so turns DP-423 already retained are not pulled
+        back into the prompt. A window of 0 showed nothing: past the newest."""
+        where, params = self._scope_sql(scope)
+        pending = conn.execute(
+            "SELECT MIN(p.interaction_id) AS m FROM Pending_Retain p"
+            " JOIN User_Interactions u ON u.interaction_id = p.interaction_id"
+            " WHERE p.block_id IS NULL AND " + self._UNSENT + where,
+            params,
+        ).fetchone()["m"]
+        recent: Optional[int]
+        if scope.legacy_window > 0:
+            recent = conn.execute(
+                "SELECT MIN(interaction_id) AS m FROM (SELECT u.interaction_id"
+                " FROM User_Interactions u WHERE 1 = 1" + where +
+                " ORDER BY u.interaction_id DESC LIMIT ?)",
+                params + [scope.legacy_window],
+            ).fetchone()["m"]
+        else:
+            top = conn.execute(
+                "SELECT MAX(u.interaction_id) AS m FROM User_Interactions u WHERE 1 = 1"
+                + where, params,
+            ).fetchone()["m"]
+            recent = int(top) + 1 if top is not None else None
+        found = [int(v) for v in (pending, recent) if v is not None]
+        return min(found) if found else 0
 
-        `before_id` limits to turns older than the window's oldest turn; None
-        means all. `persona_name`, `channel`, `user_identifier` and
-        `server_id` narrow it to the rows one memory mode's window covers,
-        matched on the interaction's own columns the way the history getters
-        match them (`server_id=None` is IS NULL); a None filter matches all.
+    def _window_row(self, conn: sqlite3.Connection, scope: RetainScope,
+                    persist: bool) -> Tuple[int, int]:
+        """(start_id, block_seq), creating the scope's row when `persist`."""
+        row = conn.execute(
+            "SELECT start_id, block_seq FROM Retain_Window"
+            " WHERE persona_name = ? AND scope_key = ?",
+            (scope.persona_name, scope.key),
+        ).fetchone()
+        if row is not None:
+            return int(row["start_id"]), int(row["block_seq"])
+        start = self._initial_start(conn, scope)
+        if persist:
+            conn.execute(
+                "INSERT OR IGNORE INTO Retain_Window (persona_name, scope_key, memory_mode,"
+                " channel, user_identifier, server_id, filter_server, start_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (scope.persona_name, scope.key, scope.mode, scope.channel,
+                 scope.user_identifier, scope.server_id, int(scope.filter_server), start),
+            )
+        return start, 0
 
-        Read-only: a turn stays queued until `delete_pending_retains` is
-        called for it, i.e. until the backend confirmed the retain. Each row
-        carries its persona and channel, the text to retain (`retain_text`
-        when the row still holds the content it was derived from, else the
-        row's current content), its queue `generation`, and `skip`, set for
-        turns deleted or emptied since they were queued.
+    def retain_window(self, scope: RetainScope, *, persist: bool = True,
+                      now: Optional[datetime] = None) -> Tuple[int, int]:
+        """`(start_id, floor_id)` of `scope`'s prompt (DP-495).
+
+        `start_id` is the pinned history start: it moves only when a block
+        is cut, so the prompt prefix is stable between trims. `floor_id` is
+        where the prompt actually begins: lower than `start_id` while a cut
+        block is still waiting for Hindsight to finish with it — except one
+        Hindsight has refused for RETAIN_REFUSED_PROMPT_SECONDS, which stays
+        queued and retried but no longer holds the prompt open. `persist`
+        False (dry runs) computes a first-seen scope's start without storing it.
         """
-        where, params = self._pending_retain_filters(
-            persona_name, before_id, channel, user_identifier, server_id,
+        now = now or datetime.now(timezone.utc)
+        held_until = to_utc(now - timedelta(seconds=RETAIN_REFUSED_PROMPT_SECONDS)).isoformat()
+        with self.transaction() as conn:
+            start, _ = self._window_row(conn, scope, persist)
+            floor = conn.execute(
+                "SELECT MIN(lo_id) AS m FROM Retain_Block WHERE persona_name = ?"
+                " AND scope_key = ? AND status IN ('queued', 'sent')"
+                " AND (refused_since IS NULL OR refused_since > ?)",
+                (scope.persona_name, scope.key, held_until),
+            ).fetchone()["m"]
+        return start, (min(start, int(floor)) if floor is not None else start)
+
+    def _new_block(self, conn: sqlite3.Connection, scope: RetainScope, *, kind: str,
+                   lo_id: int, hi_id: int, now: datetime) -> int:
+        cur = conn.execute(
+            "INSERT INTO Retain_Block (persona_name, scope_key, kind, lo_id, hi_id,"
+            " status, request_id, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)",
+            (scope.persona_name, scope.key, kind, lo_id, hi_id,
+             str(uuid.uuid4()), to_utc(now).isoformat()),
         )
+        block_id = int(cast(int, cur.lastrowid))
+        where, params = self._scope_sql(scope)
+        conn.execute(
+            "UPDATE Pending_Retain SET block_id = ? WHERE block_id IS NULL"
+            " AND interaction_id < ? AND interaction_id IN"
+            " (SELECT u.interaction_id FROM User_Interactions u WHERE 1 = 1" + where + ")",
+            [block_id, hi_id] + params,
+        )
+        return block_id
+
+    def _number_block(self, conn: sqlite3.Connection, scope: RetainScope,
+                      block_id: int, now: datetime) -> bool:
+        """Give a block with queued turns the scope's next number; mark one
+        without any done. Returns whether it has turns to send."""
+        has_turns = conn.execute(
+            "SELECT 1 FROM Pending_Retain WHERE block_id = ? LIMIT 1", (block_id,),
+        ).fetchone() is not None
+        if has_turns:
+            conn.execute(
+                "UPDATE Retain_Window SET block_seq = block_seq + 1"
+                " WHERE persona_name = ? AND scope_key = ?",
+                (scope.persona_name, scope.key),
+            )
+            conn.execute(
+                "UPDATE Retain_Block SET seq = (SELECT block_seq FROM Retain_Window"
+                " WHERE persona_name = ? AND scope_key = ?) WHERE block_id = ?",
+                (scope.persona_name, scope.key, block_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE Retain_Block SET status = 'done', done_at = ? WHERE block_id = ?",
+                (to_utc(now).isoformat(), block_id),
+            )
+        return has_turns
+
+    def cut_retain_block(self, scope: RetainScope, *, expected_start: int, new_start: int,
+                         now: Optional[datetime] = None) -> Optional[int]:
+        """Cut the prompt's history below `new_start` into one block.
+
+        Every queued turn of the scope below `new_start` joins the block — the
+        cut range plus any straggler a narrower old window left behind. The
+        window start moves to `new_start`; the block's range [expected_start,
+        new_start) stays in the prompt until the block is done. Refused (None)
+        when the start moved since the caller read it: a concurrent request
+        cut first. A block with nothing to send is done at once.
+        """
+        now = now or datetime.now(timezone.utc)
+        with self.transaction() as conn:
+            start, _ = self._window_row(conn, scope, persist=True)
+            if start != expected_start or new_start <= start:
+                return None
+            block_id = self._new_block(conn, scope, kind="trim", lo_id=start,
+                                       hi_id=new_start, now=now)
+            self._number_block(conn, scope, block_id, now)
+            conn.execute(
+                "UPDATE Retain_Window SET start_id = ? WHERE persona_name = ? AND scope_key = ?",
+                (new_start, scope.persona_name, scope.key),
+            )
+        return block_id
+
+    def final_retain_block(self, scope: RetainScope,
+                           now: Optional[datetime] = None) -> Optional[int]:
+        """The 72 h idle retain: every queued turn of the scope not yet in a
+        block, as one block that leaves the prompt as it is (the start does
+        not move). None when there is nothing queued."""
+        now = now or datetime.now(timezone.utc)
+        where, params = self._scope_sql(scope)
+        with self.transaction() as conn:
+            start, _ = self._window_row(conn, scope, persist=True)
+            top = conn.execute(
+                "SELECT MAX(p.interaction_id) AS m FROM Pending_Retain p"
+                " JOIN User_Interactions u ON u.interaction_id = p.interaction_id"
+                " WHERE p.block_id IS NULL" + where,
+                params,
+            ).fetchone()["m"]
+            if top is None:
+                return None
+            block_id = self._new_block(conn, scope, kind="final", lo_id=start,
+                                       hi_id=int(top) + 1, now=now)
+            if not self._number_block(conn, scope, block_id, now):
+                return None
+        return block_id
+
+    def retain_blocks(self, *, statuses: Sequence[str] = ("queued",),
+                      block_id: Optional[int] = None,
+                      due_at: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """Blocks in `statuses`, oldest first, each with its scope columns.
+        `due_at` leaves out blocks whose refusal backoff runs past it."""
+        marks = ",".join("?" * len(statuses))
+        query = (
+            "SELECT b.*, w.memory_mode, w.channel, w.user_identifier, w.server_id,"
+            " w.filter_server FROM Retain_Block b JOIN Retain_Window w"
+            " ON w.persona_name = b.persona_name AND w.scope_key = b.scope_key"
+            f" WHERE b.status IN ({marks})"
+        )
+        params: List[Any] = list(statuses)
+        if block_id is not None:
+            query += " AND b.block_id = ?"
+            params.append(block_id)
+        if due_at is not None:
+            query += " AND (b.next_attempt_at IS NULL OR b.next_attempt_at <= ?)"
+            params.append(to_utc(due_at).isoformat())
+        with self._lock:
+            rows = self._get_connection().execute(query + " ORDER BY b.block_id", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def retain_block_members(self, block_id: int) -> List[Dict[str, Any]]:
+        """A block's turns, oldest first, as they stand now: the text to
+        retain (`retain_text` while the row still holds the content it was
+        derived from, else the row's current content), its `generation`, and
+        `skip` for a turn deleted or emptied since it was queued — edits and
+        deletes inside the prompt are honoured at send time."""
         query = (
             "SELECT p.interaction_id, p.persona_name, p.untrusted, p.retain_text,"
             " p.source_content, p.generation, u.channel, u.author_role, u.author_name,"
@@ -1668,10 +1940,10 @@ class MemoryManager:
             "        WHERE s.interaction_id = p.interaction_id) AS suppressed"
             " FROM Pending_Retain p"
             " JOIN User_Interactions u ON u.interaction_id = p.interaction_id"
-            " WHERE 1 = 1" + where + " ORDER BY p.interaction_id"
+            " WHERE p.block_id = ? ORDER BY p.interaction_id"
         )
         with self._lock:
-            rows = [dict(r) for r in self._get_connection().execute(query, params).fetchall()]
+            rows = [dict(r) for r in self._get_connection().execute(query, (block_id,)).fetchall()]
         result: List[Dict[str, Any]] = []
         for r in rows:
             content = r["content"] or ""
@@ -1696,47 +1968,151 @@ class MemoryManager:
             })
         return result
 
-    def delete_pending_retains(self, rows: Sequence[Dict[str, Any]]) -> None:
-        """Dequeue rows read by `pending_retains`, except any re-queued since:
-        a retry that landed mid-flush bumped `generation` and stays queued."""
+    def turns_before(self, scope: RetainScope, before_id: int,
+                     limit: int) -> List[Dict[str, Any]]:
+        """The scope's last `limit` visible turns below `before_id`, oldest
+        first — the background a block's item `context` carries."""
+        where, params = self._scope_sql(scope)
+        with self._lock:
+            rows = self._get_connection().execute(
+                "SELECT u.interaction_id, u.author_role, u.author_name, u.user_identifier,"
+                " u.content, u.timestamp FROM User_Interactions u"
+                " WHERE u.interaction_id < ?" + where
+                + self._SUPPRESSION_SUBQUERY + self._NON_EMPTY_CONTENT_FILTER
+                + " ORDER BY u.interaction_id DESC LIMIT ?",
+                [before_id] + params + [limit],
+            ).fetchall()
+        out = []
+        for r in reversed(rows):
+            ts = self.parse_stored_ts(r["timestamp"])
+            if ts is not None:
+                out.append({**dict(r), "timestamp": ts})
+        return out
+
+    def mark_retain_block_sent(self, block: Dict[str, Any], *,
+                               members: Sequence[Dict[str, Any]], op_ids: Sequence[str],
+                               document_ids: Sequence[str], first_ts: Optional[datetime],
+                               untrusted: bool, now: Optional[datetime] = None) -> None:
+        """Record that Hindsight accepted `block` as read by the caller.
+
+        Its members are marked sent at the generation that was sent. A member
+        re-queued meanwhile (a retry landed mid-send) is still unsent, so the
+        block is queued again under a new request id and rebuilt; a block
+        re-queued while it was being sent (request id changed) is left queued.
+        The untrusted bit is sticky: a rebuild never launders it (DP-409).
+        """
+        now = now or datetime.now(timezone.utc)
+        block_id = int(block["block_id"])
         with self.transaction() as conn:
             conn.executemany(
-                "DELETE FROM Pending_Retain WHERE interaction_id = ? AND generation = ?",
-                [(r["interaction_id"], r["generation"]) for r in rows],
+                "UPDATE Pending_Retain SET sent_generation = generation"
+                " WHERE interaction_id = ? AND generation = ? AND block_id = ?",
+                [(m["interaction_id"], m["generation"], block_id) for m in members],
+            )
+            stale = conn.execute(
+                "SELECT 1 FROM Pending_Retain p WHERE p.block_id = ? AND " + self._UNSENT
+                + " LIMIT 1",
+                (block_id,),
+            ).fetchone() is not None
+            # What landed is recorded even when the block was re-queued
+            # mid-send: the resend must keep its document ids (`first_ts`) and
+            # delete the parts it no longer produces (`document_ids`).
+            conn.execute(
+                "UPDATE Retain_Block SET first_ts = COALESCE(first_ts, ?), document_ids = ?,"
+                " untrusted = MAX(untrusted, ?) WHERE block_id = ? AND status = 'queued'",
+                (to_utc(first_ts).isoformat() if first_ts is not None else None,
+                 json.dumps(list(document_ids)), int(untrusted), block_id),
+            )
+            conn.execute(
+                "UPDATE Retain_Block SET status = ?, request_id = ?, op_ids = ?, sent_at = ?,"
+                " attempts = 0, refused_since = NULL, next_attempt_at = NULL"
+                " WHERE block_id = ? AND request_id = ? AND status = 'queued'",
+                ("queued" if stale else "sent",
+                 str(uuid.uuid4()) if stale else block["request_id"],
+                 json.dumps(list(op_ids)), to_utc(now).isoformat(),
+                 block_id, block["request_id"]),
             )
 
-    def discard_pending_retain(self, interaction_id: int) -> None:
-        """Drop a queued turn unretained, whatever its generation."""
+    def mark_retain_block_refused(self, block: Dict[str, Any], *,
+                                  now: Optional[datetime] = None) -> float:
+        """Hindsight refused `block` (a deterministic 4xx, DP-495): it stays
+        queued and is tried again after a backoff that doubles from
+        RETAIN_REFUSED_BACKOFF_MIN_SECONDS to ..._MAX_SECONDS, forever. A
+        block re-queued meanwhile (new request id, new content) is left
+        alone: its backoff was just reset. Returns the delay chosen."""
+        now = now or datetime.now(timezone.utc)
+        attempts = int(block.get("attempts") or 0)
+        delay = float(min(RETAIN_REFUSED_BACKOFF_MIN_SECONDS * 2 ** min(attempts, 20),
+                          RETAIN_REFUSED_BACKOFF_MAX_SECONDS))
         with self.transaction() as conn:
             conn.execute(
-                "DELETE FROM Pending_Retain WHERE interaction_id = ?",
-                (interaction_id,),
+                "UPDATE Retain_Block SET attempts = attempts + 1,"
+                " refused_since = COALESCE(refused_since, ?), next_attempt_at = ?"
+                " WHERE block_id = ? AND request_id = ? AND status = 'queued'",
+                (to_utc(now).isoformat(), to_utc(now + timedelta(seconds=delay)).isoformat(),
+                 int(block["block_id"]), block["request_id"]),
             )
+        return delay
 
-    def idle_retain_scopes(self, idle_before: datetime) -> List[Tuple[str, str]]:
-        """(persona, channel) scopes with waiting turns and no turn at all
-        since `idle_before` — conversations that stopped (DP-423 sweep)."""
-        idle_before = to_utc(idle_before)
-        idle: List[Tuple[str, str]] = []
+    def set_retain_block_status(self, block_id: int, status: str, *,
+                                expect: Optional[str] = None,
+                                now: Optional[datetime] = None) -> None:
+        """Move a block to `status` ('done' / 'failed'), only from `expect`."""
+        now = now or datetime.now(timezone.utc)
+        query = "UPDATE Retain_Block SET status = ?, done_at = ? WHERE block_id = ?"
+        params: List[Any] = [status, to_utc(now).isoformat(), block_id]
+        if expect is not None:
+            query += " AND status = ?"
+            params.append(expect)
+        with self.transaction() as conn:
+            conn.execute(query, params)
+
+    def requeue_retain_block(self, block_id: int) -> None:
+        """Send a block again (new request id), e.g. when Hindsight lost it."""
+        with self.transaction() as conn:
+            self._requeue_block(conn, block_id)
+
+    def retain_windows(self) -> List[Dict[str, Any]]:
+        """Every scope with a window row (the background sweep's scopes)."""
         with self._lock:
-            conn = self._get_connection()
-            scopes = conn.execute(
-                "SELECT DISTINCT persona_name, channel FROM Pending_Retain"
-            ).fetchall()
-            for s in scopes:
-                last = conn.execute(
-                    "SELECT timestamp FROM User_Interactions"
-                    " WHERE persona_name = ? AND channel = ?"
-                    " ORDER BY interaction_id DESC LIMIT 1",
-                    (s["persona_name"], s["channel"]),
-                ).fetchone()
-                last_ts = self.parse_stored_ts(last["timestamp"]) if last else None
-                if last_ts is None or last_ts < idle_before:
-                    idle.append((s["persona_name"], s["channel"]))
-        return idle
+            rows = self._get_connection().execute("SELECT * FROM Retain_Window").fetchall()
+        return [dict(r) for r in rows]
 
-    def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None) -> List[
-        Dict[str, Any]]:
+    def unblocked_retain_origins(self) -> List[Dict[str, Any]]:
+        """Distinct (persona, channel, server, user) of queued turns in no
+        block — so the sweep also reaches scopes that never had a window row
+        (turns queued before DP-495)."""
+        with self._lock:
+            rows = self._get_connection().execute(
+                "SELECT DISTINCT u.persona_name, u.channel, u.server_id, u.user_identifier"
+                " FROM Pending_Retain p JOIN User_Interactions u"
+                " ON u.interaction_id = p.interaction_id WHERE p.block_id IS NULL",
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def scope_max_id(self, scope: RetainScope) -> Optional[int]:
+        """The scope's newest interaction id, or None for an empty scope."""
+        where, params = self._scope_sql(scope)
+        with self._lock:
+            row = self._get_connection().execute(
+                "SELECT MAX(u.interaction_id) AS m FROM User_Interactions u WHERE 1 = 1" + where,
+                params,
+            ).fetchone()
+        return int(row["m"]) if row and row["m"] is not None else None
+
+    def scope_last_activity(self, scope: RetainScope) -> Optional[datetime]:
+        """Time of the scope's newest row (by insertion), or None."""
+        where, params = self._scope_sql(scope)
+        with self._lock:
+            row = self._get_connection().execute(
+                "SELECT u.timestamp FROM User_Interactions u WHERE 1 = 1" + where
+                + " ORDER BY u.interaction_id DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return self.parse_stored_ts(row["timestamp"]) if row else None
+
+    def get_server_history(self, server_id: Optional[str], persona_name: str, limit: Optional[int] = None,
+                           min_id: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -1750,6 +2126,7 @@ class MemoryManager:
                          " WHERE server_id IS NULL AND persona_name = ?"
                          + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
                 params = [persona_name]
+            query, params = self._with_min_id(query, params, min_id)
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"
@@ -1757,7 +2134,8 @@ class MemoryManager:
             cursor.execute(query, params)
             return [dict(row) for row in reversed(cursor.fetchall())]
 
-    def get_global_history(self, persona_name: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_global_history(self, persona_name: str, limit: Optional[int] = None,
+                           min_id: Optional[int] = None) -> List[Dict[str, Any]]:
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -1765,6 +2143,7 @@ class MemoryManager:
                      " WHERE persona_name = ?"
                      + self._SUPPRESSION_SUBQUERY + self._CONTRIBUTES_TO_HISTORY)
             params: List[Any] = [persona_name]
+            query, params = self._with_min_id(query, params, min_id)
             query += " ORDER BY timestamp DESC"
             if isinstance(limit, int):
                 query += " LIMIT ?"

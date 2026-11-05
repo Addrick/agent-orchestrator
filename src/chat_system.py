@@ -4,17 +4,22 @@ import asyncio
 import logging
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import (
     Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, FrozenSet, List, Optional,
     Set, Tuple, Union,
 )
 
+from config.global_config import (
+    HINDSIGHT_RETAIN_CHUNK_SIZE, RETAIN_IDLE_FINAL_SECONDS, RETAIN_IDLE_SWEEP_SECONDS,
+    RETAIN_IDLE_TRIM_SECONDS, RETAIN_LEGACY_WINDOW, RETAIN_MAINTENANCE_INTERVAL_SECONDS,
+)
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
+from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope, scope_from_row
 from src.engine import TextEngine
 from src.generation_events import (
     DoneEvent as DoneEvent,
@@ -35,7 +40,7 @@ from src.engine.providers.local import supports_assistant_prefill, thinking_cont
 from src.engine.providers.opencode import workspace_hold
 from src.message_handler import BotLogic
 from src.origin import ANONYMOUS, Origin
-from src.persona import Persona
+from src.persona import MemoryMode, Persona
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.request_builder import AssembledRequest, ContinueTurn, RequestBuilder, RequestContext
 from src.security.scrubber import get_scrubber
@@ -230,6 +235,8 @@ class ChatSystem:
         )
         self._services: Dict[str, ServiceIntegration] = {}
         self._embedding_service: Optional[EmbeddingService] = embedding_service
+        # DP-495: stops `run_retain_maintenance` at its next checkpoint.
+        self._retain_stop: asyncio.Event = asyncio.Event()
 
     def _offered_tool_names(self, persona_name: str) -> FrozenSet[str]:
         """What `persona_name` is offered right now (DP-404) — the same
@@ -539,21 +546,12 @@ class ChatSystem:
                         timestamp=user_ts,
                     )
 
-                # DP-113 / DP-423: retain through the backend boundary, but only
-                # turns that have left the window this request was built from —
-                # the model reads the rest verbatim, and retaining them too makes
-                # recall hand them back twice — plus conversations idle for a
-                # day, which nothing else would ever push out. This turn joins
-                # the queue. The flush runs as a background task and never
-                # blocks the LLM call below.
-                self.turn_persistence.schedule_flush(
-                    persona_name=persona_name,
-                    memory_mode=persona.get_memory_mode(),
-                    channel=channel, user_identifier=user_identifier,
-                    server_id=server_id,
-                    oldest_window_id=ctx.oldest_interaction_id,
-                    current_id=user_interaction_id,
-                )
+                # DP-113 / DP-495: retain through the backend boundary, a block
+                # at a time. This turn joins the queue; it is sent with the
+                # block that later cuts it out of the prompt (prepare_request
+                # may just have cut one). Sending and completion polling run
+                # as a background task and never block the LLM call below.
+                self.turn_persistence.schedule_flush()
                 if user_interaction_id is not None and message and message.strip():
                     self.turn_persistence.queue_retain_safe(
                         interaction_id=user_interaction_id,
@@ -848,22 +846,13 @@ class ChatSystem:
             to_retain = retain_text if retain_text is not None else final_text
             retainable = bool(to_retain and to_retain.strip()) \
                 and response_type == ResponseType.LLM_GENERATION
-            if assistant_id is not None and retainable \
-                    and assistant_id == retry_assistant_id \
-                    and not self.turn_persistence.is_retain_pending(assistant_id):
-                # DP-409: a retry replaced an already-retained row in place, so
-                # Hindsight gets the rebuilt canonical session, not the new
-                # attempt appended beside the discarded one. Since DP-423 that
-                # needs the reply to have been flushed first (its conversation
-                # sat idle for a day); one still queued just re-queues below.
-                await self.turn_persistence.rebuild_session_safe(
-                    persona_name=persona_name, channel=channel,
-                    user_identifier=user_identifier, server_id=server_id,
-                    retried_id=assistant_id, retried_text=to_retain,
-                    untrusted=ctx.turn_tainted,
-                )
-            elif assistant_id is not None and retainable:
-                # DP-423: queued, not retained — see the user-turn note above.
+            if assistant_id is not None and retainable:
+                # DP-423 / DP-495: queued, not retained — see the user-turn
+                # note above. A retry re-queues its row: still waiting, the new
+                # attempt simply replaces what will be sent; already in a sent
+                # block, that block's document is rebuilt from the canonical
+                # rows and replaced (DP-409), so the discarded attempt's facts
+                # are deleted rather than kept beside the new ones.
                 self.turn_persistence.queue_retain_safe(
                     interaction_id=assistant_id,
                     persona_name=persona_name, channel=channel,
@@ -1464,6 +1453,8 @@ class ChatSystem:
             logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
             return
 
+        await self._patch_retain_chunk_size(backend, name)
+
         # disposition is LIVE-patchable (apatch_bank_config) so it applies to
         # existing banks without a rebuild, unlike the retain mission. DP-255.
         disposition = persona.get_disposition()
@@ -1474,6 +1465,124 @@ class ChatSystem:
             await backend._get_client().apatch_bank_config(name, patch)
         except Exception as e:
             logger.warning(f"Could not patch disposition for Hindsight bank {name}: {e}")
+
+    @staticmethod
+    async def _patch_retain_chunk_size(backend: Any, name: str) -> None:
+        """DP-495: chat blocks are sent whole, so the bank should extract them
+        in as few chunks as its extractor allows. Live-patchable, so it
+        reaches existing banks. Hindsight refuses a chunk size not below its
+        server's RETAIN_MAX_COMPLETION_TOKENS; the bank then keeps its
+        current size (derpr still splits blocks at this size itself)."""
+        try:
+            await backend._get_client().apatch_bank_config(
+                name, {"retain_chunk_size": HINDSIGHT_RETAIN_CHUNK_SIZE},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not set retain_chunk_size={HINDSIGHT_RETAIN_CHUNK_SIZE} for "
+                f"Hindsight bank {name}: {e}"
+            )
+
+    async def retain_maintenance(self, now: Optional[datetime] = None, *,
+                                 sweep: bool = True,
+                                 since: Optional[datetime] = None) -> None:
+        """One pass of block-retain upkeep (DP-495): the idle sweep (when
+        `sweep`; `since` as in `idle_retain_sweep`), then send queued blocks
+        and poll sent ones."""
+        if sweep:
+            try:
+                await self.idle_retain_sweep(now, since=since)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Idle retain sweep failed: {e}")
+        await self.turn_persistence.flush_blocks()
+        await self.turn_persistence.poll_blocks()
+
+    async def idle_retain_sweep(self, now: Optional[datetime] = None, *,
+                                since: Optional[datetime] = None) -> None:
+        """Trim and retain conversations that went quiet (DP-495).
+
+        48 h idle: the same block cut a new message triggers, down to about
+        50 % (nothing below it). 72 h idle: everything still unsent goes as
+        one final block, and stays in the prompt. Scopes are every window on
+        record plus every scope with turns queued in no block (turns from
+        before DP-495), resolved through the persona's current memory mode.
+
+        `since` (the previous sweep) limits the work to scopes whose 48 h or
+        72 h mark fell after it: a conversation idle for months is not
+        re-planned every pass. None (the boot pass) checks every scope. A
+        scope with unsent turns in no block always gets its 72 h check.
+        """
+        now = now or datetime.now(timezone.utc)
+        mm = self.request_builder.memory_manager
+        scopes: Dict[Tuple[str, str], RetainScope] = {}
+        for w in mm.retain_windows():
+            sc = scope_from_row(w)
+            scopes[(sc.persona_name, sc.key)] = sc
+        unsent: Set[Tuple[str, str]] = set()
+        for o in mm.unblocked_retain_origins():
+            p = self.personas.get(o["persona_name"])
+            sc = retain_scope(
+                p.get_memory_mode() if p else MemoryMode.CHANNEL_ISOLATED,
+                persona_name=o["persona_name"], channel=o["channel"],
+                user_identifier=o["user_identifier"], server_id=o["server_id"],
+                legacy=legacy_window(p.get_base_history_messages()) if p
+                else RETAIN_LEGACY_WINDOW,
+            )
+            scopes.setdefault((sc.persona_name, sc.key), sc)
+            unsent.add((sc.persona_name, sc.key))
+
+        def crossed(last: datetime, after: float) -> bool:
+            mark = last + timedelta(seconds=after)
+            return mark <= now and (since is None or mark > since)
+
+        for key, sc in scopes.items():
+            # The work below is synchronous (DB reads, token counting): yield
+            # between scopes so a long pass — the boot pass checks every
+            # scope — never holds the event loop for its whole length.
+            await asyncio.sleep(0)
+            # Per scope: the caller advances `since` after this pass, so a
+            # failure that aborted the loop would skip every later scope's
+            # mark for good.
+            try:
+                last = mm.scope_last_activity(sc)
+                if last is None:
+                    continue
+                if crossed(last, RETAIN_IDLE_TRIM_SECONDS):
+                    persona = self.personas.get(sc.persona_name)
+                    if persona is not None:
+                        self.request_builder.idle_trim(persona, sc)
+                final_due = last + timedelta(seconds=RETAIN_IDLE_FINAL_SECONDS) <= now
+                if final_due and (crossed(last, RETAIN_IDLE_FINAL_SECONDS) or key in unsent):
+                    mm.final_retain_block(sc, now)
+            except Exception as e:  # noqa: BLE001 — one scope never stops the sweep
+                logger.warning(f"Idle retain sweep failed for {sc.persona_name}:{sc.key}: {e}")
+
+    async def run_retain_maintenance(self) -> None:
+        """The retain upkeep loop (DP-495), hosted by AppManager. Its first
+        pass runs at once — the boot pass that picks up blocks a restart
+        interrupted and conversations that went quiet while the process was
+        down; then block sends and polls every
+        RETAIN_MAINTENANCE_INTERVAL_SECONDS and the idle sweep every
+        RETAIN_IDLE_SWEEP_SECONDS."""
+        last_sweep: Optional[datetime] = None
+        while not self._retain_stop.is_set():
+            now = datetime.now(timezone.utc)
+            sweep = last_sweep is None or \
+                (now - last_sweep).total_seconds() >= RETAIN_IDLE_SWEEP_SECONDS
+            try:
+                await self.retain_maintenance(now, sweep=sweep, since=last_sweep)
+            except Exception as e:  # noqa: BLE001 — the loop must not die
+                logger.warning(f"Retain maintenance pass failed: {e}")
+            if sweep:
+                last_sweep = now
+            try:
+                await asyncio.wait_for(self._retain_stop.wait(),
+                                       timeout=RETAIN_MAINTENANCE_INTERVAL_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+
+    def stop_retain_maintenance(self) -> None:
+        self._retain_stop.set()
 
     async def startup(self) -> None:
         """Post-init async startup tasks (e.g. Hindsight memory bank provisioning)."""

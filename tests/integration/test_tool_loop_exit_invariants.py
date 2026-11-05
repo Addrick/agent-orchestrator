@@ -27,7 +27,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from tests.helpers import offer_tools
-from src.memory.backend.base import SESSION_GAP_SECONDS
+from config.global_config import RETAIN_IDLE_FINAL_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, ToolCallResultEvent, ResponseType,
 )
@@ -363,15 +363,17 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
         return {"status": "running"}
     chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[assignment]
 
-    # Spy at the backend boundary: since DP-423 the retain is deferred and
-    # delivered by the flush, which calls the backend directly.
+    # Spy at the backend boundary: since DP-495 the retain is a block sent
+    # by the flush, one item per document, its turns in order.
     retained = []
-    original_retain = chat_system.memory_backend.retain_turn
 
-    async def spy_retain(**kwargs):
-        retained.append(kwargs)
-        return await original_retain(**kwargs)
-    chat_system.memory_backend.retain_turn = spy_retain  # type: ignore[assignment]
+    async def spy_retain(bank_id, items, **kwargs):
+        for it in items:
+            for turn in it["content"].split("\n\n"):
+                role = "assistant" if turn.startswith("test_persona: ") else "user"
+                retained.append({"role": role, "content": turn})
+        return []
+    chat_system.memory_backend.retain_block = spy_retain  # type: ignore[assignment]
 
     events = await _drain(chat_system.stream_response(
         "test_persona", "u_budget", "c_budget", "install the official model",
@@ -406,12 +408,12 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     # before: `_orchestrate` gates retention on response_type, so a real answer
     # shipped as DEV_COMMAND would never reach the memory bank.
     #
-    # DP-423 defers the retain until the turn leaves the window, so the prose
-    # / footer split now has to survive the queue: cut the session to flush.
+    # DP-423/495 defer the retain until a block cuts the turn, so the prose /
+    # footer split now has to survive the queue: idle the scope 72 h to send.
     await chat_system.turn_persistence.drain_flushes()
     assert not [k for k in retained if k.get("role") == "assistant"]
-    await chat_system.turn_persistence.flush_idle_sessions(
-        now=datetime.now(timezone.utc) + timedelta(seconds=SESSION_GAP_SECONDS + 60),
+    await chat_system.retain_maintenance(
+        now=datetime.now(timezone.utc) + timedelta(seconds=RETAIN_IDLE_FINAL_SECONDS + 60),
     )
     assistant_retained = [k for k in retained if k.get("role") == "assistant"]
     assert assistant_retained

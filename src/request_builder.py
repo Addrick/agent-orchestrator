@@ -17,13 +17,16 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.global_config import (
-    MEMORY_RETRIEVAL_ENABLED,
+    MEMORY_RETRIEVAL_ENABLED, RETAIN_TRIM_HIGH, RETAIN_TRIM_LOW,
 )
 from src.embedding_service import EmbeddingService
 from src.generation_params import GenerationParams
 from src.memory.backend.base import MemoryBackend, MemoryHit
-from src.memory.context_budget import drop_orphaned_tool_head, truncate_messages_to_budget
+from src.memory.context_budget import (
+    drop_orphaned_tool_head, message_tokens, plan_block_cut, truncate_messages_to_budget,
+)
 from src.memory.memory_manager import MemoryManager
+from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope
 from src.memory.scope_tags import recall_scope_tags
 from src.persona import Persona, MemoryMode
 from src.tools.definitions import MODEL_INCOMPATIBLE_TOOLS
@@ -88,6 +91,37 @@ class RequestContext:
     # (`render_continue_prefix`), and the stored reply of the row it extends.
     continue_prefix: Optional[str] = None
     continue_row_content: str = ""
+    # DP-495: the history window this request's prompt was built from.
+    history_window: Optional["HistoryWindow"] = None
+
+
+@dataclass
+class HistoryWindow:
+    """The prompt's history and where it came from (DP-495).
+
+    `rows` are the DB rows shown, in prompt order; `messages` their formatted
+    messages, `sources[i]` the interaction id `messages[i]` came from. Rows at
+    or above `start_id` are the live window (cuttable); rows from `floor_id`
+    up to it belong to cut blocks Hindsight has not finished with yet.
+    `count_cap` is the message-count ceiling (0: no history at all);
+    `over_cap` says the scope holds more rows than the cap shows.
+    """
+    scope: RetainScope
+    start_id: int
+    floor_id: int
+    count_cap: int
+    over_cap: bool = False
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+    messages: List[Dict[str, Any]] = field(default_factory=list)
+    sources: List[Optional[int]] = field(default_factory=list)
+
+    @property
+    def oldest_id(self) -> Optional[int]:
+        """The smallest interaction id shown, not rows[0]'s: the window is
+        ordered by timestamp, ids by insertion, and they disagree when a
+        platform timestamp (Discord `created_at`) lands out of insertion order."""
+        ids = [r['interaction_id'] for r in self.rows if r.get('interaction_id') is not None]
+        return min(ids) if ids else None
 
 
 @dataclass
@@ -181,69 +215,83 @@ class RequestBuilder:
 
     def format_raw_history_for_llm(self, raw_history: List[Dict[str, Any]], memory_mode: str,
                                    persona_name: str, server_id: Optional[str],
-                                   stamp: bool = False) -> List[Dict[str, Any]]:
+                                   stamp: bool = False,
+                                   sources: Optional[List[Optional[int]]] = None,
+                                   ) -> List[Dict[str, Any]]:
         """Formats database history records into a list of messages for the LLM.
 
         ``stamp`` (the persona's ``inject_timestamp``) prefixes every user-role
         message with its stored time (DP-431). The persona's own assistant
         turns are never stamped: a stamp beside the model's own words gets
         imitated in its replies.
+
+        ``sources``, when given, receives the interaction id each returned
+        message came from (DP-495: per-row token costs for the block cut).
         """
         final_history: List[Dict[str, Any]] = []
         is_group_chat = memory_mode in ("server", "global", "ticket") or (
                     memory_mode == "channel" and server_id is not None)
 
         for msg in raw_history:
-            author_role = msg.get('author_role')
-            author_name = msg.get('author_name')
-            content = msg.get('content', '')
-            # Noise reduction: Strip vertexai grounding redirect URLs from history before sending to LLM.
-            content_clean = strip_vertex_links(content) if content else content
+            emitted = len(final_history)
+            self._format_row(msg, final_history, persona_name, is_group_chat, stamp)
+            if sources is not None:
+                sources.extend([msg.get('interaction_id')] * (len(final_history) - emitted))
+        return final_history
 
-            if author_role == 'user':
-                if is_group_chat and author_name:
-                    formatted_content = f"{author_name}: {content_clean}"
-                else:
-                    formatted_content = content_clean
+    @staticmethod
+    def _format_row(msg: Dict[str, Any], final_history: List[Dict[str, Any]],
+                    persona_name: str, is_group_chat: bool, stamp: bool) -> None:
+        """Append one history row's messages to `final_history`."""
+        author_role = msg.get('author_role')
+        author_name = msg.get('author_name')
+        content = msg.get('content', '')
+        # Noise reduction: Strip vertexai grounding redirect URLs from history before sending to LLM.
+        content_clean = strip_vertex_links(content) if content else content
+
+        if author_role == 'user':
+            if is_group_chat and author_name:
+                formatted_content = f"{author_name}: {content_clean}"
+            else:
+                formatted_content = content_clean
+            if stamp:
+                formatted_content = _stamped(formatted_content, msg.get('timestamp'))
+            final_history.append({'role': 'user', 'content': formatted_content})
+        elif author_role == 'assistant':
+            if author_name == persona_name:
+                tool_context_json = msg.get('tool_context')
+                if tool_context_json:
+                    # A replayed tool block must follow a user turn *or a
+                    # function-response turn*. The history limit slices raw
+                    # rows, so an assistant row carrying tool_context can end
+                    # up oldest — replaying it then opens the wire array with
+                    # a function call and Gemini rejects the request outright
+                    # ("function call turn must come immediately after a user
+                    # turn or after a function response turn"). Drop the
+                    # orphan instead.
+                    #
+                    # Both legal predecessors matter: a DP-296 park row has
+                    # empty content, so its own emitted block ends on a
+                    # `tool` message. Accepting only 'user' would drop the
+                    # tool context of every row that follows a park — the
+                    # exact memory this feature exists to keep.
+                    if final_history and final_history[-1].get('role') in ('user', 'tool'):
+                        final_history.extend(replayable_tool_context(tool_context_json))
+                    else:
+                        logger.debug(
+                            "Dropping orphaned tool_context for %s: no "
+                            "preceding user turn survived the history limit.",
+                            persona_name,
+                        )
+                if content_clean:
+                    final_history.append({'role': 'assistant', 'content': content_clean})
+            elif content_clean:
+                # In a group chat, messages from other personas are treated as user messages.
+                # A reply that was only reasoning has nothing to show (DP-434).
+                formatted_content = f"{author_name}: {content_clean}"
                 if stamp:
                     formatted_content = _stamped(formatted_content, msg.get('timestamp'))
                 final_history.append({'role': 'user', 'content': formatted_content})
-            elif author_role == 'assistant':
-                if author_name == persona_name:
-                    tool_context_json = msg.get('tool_context')
-                    if tool_context_json:
-                        # A replayed tool block must follow a user turn *or a
-                        # function-response turn*. The history limit slices raw
-                        # rows, so an assistant row carrying tool_context can end
-                        # up oldest — replaying it then opens the wire array with
-                        # a function call and Gemini rejects the request outright
-                        # ("function call turn must come immediately after a user
-                        # turn or after a function response turn"). Drop the
-                        # orphan instead.
-                        #
-                        # Both legal predecessors matter: a DP-296 park row has
-                        # empty content, so its own emitted block ends on a
-                        # `tool` message. Accepting only 'user' would drop the
-                        # tool context of every row that follows a park — the
-                        # exact memory this feature exists to keep.
-                        if final_history and final_history[-1].get('role') in ('user', 'tool'):
-                            final_history.extend(replayable_tool_context(tool_context_json))
-                        else:
-                            logger.debug(
-                                "Dropping orphaned tool_context for %s: no "
-                                "preceding user turn survived the history limit.",
-                                persona_name,
-                            )
-                    if content_clean:
-                        final_history.append({'role': 'assistant', 'content': content_clean})
-                elif content_clean:
-                    # In a group chat, messages from other personas are treated as user messages.
-                    # A reply that was only reasoning has nothing to show (DP-434).
-                    formatted_content = f"{author_name}: {content_clean}"
-                    if stamp:
-                        formatted_content = _stamped(formatted_content, msg.get('timestamp'))
-                    final_history.append({'role': 'user', 'content': formatted_content})
-        return final_history
 
     def fetch_raw_history(
             self,
@@ -252,9 +300,16 @@ class RequestBuilder:
             user_identifier: str,
             channel: str,
             server_id: Optional[str],
-            effective_limit: int
+            effective_limit: int,
+            min_id: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], str]:
-        """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label)."""
+        """Dispatches history retrieval based on memory mode. Returns (raw_history, mode_label).
+
+        `min_id` is the DP-495 window floor: rows below it were cut into a
+        block Hindsight has finished with. None = no floor (transcript view).
+        The scope each branch covers is `retain_blocks.retain_scope`'s.
+        """
+        mm = self.memory_manager
         if mode == MemoryMode.TICKET_ISOLATED:
             return [], "ticket"
         elif mode == MemoryMode.SERVER_WIDE:
@@ -262,13 +317,13 @@ class RequestBuilder:
             # If server_id is None (Web UI/local), we still query, as the DB
             # stores these rows with server_id=NULL. MemoryManager handles
             # the NULL check via IS NULL in its queries.
-            return self.memory_manager.get_server_history(server_id, persona_name, effective_limit), "server"
+            return mm.get_server_history(server_id, persona_name, effective_limit, min_id=min_id), "server"
         elif mode == MemoryMode.PERSONAL:
-            return self.memory_manager.get_personal_history(user_identifier, persona_name, effective_limit), "personal"
+            return mm.get_personal_history(user_identifier, persona_name, effective_limit, min_id=min_id), "personal"
         elif mode == MemoryMode.GLOBAL:
-            return self.memory_manager.get_global_history(persona_name, effective_limit), "global"
+            return mm.get_global_history(persona_name, effective_limit, min_id=min_id), "global"
         else:
-            return self.memory_manager.get_channel_history(channel, persona_name, server_id, effective_limit), "channel"
+            return mm.get_channel_history(channel, persona_name, server_id, effective_limit, min_id=min_id), "channel"
 
     def get_view_history(
             self,
@@ -322,36 +377,168 @@ class RequestBuilder:
         """Retrieves and formats conversation history based on the persona's memory mode.
 
         Returns (formatted_history, oldest_interaction_id).
-        oldest_interaction_id is the smallest interaction_id in the sliding
-        window, used for the memory recency filter and the DP-423 eviction cut.
+        oldest_interaction_id is the smallest interaction_id in the window,
+        used for the memory recency filter.
 
         DP-142: ``advance`` gates the hello-override side effect. Live turns pass
-        True; read-only / dry-run callers pass False.
+        True; read-only / dry-run callers pass False. It also gates storing a
+        first-seen scope's window start (DP-495): a dry run writes nothing.
+        """
+        window = self.load_history_window(
+            persona, user_identifier, channel, server_id, history_limit, advance=advance,
+        )
+        return window.messages, window.oldest_id
+
+    def load_history_window(
+            self,
+            persona: Persona,
+            user_identifier: str,
+            channel: str,
+            server_id: Optional[str],
+            history_limit: Optional[int],
+            advance: bool = True,
+            scope: Optional[RetainScope] = None,
+    ) -> HistoryWindow:
+        """The prompt's history window for a request (DP-495).
+
+        The window starts at the scope's pinned start (`Retain_Window`), or
+        lower while a cut block is still waiting for Hindsight, so the prompt
+        prefix stays the same from one request to the next until a block is
+        cut or finishes. `context` / `history_limit` cap it by message count
+        on top. `scope` overrides the request's own (the idle sweep).
         """
         persona_name = persona.get_name()
-
         effective_limit: int = persona.get_history_messages(advance=advance)
         if history_limit is not None:
             effective_limit = min(effective_limit, history_limit)
-
+        if scope is None:
+            scope = retain_scope(
+                persona.get_memory_mode(), persona_name=persona_name, channel=channel,
+                user_identifier=user_identifier, server_id=server_id,
+                legacy=legacy_window(persona.get_base_history_messages()),
+            )
+        start_id, floor_id = self.memory_manager.retain_window(scope, persist=advance)
+        cap = max(effective_limit, 0) if scope.has_window else 0
+        window = HistoryWindow(scope=scope, start_id=start_id, floor_id=floor_id, count_cap=cap)
+        if cap == 0:
+            return window
+        # One row past the cap tells whether the cap is cutting anything off.
         raw_history, memory_mode_used = self.fetch_raw_history(
-            persona.get_memory_mode(), persona_name,
-            user_identifier, channel, server_id, effective_limit
+            MemoryMode[scope.mode], persona_name,
+            scope.user_identifier or user_identifier, scope.channel or channel,
+            scope.server_id if scope.filter_server else server_id,
+            cap + 1, min_id=floor_id,
         )
-
-        # The smallest id, not raw_history[0]'s: the window is ordered by
-        # timestamp, ids by insertion, and they disagree when a platform
-        # timestamp (Discord `created_at`) lands out of insertion order. Every
-        # window row is at or above the minimum, which is what the recall
-        # cutoff and the DP-423 eviction flush both need.
-        ids = [r['interaction_id'] for r in raw_history if r.get('interaction_id') is not None]
-        oldest_interaction_id = min(ids) if ids else None
-
-        formatted = self.format_raw_history_for_llm(
-            raw_history, memory_mode_used, persona_name, server_id,
-            stamp=persona.get_inject_timestamp(),
+        if len(raw_history) > cap:
+            # Over the cap only when what it hides is unsent live history; a
+            # block already cut and in flight may fall off the cap freely.
+            window.over_cap = any(
+                (r.get('interaction_id') or 0) >= start_id for r in raw_history[:-cap]
+            )
+            raw_history = raw_history[-cap:]
+        window.rows = raw_history
+        window.messages = self.format_raw_history_for_llm(
+            raw_history, memory_mode_used, persona_name,
+            scope.server_id if scope.filter_server else server_id,
+            stamp=persona.get_inject_timestamp(), sources=window.sources,
         )
-        return formatted, oldest_interaction_id
+        return window
+
+    @staticmethod
+    def prompt_budget(persona: Persona,
+                      local_inference_config: Optional[Dict[str, Any]] = None) -> int:
+        """Tokens the prompt may use: the context minus the reply's reserve.
+        A portal's per-request `max_context_length` overrides the persona's."""
+        ctx_limit = (local_inference_config or {}).get("max_context_length") \
+            or persona.get_max_context_tokens()
+        return int(ctx_limit) - persona.get_response_token_limit()
+
+    def plan_window_cut(self, persona: Persona, window: HistoryWindow, *, budget: int,
+                        fixed_tokens: int, trigger: bool) -> Optional[int]:
+        """The window start after a block cut (DP-495), or None for no cut.
+
+        One function for both triggers: a new user message (`trigger`, the
+        90 % watermark) and the 48 h idle trim (no watermark, cut to 50 % if
+        over it). A count cap that is cutting rows off (`over_cap`) cuts the
+        window to half the cap, so a binding cap trims in blocks too and no
+        row slides out of the prompt unsent. Rows are cut whole — a row's tool
+        calls and results are one row, so a cut never splits them — and the
+        window left behind starts on a turn (a user message).
+        """
+        if window.count_cap == 0:
+            # No history shown (`ticket` mode, `context 0`): every turn is its
+            # own block, cut on the next one.
+            if not trigger:
+                return None
+            top = self.memory_manager.scope_max_id(window.scope)
+            return top + 1 if top is not None and top >= window.start_id else None
+        tokens: Dict[int, int] = {}
+        first_role: Dict[int, str] = {}
+        for msg, src in zip(window.messages, window.sources):
+            if src is None:
+                continue
+            tokens[src] = tokens.get(src, 0) + message_tokens(msg)
+            first_role.setdefault(src, msg.get("role") or "")
+        live = sorted(
+            (r for r in window.rows
+             if r.get("interaction_id") is not None and r["interaction_id"] >= window.start_id),
+            key=lambda r: r["interaction_id"],
+        )
+        rows = [(first_role.get(r["interaction_id"]) == "user", tokens.get(r["interaction_id"], 0))
+                for r in live]
+        k = plan_block_cut(
+            rows, budget=budget, fixed_tokens=fixed_tokens,
+            keep_at_most=window.count_cap // 2 if window.over_cap else None,
+            high=RETAIN_TRIM_HIGH, low=RETAIN_TRIM_LOW,
+            trigger=trigger,
+        )
+        if k is None:
+            return None
+        return int(live[k]["interaction_id"]) if k < len(live) \
+            else int(live[-1]["interaction_id"]) + 1
+
+    def cut_window(self, window: HistoryWindow, new_start: Optional[int]) -> Optional[int]:
+        """Persist a planned cut; returns the new block's id (None: no cut,
+        or a concurrent request cut first)."""
+        if new_start is None:
+            return None
+        block_id = self.memory_manager.cut_retain_block(
+            window.scope, expected_start=window.start_id, new_start=new_start,
+        )
+        if block_id is not None:
+            logger.info(
+                "Block cut: %s:%s history below %s → block %s",
+                window.scope.persona_name, window.scope.key, new_start, block_id,
+            )
+        return block_id
+
+    def _cut_on_new_message(self, ctx: RequestContext, budget: int, window_tokens: int) -> None:
+        """The request-time block cut, for a fresh user message only — not a
+        continue, nor a client that supplies its own history."""
+        if ctx.history_window is None or ctx.continue_prefix is not None \
+                or ctx.client_messages or not (ctx.message and ctx.message.strip()):
+            return
+        total = sum(message_tokens(m) for m in ctx.conversation_history)
+        try:
+            self.cut_window(ctx.history_window, self.plan_window_cut(
+                ctx.persona, ctx.history_window, budget=budget,
+                fixed_tokens=total - window_tokens, trigger=True,
+            ))
+        except Exception as e:  # noqa: BLE001 — a failed cut never fails the turn
+            logger.warning(f"Block cut failed for {ctx.persona_name}: {e}")
+
+    def idle_trim(self, persona: Persona, scope: RetainScope) -> Optional[int]:
+        """The 48 h idle trim (DP-495): cut the scope's quiet conversation as
+        close to 50 % of the prompt budget as a turn boundary allows. Every
+        row is from before the silence. Under 50 %: no cut."""
+        window = self.load_history_window(
+            persona, scope.user_identifier or "", scope.channel or "",
+            scope.server_id, None, advance=False, scope=scope,
+        )
+        new_start = self.plan_window_cut(
+            persona, window, budget=self.prompt_budget(persona), fixed_tokens=0, trigger=False,
+        )
+        return self.cut_window(window, new_start)
 
     async def retrieve_memory_block(
             self,
@@ -699,10 +886,15 @@ class RequestBuilder:
         messages are stripped — the engine re-injects them from persona config
         and ctx.message.
         """
-        ctx.conversation_history, ctx.oldest_interaction_id = self.build_conversation_history(
+        ctx.history_window = self.load_history_window(
             ctx.persona, ctx.user_identifier, ctx.channel,
             ctx.server_id, ctx.history_limit, advance=advance
         )
+        ctx.conversation_history = list(ctx.history_window.messages)
+        ctx.oldest_interaction_id = ctx.history_window.oldest_id
+        # Taken before the new turn and the memory block are added: every
+        # other token in the prompt is "fixed" for the block cut below.
+        window_tokens = sum(message_tokens(m) for m in ctx.conversation_history)
 
         # Load sticky taint bit for this conversation (touch for LRU recency)
         taint_key = (ctx.user_identifier, ctx.persona_name, ctx.channel, ctx.server_id)
@@ -805,8 +997,19 @@ class RequestBuilder:
             self._attach_memory_block(ctx.conversation_history, memory_block)
 
         # Respect per-request context overrides from the portal for history truncation.
-        ctx_limit = (ctx.local_inference_config or {}).get("max_context_length") or ctx.persona.get_max_context_tokens()
-        prompt_budget = ctx_limit - ctx.persona.get_response_token_limit()
+        prompt_budget = self.prompt_budget(ctx.persona, ctx.local_inference_config)
+
+        # DP-495: a new user message may cut the oldest history as one block
+        # (90 % watermark → ~50 %, or the count cap). The block stays in this
+        # prompt — and the next ones — until Hindsight has finished with it,
+        # so the cut changes nothing here; it only moves the pinned start.
+        # Only a live, fresh turn cuts: never a dry run, retry, continue, or a
+        # client that supplies its own history.
+        if advance and not is_retry:
+            self._cut_on_new_message(ctx, prompt_budget, window_tokens)
+
+        # Fallback: a prompt over the full budget (blocks still in flight,
+        # Hindsight down) drops its oldest messages for this request only.
         ctx.conversation_history, dropped = truncate_messages_to_budget(
             ctx.conversation_history, prompt_budget,
         )

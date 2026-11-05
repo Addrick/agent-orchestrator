@@ -859,7 +859,10 @@ def test_build_conversation_history_personal_mode(chat_system_with_mocks):
 
     system.request_builder.build_conversation_history(persona, 'user123', 'ch', None, None)
 
-    memory_mock.get_personal_history.assert_called_once_with('user123', 'test_persona', persona.get_history_messages())
+    # DP-495: one row past the cap (to tell whether it binds), from the
+    # window floor.
+    memory_mock.get_personal_history.assert_called_once_with(
+        'user123', 'test_persona', persona.get_history_messages() + 1, min_id=0)
 
 
 # --- DP-142: read-only paths must not advance the hello override ---
@@ -1605,19 +1608,18 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
 
 
 @pytest.mark.asyncio
-async def test_retry_rebuilds_hindsight_session_instead_of_appending(
+async def test_retry_requeues_its_row_whether_or_not_already_sent(
     chat_system_with_mocks,
 ):
-    """DP-409: the regenerated reply replaces the session document; appending
-    it would leave the discarded attempt's facts recallable. Since DP-423 only
-    a reply that was already retained (not still queued) gets here."""
+    """DP-409 / DP-495: a retry re-queues its reply. Still queued, the new
+    attempt replaces what will be sent; already in a sent block, the queue
+    upsert sends that block again and its document is replaced (MemoryManager
+    tests cover the block side). Either way: no per-turn retain, no append."""
     system, memory_mock, _, _, _ = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
     memory_mock.handle_portal_retry.return_value = 99
     memory_mock.update_interaction_content.return_value = True
-    memory_mock.is_retain_pending.return_value = False
-    system.turn_persistence.rebuild_session_safe = AsyncMock()
-    system.turn_persistence.retain_turn_safe = AsyncMock()
+    system.memory_backend.retain_turn = AsyncMock()
 
     await _drain_events(
         system.stream_response(
@@ -1625,41 +1627,13 @@ async def test_retry_rebuilds_hindsight_session_instead_of_appending(
         )
     )
 
-    system.turn_persistence.retain_turn_safe.assert_not_called()
-    memory_mock.queue_retain.assert_not_called()
-    kwargs = system.turn_persistence.rebuild_session_safe.call_args.kwargs
-    assert kwargs["retried_id"] == 99
-    assert kwargs["retried_text"] == "LLM Reply"
-    assert kwargs["channel"] == "web_ui"
-
-
-@pytest.mark.asyncio
-async def test_retry_of_queued_reply_requeues_instead_of_rebuilding(
-    chat_system_with_mocks,
-):
-    """DP-423: a retried reply still in the window was never sent to
-    Hindsight, so the new attempt just replaces the queued one — no rebuild,
-    no retain."""
-    system, memory_mock, _, _, _ = chat_system_with_mocks
-    memory_mock.get_channel_history.return_value = []
-    memory_mock.handle_portal_retry.return_value = 99
-    memory_mock.update_interaction_content.return_value = True
-    memory_mock.is_retain_pending.return_value = True
-    system.turn_persistence.rebuild_session_safe = AsyncMock()
-    system.turn_persistence.retain_turn_safe = AsyncMock()
-
-    await _drain_events(
-        system.stream_response(
-            "test_persona", "portal", "web_ui", "ignored", is_retry=True,
-        )
-    )
-
-    system.turn_persistence.rebuild_session_safe.assert_not_called()
-    system.turn_persistence.retain_turn_safe.assert_not_called()
+    system.memory_backend.retain_turn.assert_not_called()
     memory_mock.queue_retain.assert_called_once()
     args, kwargs = memory_mock.queue_retain.call_args
     assert args == (99, "test_persona", "web_ui")
     assert kwargs["untrusted"] is False
+    # A retry never cuts a block: it adds no message.
+    memory_mock.cut_retain_block.assert_not_called()
 
 
 @pytest.mark.asyncio
