@@ -1452,6 +1452,13 @@ it did before: a read (e.g. Hindsight's `recall`, `reflect`, `get_*`) stays
 **allow**, a write that used to prompt moves to **ask**, and the persona is
 saved again. A server that never comes back leaves its names as saved.
 
+The Inspector's Tools tab lists such names (any saved tool with no registered
+definition) under **unavailable**, collapsed at the bottom. Saving the tab keeps
+them as they were, whatever else you changed, and the set-all and per-group
+buttons leave them alone. **remove** drops one from the policy on the next save
+(**undo** puts it back). Before this, saving the tab while an MCP server was down
+silently dropped every one of that server's tools from the persona.
+
 ### Insecure Composition Blocking
 To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
 - **`network:read` + `local:write`**: Prevents tools that read from the internet from being used by a persona that can write to local storage/files.

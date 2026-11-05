@@ -569,6 +569,8 @@ function bulkTitle(what: string, s: BulkState): string {
 
 // catalog group key for tools with no owning service (built-in / local)
 const BUILTIN_GROUP = 'built-in'
+// Collapse key for stored names with no catalog entry (not a service binding).
+const UNAVAILABLE_GROUP = '\u0000unavailable'
 
 // The three security-invariant escape hatches in policy.py:validate_composition.
 const OVERRIDE_FLAGS: { key: string; label: string }[] = [
@@ -595,6 +597,13 @@ function deriveDraft(persona: Persona | null, tools: ToolDef[]): PolicyDraft {
     else if (allow.has(t.name)) states[t.name] = 'allow'
     else states[t.name] = 'off'
   }
+  // A stored name the catalog lacks (its MCP server is down or not yet
+  // registered) keeps its state, so a save while the server is away writes it
+  // back instead of dropping it. `set tool_policy` replaces the whole policy.
+  const known = new Set(tools.map((t) => t.name))
+  for (const n of [...allow, ...ask]) {
+    if (!known.has(n)) states[n] = ask.has(n) ? 'ask' : 'allow'
+  }
   return {
     states,
     overrides: new Set(tp.explicit_overrides || []),
@@ -604,14 +613,12 @@ function deriveDraft(persona: Persona | null, tools: ToolDef[]): PolicyDraft {
 
 // Build the tool_policy dict the engine expects. `capabilities_required` is
 // passed through untouched (not editable here).
-function draftToPolicy(
-  draft: PolicyDraft,
-  tools: ToolDef[],
-  persona: Persona | null,
-): Record<string, unknown> {
-  // Every tool by name: the '*' wildcard is retired (DP-497).
-  const allow = tools.filter((t) => draft.states[t.name] === 'allow').map((t) => t.name)
-  const ask = tools.filter((t) => draft.states[t.name] === 'ask').map((t) => t.name)
+function draftToPolicy(draft: PolicyDraft, persona: Persona | null): Record<string, unknown> {
+  // Every tool by name: the '*' wildcard is retired (DP-497). Built from the
+  // draft, not the catalog, so names of an unregistered server survive.
+  const names = Object.keys(draft.states)
+  const allow = names.filter((n) => draft.states[n] === 'allow')
+  const ask = names.filter((n) => draft.states[n] === 'ask')
   return {
     default: 'deny',
     allow,
@@ -631,7 +638,8 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 
 function policyChanged(a: PolicyDraft, b: PolicyDraft): boolean {
   const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
-  for (const k of keys) if (a.states[k] !== b.states[k]) return true
+  // absent = off: a removed unavailable name is 'off' in the draft, absent once saved
+  for (const k of keys) if ((a.states[k] ?? 'off') !== (b.states[k] ?? 'off')) return true
   return false
 }
 
@@ -723,6 +731,14 @@ function ToolsPane({
     })
   }
   const setAllState = (s: BulkState) => setManyStates(tools, s)
+  // Stored names with no catalog entry (server down / not registered). They
+  // are kept on save; the bulk rows leave them alone; only "remove" drops one.
+  const catalogNames = useMemo(() => new Set(tools.map((t) => t.name)), [tools])
+  const unavailable = Object.keys(draft.states)
+    .filter((n) => !catalogNames.has(n))
+    .sort()
+  const setUnavailable = (n: string, s: ToolState) =>
+    setDraft((d) => ({ ...d, states: { ...d.states, [n]: s } }))
   const toggleBinding = (b: string) =>
     setDraft((d) => {
       const next = new Set(d.bindings)
@@ -820,7 +836,7 @@ function ToolsPane({
         last = await store.runToolsCommand(`set service_bindings ${list}`)
       }
       if (policyDirty) {
-        const policy = draftToPolicy(draft, tools, persona)
+        const policy = draftToPolicy(draft, persona)
         // compact JSON (no spaces) survives the dev-command whitespace tokenizer
         last = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
       }
@@ -943,6 +959,49 @@ function ToolsPane({
           </div>
         )
       })}
+
+      {unavailable.length > 0 && (
+        <div>
+          <div
+            className={'section toolgrp' + (expanded.has(UNAVAILABLE_GROUP) ? '' : ' collapsed')}
+            onClick={() => toggleGroup(UNAVAILABLE_GROUP)}
+          >
+            unavailable
+            <span className="pill">{unavailable.length}</span>
+            <span className="desc">not registered (server down?) — kept as saved</span>
+            <span className="car">▾</span>
+          </div>
+          {expanded.has(UNAVAILABLE_GROUP) &&
+            unavailable.map((n) => {
+              const st = draft.states[n]
+              const removed = st === 'off'
+              const stored = baseline.states[n]
+              return (
+                <div className="toolrow" key={n}>
+                  <div className="tt">
+                    <span className="nm">{n}</span>
+                    <button
+                      type="button"
+                      className="tri"
+                      disabled={busy}
+                      title={
+                        removed
+                          ? 'keep it in the policy'
+                          : 'drop it from the policy on save'
+                      }
+                      onClick={() => setUnavailable(n, removed ? stored ?? 'ask' : 'off')}
+                    >
+                      {removed ? 'undo' : 'remove'}
+                    </button>
+                  </div>
+                  <div className="ds">
+                    {removed ? 'removed on save' : `saved as ${st}; no definition registered`}
+                  </div>
+                </div>
+              )
+            })}
+        </div>
+      )}
 
       <div
         className={'section adv' + (advOpen ? '' : ' collapsed')}
