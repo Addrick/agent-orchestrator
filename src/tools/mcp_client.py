@@ -29,8 +29,9 @@ Security model:
   domain, so composition Rules 2/3 treat one server's read+write as a closed
   loop and re-arm exactly when combined with foreign domains.
 - Definitions carry ``dynamic: True`` — the marker that excludes them from
-  ``['*']`` policy expansion (a new server must never silently widen or
-  quarantine-cascade wildcard personas).
+  ``set tools all`` and from the load-time expansion of a legacy ``['*']``
+  policy (DP-497): a new server must never silently widen or
+  quarantine-cascade a persona that did not name its tools.
 - Tool descriptions are server-authored text that enters the system prompt
   (prompt-injection surface) → length-capped at translation.
 

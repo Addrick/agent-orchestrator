@@ -17,7 +17,7 @@ from mcp import types as mcp_types
 from src.persona import Persona
 from src.tools import definitions
 from src.tools import mcp_client
-from src.tools.definitions import ToolDefinitionRegistry, ALL_TOOL_DEFINITIONS
+from src.tools.definitions import ToolDefinitionRegistry, ALL_TOOL_DEFINITIONS, get_all_tool_definitions
 from src.tools.mcp_client import MCPClientManager
 from src.tools.mcp_integration import MCPIntegration
 from src.tools.tool_manager import ToolManager
@@ -850,9 +850,11 @@ async def test_wildcard_persona_unaffected_by_server_install(
         tmp_path, fresh_registry, fake_transport):
     """The quarantine-cascade scenario: a wildcard persona's verdict must be
     identical before and after an MCP server registers its tools."""
+    # DP-497: '*' is expanded when the persona is built, before the server
+    # registers anything -- so its tools can never be part of it.
     wildcard = Persona(
         persona_name="wild", model_name="gemini-2.5-flash", prompt="p",
-        tool_policy={"default": "allow", "allow": ["*"]},
+        enabled_tools=["*"], tool_definitions=list(get_all_tool_definitions()),
     )
     from src.tools.composition import revalidate_persona_security
     before = revalidate_persona_security(wildcard)

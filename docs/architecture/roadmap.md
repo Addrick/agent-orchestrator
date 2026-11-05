@@ -26,7 +26,7 @@ type: project
 - [x] **ReminderAgent** — SHIPPED. `src/agents/reminder_agent.py`, registered in `main.py` when Zammad is available. (Residual: configurable staleness/age threshold not yet landed — DP-102.)
 - [ ] **OpenViking memory management** — in-engine memory for personas/conversations, inspired by OpenViking tiered retrieval
 - [ ] **Model/provider failover** — `fallback_model` on Persona, retry on 429/5xx with alternate provider
-- [ ] **Tool permission gating expansion** — per-tool allow/ask/deny profiles at persona level. ⚠️ **The "current" half of this line was two rewrites out of date and has been corrected:** gating is no longer emoji-reaction CONFIRM mode. Writes are audited **universally, regardless of execution mode**, through a composition of four predicates (DP-306) with `ALWAYS_CONFIRM_TOOLS` and `explicit_overrides`; see the Tool Security section of `../user_guide.md`. The allow/ask/deny *profile* shape is still unbuilt — that part of the item stands.
+- [x] **Tool permission gating expansion** — per-tool allow/ask/off at persona level. **Done in DP-497:** every tool's saved state (off · allow · ask) is the only approval gate, reads included, regardless of execution mode; reads default to allow and writes/irreversible tools to ask; `ALWAYS_CONFIRM_TOOLS` and the `*` wildcard are gone. See "Allow vs ask" in `../user_guide.md`. Named reusable *profiles* (one set of states shared by several personas) remain unbuilt.
 
 ## Medium-term
 

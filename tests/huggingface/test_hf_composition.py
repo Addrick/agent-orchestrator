@@ -31,7 +31,7 @@ def _hypr_persona():
 def _hypr_tools(definitions=None):
     """The exact toolset hypr is exposed, as `RequestBuilder` computes it."""
     persona = _hypr_persona()
-    policy = ToolPolicy(**persona["tool_policy"])
+    policy = ToolPolicy.from_dict(persona["tool_policy"])
     bindings = set(persona["service_bindings"])
     available = [
         t for t in (definitions or ALL_TOOL_DEFINITIONS)
@@ -44,7 +44,9 @@ def test_hypr_exposes_the_four_new_tools():
     persona = _hypr_persona()
     for name in ("hf_search", "hf_files", "install_model", "install_status"):
         assert name in persona["enabled_tools"]
-        assert name in persona["tool_policy"]["allow"]
+    # DP-497: the reads run, the install (a write) asks.
+    assert {"hf_search", "hf_files", "install_status"} <= set(persona["tool_policy"]["allow"])
+    assert "install_model" in persona["tool_policy"]["ask"]
     assert "huggingface" in persona["service_bindings"]
     _, tools = _hypr_tools()
     assert {t["function"]["name"] for t in tools} >= {

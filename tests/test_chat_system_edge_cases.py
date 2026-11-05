@@ -23,7 +23,7 @@ from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 
 # Reuse the shared fixture
-from tests.helpers import offer_tools, only_pending_token, pending_tokens
+from tests.helpers import offer_tools, only_pending_token, pending_tokens, enable_all_tools
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -36,7 +36,7 @@ async def test_confirm_deny_then_retry_creates_new_pending(chat_system_with_mock
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     # First turn: LLM returns a write call → gate it
     text_engine_mock.generate_response.side_effect = [
@@ -78,7 +78,7 @@ async def test_confirm_deny_continuation_parks_nothing_new(chat_system_with_mock
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     text_engine_mock.generate_response.side_effect = [
         ({'type': 'tool_calls',
@@ -108,7 +108,7 @@ async def test_continuation_may_propose_again(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket", "create_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     text_engine_mock.generate_response.side_effect = [
         ({'type': 'tool_calls',
@@ -146,7 +146,7 @@ async def test_resolve_a_park_registered_directly(chat_system_with_mocks):
     """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     park = ParkedWrite(
         token='w1-token',
@@ -184,7 +184,7 @@ async def test_expired_park_is_not_executed_on_approval(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     text_engine_mock.generate_response.side_effect = [
         ({'type': 'tool_calls',

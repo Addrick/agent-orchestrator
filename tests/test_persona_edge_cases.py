@@ -19,6 +19,7 @@ from config import global_config
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.generation_params import GenerationParams
 from src.tool_policy import ToolPolicy
+from src.tools.definitions import get_all_tool_definitions
 from src.personas.store import (
     save_personas_to_file,
     load_personas_from_file,
@@ -220,10 +221,10 @@ def test_clear_provider_extra_missing_block(persona):
 # enabled_tools / ToolPolicy convergence
 # ---------------------------------------------------------------------------
 
-def test_get_enabled_tools_wildcard(base_args):
-    """When policy default=allow with '*', get_enabled_tools returns ['*']."""
-    p = Persona(**base_args, tool_policy={"default": "allow", "allow": ["*"]})
-    assert p.get_enabled_tools() == ["*"]
+def test_a_wildcard_policy_dict_is_refused(base_args):
+    """DP-497 retired '*': a policy dict carrying it is refused, not stored."""
+    with pytest.raises(ValueError, match="retired"):
+        Persona(**base_args, tool_policy={"default": "allow", "allow": ["*"]})
 
 
 def test_get_enabled_tools_empty(base_args):
@@ -234,11 +235,12 @@ def test_get_enabled_tools_empty(base_args):
 
 def test_set_enabled_tools_syncs_both_fields(persona):
     """set_enabled_tools updates legacy _enabled_tools AND _tool_policy."""
-    persona.set_enabled_tools(["tool_a", "tool_b"])
-    assert sorted(persona.get_enabled_tools()) == ["tool_a", "tool_b"]
+    persona.set_enabled_tools(["web_search", "create_ticket"], get_all_tool_definitions())
+    assert sorted(persona.get_enabled_tools()) == ["create_ticket", "web_search"]
     policy = persona.get_tool_policy()
     assert policy.default == "deny"
-    assert sorted(policy.allow) == ["tool_a", "tool_b"]
+    # DP-497: each at its default state
+    assert policy.allow == ["web_search"] and policy.ask == ["create_ticket"]
 
 
 def test_set_tool_policy_syncs_legacy_field(persona):
@@ -265,9 +267,9 @@ def test_get_enabled_tools_prefers_policy(base_args):
 
 def test_set_enabled_tools_updates_policy(persona):
     """A second set_enabled_tools replaces — does not append to — the policy."""
-    persona.set_enabled_tools(["a"])
-    persona.set_enabled_tools(["b", "c"])
-    assert sorted(persona.get_tool_policy().allow) == ["b", "c"]
+    persona.set_enabled_tools(["web_search"], get_all_tool_definitions())
+    persona.set_enabled_tools(["search_tickets", "get_ticket_details"], get_all_tool_definitions())
+    assert sorted(persona.get_tool_policy().allow) == ["get_ticket_details", "search_tickets"]
 
 
 def test_set_tool_policy_dict_syncs_legacy(persona):
@@ -441,18 +443,21 @@ def test_persona_modes_round_trip(base_args, tmp_path):
 
 
 def test_persona_tool_policy_legacy_migration(base_args, tmp_path):
-    """A legacy file with only `enabled_tools` (no `tool_policy`) loads as a deny policy."""
+    """A legacy file with only `enabled_tools` (no `tool_policy`) loads as a
+    deny policy, each tool at what it did before DP-497: reads ran (allow),
+    writes asked (ask), an unknown tool fails closed (ask)."""
     file_path = tmp_path / "personas.json"
     file_path.write_text(json.dumps({
         "personas": [{
             "name": "legacy",
             "model_name": "m",
             "prompt": "p",
-            "enabled_tools": ["tool_a", "tool_b"],
+            "enabled_tools": ["web_search", "create_ticket", "tool_a"],
         }],
     }))
     loaded = load_personas_from_file(file_path_override=str(file_path))
     assert loaded is not None and "legacy" in loaded
     pol = loaded["legacy"].get_tool_policy()
     assert pol.default == "deny"
-    assert sorted(pol.allow) == ["tool_a", "tool_b"]
+    assert pol.allow == ["web_search"]
+    assert pol.ask == ["create_ticket", "tool_a"]

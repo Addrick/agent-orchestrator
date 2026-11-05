@@ -446,9 +446,7 @@ class BotLogic:
             return None, False
 
         enabled_tools = persona.get_enabled_tools()
-        if enabled_tools == ['*']:
-            tools_display = "All"
-        elif not enabled_tools:
+        if not enabled_tools:
             tools_display = "None"
         else:
             tools_display = ", ".join(enabled_tools)
@@ -524,14 +522,14 @@ class BotLogic:
     def _what_tools(self, args: List[str], persona: Persona) -> Tuple[str, bool]:
         all_tool_defs = self.tool_manager().get_tool_definitions()
         all_tool_names = {tool['function']['name'] for tool in all_tool_defs}
-        enabled_tools = persona.get_enabled_tools()
 
         response_lines = ["Available Tools & Status for " + persona.get_name() + ":"]
         if not all_tool_names:
             return "No tools are currently available in the system.", False
 
         for tool_name in sorted(list(all_tool_names)):
-            status = "[ENABLED]" if enabled_tools == ['*'] or tool_name in enabled_tools else "[DISABLED]"
+            state = persona.get_tool_policy().state_of(tool_name)
+            status = "[DISABLED]" if state == "off" else f"[ENABLED: {state}]"
             response_lines.append(f"- {tool_name} {status}")
 
         return "\n".join(response_lines), False
@@ -567,6 +565,8 @@ class BotLogic:
             # runs. See `_AUDITED_FIELDS` for which fields these are and why.
             audited: Optional[_AuditedField] = self._AUDITED_FIELDS.get(sub_command)
             prior_state: Any = audited.read(persona) if audited else None
+            prior_irreversible = set(persona.get_tool_policy().irreversible_allowed(
+                self.tool_manager().get_tool_definitions())) if sub_command in ('tools', 'tool_policy') else set()
 
             result: Tuple[Optional[str], bool]
             if sub_command in ('model', 'tools'):
@@ -579,6 +579,17 @@ class BotLogic:
             # here — the operator-edit boundary — rather than in the pure setters,
             # which internal callers use for many non-policy reasons.
             message, mutated = result
+            if mutated and sub_command in ('tools', 'tool_policy'):
+                # DP-497: an irreversible tool newly set to allow runs with
+                # no prompt from now on -- accepted, but said out loud.
+                newly = [n for n in persona.get_tool_policy().irreversible_allowed(
+                    self.tool_manager().get_tool_definitions()) if n not in prior_irreversible]
+                if newly:
+                    message = (
+                        f"{message}\n⚠️ Irreversible tool(s) now set to allow — they run "
+                        f"without asking: {', '.join(newly)}."
+                    )
+                result = (message, mutated)
             if mutated and audited is not None:
                 metadata: Dict[str, Any] = {"persona": persona.get_name()}
                 if audited.extra_metadata is not None:
@@ -693,7 +704,7 @@ class BotLogic:
         use_none = raw_args[0].lower() == 'none'
 
         if use_none:
-            persona.set_enabled_tools([])
+            persona.set_enabled_tools([], all_tool_defs)
             return f"All tools have been disabled for {persona.get_name()}.", True
 
         # Split into includes and excludes
@@ -739,19 +750,24 @@ class BotLogic:
                 return f"Error: Could not match excluded tool '{name}'. Available: {', '.join(available_tool_names)}", False
             resolved_excludes.append(resolved)
 
-        # Build final tool set
+        # Build final tool set. DP-497: each tool at its default state (reads
+        # allow, writes ask), and `all` is every non-dynamic tool BY NAME --
+        # no wildcard, so a tool added later is never enabled unasked.
         if use_all:
+            excluded = set(resolved_excludes)
+            final_tools = [
+                t['function']['name'] for t in all_tool_defs
+                if not t.get('dynamic') and t['function']['name'] not in excluded
+            ]
+            persona.set_enabled_tools(final_tools, all_tool_defs)
             if resolved_excludes:
-                final_tools = [t for t in available_tool_names if t not in set(resolved_excludes)]
-                persona.set_enabled_tools(final_tools)
                 fuzzy_note = f" (fuzzy: {', '.join(fuzzy_matches)})" if fuzzy_matches else ""
                 return (f"All tools enabled for {persona.get_name()} except: "
                         f"{', '.join(resolved_excludes)}.{fuzzy_note}"), True
             else:
-                persona.set_enabled_tools(['*'])
                 return f"All tools have been enabled for {persona.get_name()}.", True
         else:
-            persona.set_enabled_tools(resolved_includes)
+            persona.set_enabled_tools(resolved_includes, all_tool_defs)
             fuzzy_note = f" (fuzzy: {', '.join(fuzzy_matches)})" if fuzzy_matches else ""
             return (f"Enabled tools for {persona.get_name()} set to: "
                     f"{', '.join(resolved_includes)}.{fuzzy_note}"), True

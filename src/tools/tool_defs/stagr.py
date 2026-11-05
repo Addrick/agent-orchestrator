@@ -9,9 +9,8 @@ it only between codr's turns. Everything that crosses a boundary is
 copying files out of codr's sandbox, and queueing a codr task
 (``queue_codr_task``: the approval is the operator's approval of stagr's plan,
 and where they see the hidden check; DERPR allocates the ticket's ``CD-NNN``, DP-489).
-``copy_from_codr`` and ``queue_codr_task`` are ``auto_approvable`` (DP-496): listed under
-``allow`` in stagr's tool policy they run without the prompt, under ``ask`` (as shipped) they
-park. The network requests are not: a switch or a host always waits for Adam, whatever the policy. ``sandbox_net_status`` and
+Like every tool (DP-497), each runs without the prompt when stagr's tool policy lists it
+under ``allow`` and parks under ``ask``; stagr ships all four under ask. ``sandbox_net_status`` and
 ``set_sandbox_net`` are the portal panel's (the operator's click is the
 approval there); no persona is given them. ``copy_to_codr`` is not: ``codr_shell`` can already write
 any file there, so a gate on the copy would only be a convention.
@@ -92,7 +91,7 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
             "name": "request_web_access",
             "description": (
                 "Ask Adam to let stagr reach one more host through the proxy. Needs his "
-                "approval, and stagr's WAN must be on. The approval admits exactly that host "
+                "approval (unless he set it to allow), and stagr's WAN must be on. It admits exactly that host "
                 "(not its subdomains) until stagr's WAN goes off."
             ),
             "parameters": {
@@ -113,7 +112,7 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "request_network",
             "description": (
-                "Ask Adam to turn one of stagr's network switches on. Needs his approval. "
+                "Ask Adam to turn one of stagr's network switches on. Needs his approval (unless he set it to allow). "
                 "wan: the internet through the proxy allowlist (web only). lan: the shared folder "
                 "on dt21 (~/work/dt21) and nothing else at home, not even DNS. Ask only for "
                 "what the job needs; Adam turns it off again."
@@ -227,9 +226,6 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
-        # DP-496: runs without the prompt when stagr's tool policy lists it
-        # under allow (it ships under ask); see tool_loop._runs_unprompted.
-        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
@@ -253,9 +249,6 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
-        # DP-496: runs without the prompt when stagr's tool policy lists it
-        # under allow (it ships under ask); see tool_loop._runs_unprompted.
-        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {

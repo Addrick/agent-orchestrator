@@ -1,23 +1,25 @@
 # tests/test_tool_policy.py
 
 import pytest
-from src.tool_policy import ToolPolicy
-from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tool_policy import (
+    POLICY_VERSION, WILDCARD_RETIRED, ToolPolicy, declares_irreversible, default_tool_state,
+)
+from src.tools.definitions import ALL_TOOL_DEFINITIONS, get_tool_definition
 from src.persona import Persona
 
 def test_policy_filtering():
     # Only allow web_search
     policy = ToolPolicy(allow=["web_search"])
     filtered = policy.filter_tools(ALL_TOOL_DEFINITIONS)
-    
+
     assert len(filtered) == 1
     assert filtered[0]["function"]["name"] == "web_search"
 
-def test_policy_wildcard():
-    # Allow all
-    policy = ToolPolicy(default="allow", allow=["*"])
+def test_policy_wildcard_expands_to_every_tool_by_name():
+    """DP-497: `["*"]` is expanded when the policy is built, never stored."""
+    policy = ToolPolicy.from_legacy_list(["*"], ALL_TOOL_DEFINITIONS)
+    assert "*" not in policy.allow + policy.ask
     filtered = policy.filter_tools(ALL_TOOL_DEFINITIONS)
-    
     assert len(filtered) == len(ALL_TOOL_DEFINITIONS)
 
 def test_composition_rule_network_read_local_write():
@@ -27,7 +29,7 @@ def test_composition_rule_network_read_local_write():
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "web_search"),
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "update_core_memory"),
     ]
-    
+
     errors = policy.validate_composition(tools)
     assert any("network:read + local:write" in e for e in errors)
 
@@ -38,7 +40,7 @@ def test_composition_rule_untrusted_read_network_write():
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "web_search"),
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "add_mcp_server"),
     ]
-    
+
     errors = policy.validate_composition(tools)
     assert any("untrusted:read + network:write" in e for e in errors)
 
@@ -49,7 +51,7 @@ def test_composition_rule_pii_read_network_any():
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "search_user"),
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "web_search"),
     ]
-    
+
     errors = policy.validate_composition(tools)
     assert any("pii:read + network:*" in e for e in errors)
 
@@ -129,7 +131,7 @@ def test_explicit_override():
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "web_search"),
         next(t for t in ALL_TOOL_DEFINITIONS if t["function"]["name"] == "update_core_memory"),
     ]
-    
+
     errors = policy.validate_composition(tools)
     assert not any("network:read + local:write" in e for e in errors)
 
@@ -138,11 +140,21 @@ def test_persona_legacy_migration():
         persona_name="test",
         model_name="test",
         prompt="test",
-        enabled_tools=["web_search", "get_ticket_details"]
+        enabled_tools=["web_search", "get_ticket_details", "create_ticket"],
+        tool_definitions=ALL_TOOL_DEFINITIONS,
     )
-    
+
+    # DP-497: each at its default -- the reads allow, the write asks.
     assert persona.get_tool_policy().allow == ["web_search", "get_ticket_details"]
-    assert persona.get_enabled_tools() == ["get_ticket_details", "web_search"]
+    assert persona.get_tool_policy().ask == ["create_ticket"]
+    assert persona.get_enabled_tools() == ["create_ticket", "get_ticket_details", "web_search"]
+
+
+def test_persona_legacy_list_without_the_catalog_is_refused():
+    """A default state cannot be resolved without the definitions; failing
+    loudly beats a policy that guessed."""
+    with pytest.raises(ValueError, match="tool_definitions"):
+        Persona(persona_name="t", model_name="m", prompt="p", enabled_tools=["web_search"])
 
 def test_persona_structured_policy():
     policy_dict = {
@@ -155,7 +167,7 @@ def test_persona_structured_policy():
         prompt="test",
         tool_policy=policy_dict
     )
-    
+
     assert persona.get_tool_policy().allow == ["web_search"]
     assert persona.get_tool_policy().ask == ["update_ticket"]
     # get_enabled_tools should return both for the engine to consider them
@@ -180,30 +192,31 @@ def _dynamic_tool(name, *, is_write=True):
     }
 
 
-def test_wildcard_excludes_dynamic_tools():
-    policy = ToolPolicy(default="allow", allow=["*"])
+def test_wildcard_expansion_excludes_dynamic_tools():
     catalog = ALL_TOOL_DEFINITIONS + [_dynamic_tool("mcp__srv__hack")]
-    filtered = policy.filter_tools(catalog)
-    names = {t.get("function", {}).get("name") for t in filtered}
+    policy = ToolPolicy.from_legacy_list(["*"], catalog)
+    names = {t.get("function", {}).get("name") for t in policy.filter_tools(catalog)}
     assert "mcp__srv__hack" not in names
-    assert len(filtered) == len(ALL_TOOL_DEFINITIONS)
+    assert len(names) == len(ALL_TOOL_DEFINITIONS)
 
 
-def test_wildcard_includes_explicitly_allowed_dynamic_tool():
-    policy = ToolPolicy(default="allow", allow=["*", "mcp__srv__ok"])
+def test_wildcard_expansion_keeps_a_named_dynamic_tool_at_its_default():
     catalog = ALL_TOOL_DEFINITIONS + [
         _dynamic_tool("mcp__srv__ok"), _dynamic_tool("mcp__srv__other"),
     ]
+    policy = ToolPolicy.from_legacy_list(["*", "mcp__srv__ok"], catalog)
     names = {t.get("function", {}).get("name") for t in policy.filter_tools(catalog)}
-    assert "mcp__srv__ok" in names
-    assert "mcp__srv__other" not in names
+    assert "mcp__srv__ok" in names and "mcp__srv__other" not in names
+    assert policy.state_of("mcp__srv__ok") == "ask"  # a write
 
 
-def test_wildcard_includes_ask_listed_dynamic_tool():
-    policy = ToolPolicy(default="allow", allow=["*"], ask=["mcp__srv__ok"])
-    catalog = ALL_TOOL_DEFINITIONS + [_dynamic_tool("mcp__srv__ok")]
-    names = {t.get("function", {}).get("name") for t in policy.filter_tools(catalog)}
-    assert "mcp__srv__ok" in names
+def test_a_stored_wildcard_is_refused_by_from_dict():
+    """The store expands a saved `*` before building the policy; any other
+    caller (`set tool_policy`) is refused rather than silently expanded."""
+    for data in ({"allow": ["*"]}, {"ask": ["*"]}):
+        with pytest.raises(ValueError, match="retired"):
+            ToolPolicy.from_dict(data)
+    assert "set tools all" in WILDCARD_RETIRED
 
 
 def test_explicit_allow_of_dynamic_tool_without_wildcard():
@@ -307,3 +320,54 @@ def test_exfil_capable_capability_validation():
     }
     with pytest.raises(ValueError, match="exfil_capable"):
         validate_tool_capabilities(bad)
+
+
+# --- DP-497: allow/ask is the only approval gate ---------------------------
+
+def _defn(name):
+    return get_tool_definition(name)
+
+
+@pytest.mark.parametrize("name, state", [
+    ("web_search", "allow"),          # read
+    ("create_ticket", "ask"),         # write (and irreversible)
+    ("update_ticket", "ask"),         # reversible write
+    ("delete_user", "ask"),           # irreversible write
+])
+def test_default_state_reads_allow_writes_ask(name, state):
+    assert default_tool_state(_defn(name)) == state
+
+
+def test_an_irreversible_read_defaults_to_ask_and_unknown_fails_closed():
+    read = {"is_write": False, "function": {"name": "x"},
+            "capabilities": {"irreversible": True}}
+    assert default_tool_state(read) == "ask"
+    assert default_tool_state(None) == "ask"
+    assert declares_irreversible({"capabilities": {"irreversible_if": "m:f"}})
+
+
+@pytest.mark.parametrize("allow, ask, name, parks", [
+    (["web_search"], [], "web_search", False),        # read under allow runs
+    ([], ["web_search"], "web_search", True),         # read under ask parks
+    (["create_ticket"], [], "create_ticket", False),  # write under allow runs
+    ([], ["create_ticket"], "create_ticket", True),   # write under ask parks
+    (["create_ticket"], ["create_ticket"], "create_ticket", True),  # both: ask
+    (["web_search"], [], "delete_user", True),        # unlisted write: default
+    (["web_search"], [], "search_tickets", False),    # unlisted read: default
+])
+def test_requires_approval_reads_the_state_only(allow, ask, name, parks):
+    policy = ToolPolicy(allow=allow, ask=ask)
+    assert policy.requires_approval(name, _defn(name)) is parks
+
+
+def test_irreversible_allowed_names_what_an_edit_must_warn_about():
+    policy = ToolPolicy(allow=["merge_tickets", "web_search", "update_ticket", "delete_user"],
+                        ask=["delete_user"])
+    assert policy.irreversible_allowed(ALL_TOOL_DEFINITIONS) == ["merge_tickets"]
+
+
+def test_to_dict_stamps_the_policy_version():
+    assert ToolPolicy().to_dict()["policy_version"] == POLICY_VERSION == 2
+    # a stamped dict builds the same policy back
+    again = ToolPolicy.from_dict(ToolPolicy(allow=["a"], ask=["b"]).to_dict())
+    assert (again.allow, again.ask) == (["a"], ["b"])

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from src.memory.memory_manager import MemoryManager
 from src.chat_system import ResponseType
 from src.confirmations import ParkedWrite
-from tests.helpers import make_chat_system
+from tests.helpers import make_chat_system, enable_all_tools
 from src.persona import Persona, ExecutionMode
 from src.engine import TextEngine
 from src.tools.tool_manager import ToolManager
@@ -62,7 +62,7 @@ async def test_chat_system_audit_parked(chat_system, mem_manager):
     # Mock Persona
     persona = Persona("test_p", "model", "prompt")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     
     # Mock ToolLoop events: a gated write mid-turn, then a normal finish.
     from src.tools.tool_loop import ToolDeferredEvent, _LoopFinishedEvent

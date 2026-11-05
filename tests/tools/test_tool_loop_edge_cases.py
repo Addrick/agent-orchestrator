@@ -207,9 +207,10 @@ async def test_resume_taint_propagation():
 
 @pytest.mark.asyncio
 async def test_audit_info_flag_combinations():
-    """audit_info.actions[*] must report binding/sensitivity/irreversible/
-    always_confirm flags from definitions. delete_user (ALWAYS_CONFIRM)
-    + irreversible — both flags should be set."""
+    """audit_info.actions[*] must report binding/sensitivity/irreversible
+    flags from definitions. delete_user is irreversible. DP-497 removed the
+    always-confirm list and its HIGH-IMPACT badge (both listed tools were
+    already irreversible, so it only repeated IRREVERSIBLE)."""
     engine = _make_engine([
         [
             {"type": "tool_calls", "calls": [
@@ -236,9 +237,9 @@ async def test_audit_info_flag_combinations():
     assert len(audit["actions"]) == 1
     action = audit["actions"][0]
     assert action["tool"] == "delete_user"
-    assert action["always_confirm"] is True
+    assert "always_confirm" not in action
     # delete_user is irreversible per definitions
     assert action["irreversible"] is True
     # And the rendered approval prompt surfaces the flags
-    assert "HIGH-IMPACT" in park.confirmation_text
+    assert "HIGH-IMPACT" not in park.confirmation_text
     assert "IRREVERSIBLE" in park.confirmation_text

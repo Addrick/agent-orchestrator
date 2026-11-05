@@ -11,6 +11,7 @@ from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from tests.helpers import make_chat_system, route_stream_through_generate_response
 from src.persona import Persona, MemoryMode
+from src.tools.definitions import get_all_tool_definitions
 from config.global_config import TEST_MEMORY_DATABASE_FILE
 
 
@@ -38,7 +39,7 @@ def mocked_chat_system():
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
+            enabled_tools=['*'], tool_definitions=get_all_tool_definitions(), memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             inject_timestamp=False,  # DP-431 stamps: tests/integration/test_prompt_timestamps_db.py
         ),
         "capped_persona": Persona(

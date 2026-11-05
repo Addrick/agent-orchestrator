@@ -21,6 +21,7 @@ from src.memory.memory_manager import MemoryManager
 from src.message_handler import BotLogic
 from src.origin import Origin
 from src.persona import Persona
+from src.tool_policy import ToolPolicy, default_tool_state
 
 # DP-277: canonical origins for exercising the control-plane gate. Tests that
 # drive dev commands as "the operator" pass OPERATOR_ORIGIN; gate tests pass
@@ -69,7 +70,41 @@ def offer_tools(chat_system: ChatSystem, persona_name: str, *names: str) -> None
         binding = (get_tool_definition(name) or {}).get("service_binding")
         if binding and binding not in bindings:
             bindings.append(binding)
+        # DP-497: an offered tool is one the persona's policy lists. A
+        # test-only tool (no registry definition) is listed here at its
+        # default (its minimal definition is a read -> allow); a registered
+        # tool is enabled by the test itself (`enable_all_tools`,
+        # `set_enabled_tools`), so a test of the allowlist stays one.
+        if get_tool_definition(name) is None:
+            _list_at_default(persona, name, definition)
     persona.set_service_bindings(bindings)
+
+
+def _list_at_default(persona: Persona, name: str, definition: Optional[Dict[str, Any]]) -> None:
+    policy = persona.get_tool_policy()
+    if policy.state_of(name) != "off":
+        return
+    if default_tool_state(definition) == "ask":
+        policy.ask = [*policy.ask, name]
+    else:
+        policy.allow = [*policy.allow, name]
+
+
+def enable_all_tools(persona: Persona) -> None:
+    """The tests' stand-in for the retired `['*']` (DP-497): every tool in
+    the registry, by name, at its default state (reads allow, writes ask).
+    Tools the persona already lists keep their state, so a test-only tool
+    `offer_tools` added stays offered whichever call comes first."""
+    from src.tools.definitions import get_all_tool_definitions
+
+    policy = persona.get_tool_policy()
+    expanded = ToolPolicy.from_legacy_list(["*"], get_all_tool_definitions())
+    listed = set(policy.allow) | set(policy.ask)
+    persona.set_tool_policy(ToolPolicy(
+        allow=[*policy.allow, *(n for n in expanded.allow if n not in listed)],
+        ask=[*policy.ask, *(n for n in expanded.ask if n not in listed)],
+        capabilities_required=policy.capabilities_required,
+    ))
 
 
 def stub_retain_window(memory_manager: Any) -> None:

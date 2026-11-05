@@ -27,7 +27,7 @@ from src.persona import Persona, ExecutionMode
 
 
 # Reuse the shared fixture
-from tests.helpers import offer_tools, only_pending_token
+from tests.helpers import offer_tools, only_pending_token, enable_all_tools
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
 
 
@@ -162,7 +162,7 @@ async def test_second_park_does_not_evict_the_first(chat_system_with_mocks):
     system, mm, text_engine_mock, persona, _ = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
 
     text_engine_mock.generate_response.side_effect = [
         ({"type": "tool_calls",
@@ -285,7 +285,7 @@ async def test_retried_turn_that_gates_a_write_updates_the_archived_row(
     system, mm, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     mm.handle_portal_retry.return_value = 42
     mm.get_channel_history.return_value = []
 
@@ -332,7 +332,7 @@ def test_request_builder_sees_post_init_tool_manager_swap(chat_system_with_mocks
     from unittest.mock import MagicMock
 
     system, _, _, persona, original_tm = chat_system_with_mocks
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
 
     swapped_tm = MagicMock()
     swapped_tm.get_tool_definitions.return_value = []

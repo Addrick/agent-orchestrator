@@ -35,10 +35,9 @@ from src.generation_events import (
     format_internal_error,
 )
 from src.persona import Persona
-from src.tool_policy import ToolPolicy, callable_tool_names
+from src.tool_policy import ToolPolicy, callable_tool_names, default_tool_state
 from src.tools.definitions import (
-    ALWAYS_CONFIRM_TOOLS,
-    get_tool_capabilities, is_auto_approvable, is_irreversible, get_tool_definition, is_write_tool
+    get_tool_capabilities, is_irreversible, get_tool_definition, is_write_tool
 )
 from src.tools.tool_manager import ToolManager, tool_error, unoffered_error
 from src.tools.turn_context import bind_conflict, get_turn_context
@@ -72,19 +71,20 @@ def _bind_refusal(name: str, args: Dict[str, Any]) -> Optional[str]:
     return bind_conflict(name, binds, args, get_turn_context())
 
 
-def _runs_unprompted(persona: Any, tool_name: str) -> bool:
-    """Whether a write runs without the approval prompt (DP-496): its
-    definition is marked `auto_approvable` (stagr's gated tools) and the
-    persona's tool policy lists it by name under `allow`, not `ask`
-    (`ToolPolicy.allows_unprompted`; the wildcard does not count). Every
-    other write always prompts, whatever allow/ask says. Strict
-    `isinstance`, so a stand-in persona (a test double) never qualifies by
-    accident."""
-    if not is_auto_approvable(tool_name):
-        return False
+def _needs_approval(persona: Any, tool_name: str) -> bool:
+    """Whether a call parks for approval (DP-497): the persona's saved
+    allow/ask for the tool and nothing else -- ask parks and allow runs, read
+    or write (`ToolPolicy.requires_approval`). A stand-in persona with no
+    `ToolPolicy` (a test double) gets each registered tool's default state:
+    a write or an irreversible tool asks, a read runs; a tool the registry
+    does not know (test-only) runs. Production personas always hold a
+    `ToolPolicy`, so this branch never decides a real call."""
+    definition = get_tool_definition(tool_name)
     getter = getattr(persona, "get_tool_policy", None)
     policy = getter() if callable(getter) else None
-    return isinstance(policy, ToolPolicy) and policy.allows_unprompted(tool_name)
+    if isinstance(policy, ToolPolicy):
+        return policy.requires_approval(tool_name, definition)
+    return definition is not None and default_tool_state(definition) == "ask"
 
 
 def _deferred_result(
@@ -573,8 +573,6 @@ def _render_confirmation_text(
         flags.append(action["sensitivity"].upper())
     if action["irreversible"]:
         flags.append("IRREVERSIBLE")
-    if action["always_confirm"]:
-        flags.append("HIGH-IMPACT")
 
     flag_str = f" [{', '.join(flags)}]" if flags else ""
     enrich_str = f": **{action['enrichment']}**" if action["enrichment"] else ":"
@@ -1171,16 +1169,21 @@ class ToolLoop:
             yield _StepBoundaryEvent(
                 history=conversation_history, start=history_start,
             )
-            # DP-493/DP-496: a write marked `auto_approvable` that the
-            # persona's tool policy lists under `allow` runs in the executed
-            # batch: no prompt, but a deferral its result declares still
-            # parks (`_execute_calls` -> `_settled_call`).
+            # DP-497: the persona's allow/ask is the only gate. A call under
+            # ask parks for approval below -- a read as much as a write; a
+            # call under allow runs in the executed batch with no prompt, and
+            # a deferral its result declares still parks (`_execute_calls` ->
+            # `_settled_call`, DP-493). A call refused for a bound argument
+            # (DP-475) is answered in the executed batch, never parked.
             write_calls = [
-                c for c in admitted if is_write_tool(c["name"])
-                and not _runs_unprompted(persona, c["name"])
+                c for c in admitted if _needs_approval(persona, c["name"])
                 and _bind_refusal(c["name"], c.get("arguments") or {}) is None
             ]
-            read_calls = [c for c in admitted if not is_write_tool(c["name"])]
+            read_calls = [
+                c for c in admitted
+                if not is_write_tool(c["name"])
+                and not any(c is w for w in write_calls)
+            ]
 
             # Refused calls ride in the executed batch so their error results
             # keep the transcript's call order.
@@ -1192,7 +1195,9 @@ class ToolLoop:
             ):
                 yield tool_ev
 
-            # Update turn_tainted from read_calls that just finished
+            # Update turn_tainted from the reads that just ran. A read parked
+            # under ask taints the turn when it is approved and runs
+            # (`ConfirmationManager.apply`), not here.
             for rc in read_calls:
                 tool_name = rc["name"] or "unknown"
                 caps = get_tool_capabilities(tool_name)
@@ -1200,10 +1205,13 @@ class ToolLoop:
                     turn_tainted = True
                     taint_sources.append(tool_name)
 
-            # --- All write tools require audit ---
+            # --- Every call under ask parks for approval (DP-497) ---
+            # (`write_calls` keeps its name: the park, its events and its
+            # store are all "parked write" -- a read under ask rides the same
+            # path unchanged.)
             if write_calls:
                 logger.info(
-                    "tool-loop iter %d: parking %d write call(s) for audit: %s "
+                    "tool-loop iter %d: parking %d call(s) for approval: %s "
                     "(reads this iter: %s) — turn CONTINUES",
                     iter_idx,
                     len(write_calls),
@@ -1235,7 +1243,6 @@ class ToolLoop:
                         "tool": wc_name,
                         "arguments": wc_args,
                         "irreversible": is_irreversible(wc_name, wc_args),
-                        "always_confirm": wc_name in ALWAYS_CONFIRM_TOOLS,
                         "service_binding": binding,
                         "sensitivity": sensitivity,
                         "enrichment": enrichment,

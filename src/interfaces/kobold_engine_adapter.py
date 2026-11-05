@@ -60,6 +60,7 @@ from src.engine.providers.opencode import channel_ticket, ticket_channel
 from src.stagr.codr_ticket import ticket_titles
 from src.generation_params import CHAT_TEMPLATE_THINKING
 from src.personas.store import save_personas_to_file
+from src.tool_policy import declares_irreversible, default_tool_state
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
     apply_persona_patch_body,
@@ -843,6 +844,11 @@ class KoboldEngineAdapter:
                     "name": func.get("name"),
                     "description": func.get("description"),
                     "is_write": bool(t.get("is_write", False)),
+                    # DP-497: the Inspector warns before setting an
+                    # irreversible tool to allow, and its "on" button enables
+                    # each tool at `default_state` (reads allow, writes ask).
+                    "irreversible": declares_irreversible(t),
+                    "default_state": default_tool_state(t),
                     # null for built-in/local tools (no external service); the UI
                     # groups the catalog by this into collapsible categories.
                     "service_binding": t.get("service_binding"),

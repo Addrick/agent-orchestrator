@@ -16,7 +16,7 @@ import pytest
 
 from src.chat_system import ErrorEvent
 from src.engine import LLMCommunicationError
-from tests.helpers import offer_tools
+from tests.helpers import offer_tools, enable_all_tools
 
 # Reuse the module's fixture rather than re-deriving the mocked ChatSystem.
 from tests.test_chat_system import chat_system_with_mocks  # noqa: F401
@@ -59,7 +59,7 @@ def _setup(chat_system_with_mocks):
     ids = itertools.count(10)
     memory_mock.log_message.side_effect = lambda *a, **k: next(ids)
     offer_tools(system, "test_persona", "search_tickets", "update_ticket")
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     tool_manager.execute_tool.return_value = {"result": "ok"}
     return system, memory_mock, text_engine, tool_manager
 

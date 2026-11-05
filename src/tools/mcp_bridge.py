@@ -38,6 +38,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 from src.proposals.agent_call import AgentCallRunner
+from src.tool_policy import default_tool_state
 from src.tools.definitions import get_tool_capabilities
 
 logger = logging.getLogger(__name__)
@@ -166,15 +167,23 @@ class McpBridge:
     def _is_gated(definition: Dict[str, Any]) -> bool:
         """Whether a call to this tool must be queued rather than executed.
 
-        Write tools are gated. So is anything the definition marks irreversible
-        even if it somehow is not flagged as a write — the two are independently
-        sourced and this path fails closed on either.
+        The same rule a persona's tool follows (DP-497): ask is queued, allow
+        runs. The bridge has no saved per-tool state — ``MCP_BRIDGE_TOOLS`` is
+        a flat exposure list — so every bridge tool sits at the default a
+        persona's tool gets when enabled without a state
+        (``tool_policy.default_tool_state``): writes and irreversible tools
+        ask, reads allow. There is deliberately no way to set a bridge tool to
+        allow: a subagent runs with no human watching, so its writes go through
+        the proposal queue (decision 2026-07-23-mcp-gate-is-the-proposal-queue).
+
+        The definition's own irreversible flag and the registry's are both
+        read, so this fails closed on either source.
 
         Static so the cross-predicate agreement tests can call the real
         implementation rather than re-deriving it; a test that re-implements
         this expression cannot detect the gate being removed.
         """
-        if definition.get("is_write"):
+        if default_tool_state(definition) == "ask":
             return True
         caps = get_tool_capabilities(str(definition.get("function", {}).get("name", "")))
         return bool(caps.get("irreversible"))
