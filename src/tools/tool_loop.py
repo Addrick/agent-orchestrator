@@ -35,7 +35,7 @@ from src.generation_events import (
     format_internal_error,
 )
 from src.persona import Persona
-from src.tool_policy import callable_tool_names
+from src.tool_policy import ToolPolicy, callable_tool_names
 from src.tools.definitions import (
     ALWAYS_CONFIRM_TOOLS,
     get_tool_capabilities, is_auto_approvable, is_irreversible, get_tool_definition, is_write_tool
@@ -72,11 +72,19 @@ def _bind_refusal(name: str, args: Dict[str, Any]) -> Optional[str]:
     return bind_conflict(name, binds, args, get_turn_context())
 
 
-def _auto_approve_on(persona: Any) -> bool:
-    """The persona's DP-493 `auto_approve` switch. Strict `is True`, so a
-    stand-in persona (a test double) never switches it on by accident."""
-    getter = getattr(persona, "get_auto_approve", None)
-    return callable(getter) and getter() is True
+def _runs_unprompted(persona: Any, tool_name: str) -> bool:
+    """Whether a write runs without the approval prompt (DP-496): its
+    definition is marked `auto_approvable` (stagr's gated tools) and the
+    persona's tool policy lists it by name under `allow`, not `ask`
+    (`ToolPolicy.allows_unprompted`; the wildcard does not count). Every
+    other write always prompts, whatever allow/ask says. Strict
+    `isinstance`, so a stand-in persona (a test double) never qualifies by
+    accident."""
+    if not is_auto_approvable(tool_name):
+        return False
+    getter = getattr(persona, "get_tool_policy", None)
+    policy = getter() if callable(getter) else None
+    return isinstance(policy, ToolPolicy) and policy.allows_unprompted(tool_name)
 
 
 def _deferred_result(
@@ -1163,13 +1171,13 @@ class ToolLoop:
             yield _StepBoundaryEvent(
                 history=conversation_history, start=history_start,
             )
-            # DP-493: a write marked `auto_approvable` runs in the executed
-            # batch when the persona's `auto_approve` switch is on: no prompt,
-            # but a deferral its result declares still parks (`_execute_calls`).
-            auto_approve = _auto_approve_on(persona)
+            # DP-493/DP-496: a write marked `auto_approvable` that the
+            # persona's tool policy lists under `allow` runs in the executed
+            # batch: no prompt, but a deferral its result declares still
+            # parks (`_execute_calls` -> `_settled_call`).
             write_calls = [
                 c for c in admitted if is_write_tool(c["name"])
-                and not (auto_approve and is_auto_approvable(c["name"]))
+                and not _runs_unprompted(persona, c["name"])
                 and _bind_refusal(c["name"], c.get("arguments") or {}) is None
             ]
             read_calls = [c for c in admitted if not is_write_tool(c["name"])]

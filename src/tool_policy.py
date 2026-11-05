@@ -56,6 +56,17 @@ class ToolPolicy:
             "capabilities_required": self.capabilities_required,
         }
 
+    def allows_unprompted(self, tool_name: str) -> bool:
+        """Whether ``tool_name`` is listed by name under ``allow`` and not
+        under ``ask`` (DP-496). The tool loop runs a write without the
+        approval prompt only when this holds AND the tool's definition is
+        marked ``auto_approvable`` (today: stagr's ``queue_codr_task`` and ``copy_from_codr``).
+
+        Explicit listing only: the ``["*"]`` wildcard does not count, so a
+        wildcard persona never loses a prompt it had. A name under both lists
+        stays under ``ask`` (fails closed)."""
+        return tool_name in self.allow and tool_name not in self.ask
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolPolicy":
         # explicit_overrides in a generic policy dict is IGNORED (DP-277): it
