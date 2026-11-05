@@ -38,12 +38,13 @@ class FakeStrata:
                 action = self.path.split("action=")[1]
                 fake.calls.append((action, payload["filename"], self.headers["Content-Type"]))
                 root = os.path.realpath(fake.slot_dir)
-                path = Path(os.path.realpath(os.path.join(root, payload["filename"])))
-                if not str(path).startswith(root + os.sep):  # llama-server refuses these too
+                full = os.path.normpath(os.path.join(root, payload["filename"]))
+                if not full.startswith(root + os.sep):  # llama-server refuses these too
                     return self._json(400, {})
                 if action == "save" and fake.save_status == 200:
-                    path.write_bytes(b"session")
-                code = fake.save_status if action == "save" else (200 if path.exists() else 404)
+                    with open(full, "wb") as f:
+                        f.write(b"session")
+                code = fake.save_status if action == "save" else (200 if os.path.exists(full) else 404)
                 self._json(code, {})
 
             def _json(self, code, payload):
