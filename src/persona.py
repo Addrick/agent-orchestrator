@@ -946,7 +946,8 @@ class Persona:
         it) and the persona's current overrides are preserved across the
         replacement; only ``set_explicit_overrides`` changes them.
         """
-        prior_overrides = self._tool_policy.explicit_overrides
+        prior = self._tool_policy
+        prior_overrides = prior.explicit_overrides
         if isinstance(policy, dict):
             self._tool_policy = ToolPolicy.from_dict(policy)
         else:
@@ -955,6 +956,13 @@ class Persona:
         # a ToolPolicy instance built with its own overrides would otherwise
         # bypass the gated setter (or silently drop a grandfathered grant).
         self._tool_policy.explicit_overrides = prior_overrides
+        # DP-497: a name still awaiting classification (its MCP server has not
+        # registered) stays unclassified if this edit left its state as it
+        # was; a name the operator moved now holds a state they chose.
+        self._tool_policy.unmigrated = [
+            n for n in prior.unmigrated
+            if self._tool_policy.state_of(n) == prior.state_of(n) != "off"
+        ]
         # Update legacy list for compatibility
         self._enabled_tools = self.get_enabled_tools()
         logger.info(f"Persona '{self._name}' tool policy updated.")

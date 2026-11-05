@@ -445,7 +445,8 @@ def test_persona_modes_round_trip(base_args, tmp_path):
 def test_persona_tool_policy_legacy_migration(base_args, tmp_path):
     """A legacy file with only `enabled_tools` (no `tool_policy`) loads as a
     deny policy, each tool at what it did before DP-497: reads ran (allow),
-    writes asked (ask), an unknown tool fails closed (ask)."""
+    writes asked (ask); a tool not registered yet stays as stored, recorded
+    as unmigrated until it registers."""
     file_path = tmp_path / "personas.json"
     file_path.write_text(json.dumps({
         "personas": [{
@@ -459,5 +460,6 @@ def test_persona_tool_policy_legacy_migration(base_args, tmp_path):
     assert loaded is not None and "legacy" in loaded
     pol = loaded["legacy"].get_tool_policy()
     assert pol.default == "deny"
-    assert pol.allow == ["web_search"]
-    assert pol.ask == ["create_ticket", "tool_a"]
+    assert pol.allow == ["web_search", "tool_a"]
+    assert pol.ask == ["create_ticket"]
+    assert pol.unmigrated == ["tool_a"]

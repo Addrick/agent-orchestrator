@@ -76,6 +76,7 @@ from config.global_config import (
 )
 from src.tools.composition import revalidate_persona_security
 from src.tools.definitions import (
+    get_all_tool_definitions,
     get_tool_definition,
     register_tool_definition,
     unregister_tool_definition,
@@ -341,7 +342,10 @@ class MCPClientManager:
     after that, ``start()`` connects every enabled configured server. Any
     live (de)registration triggers ``revalidate_persona_security`` across all
     personas (via ``personas_provider``) so an installed server can never
-    leave a stale quarantine verdict standing.
+    leave a stale quarantine verdict standing. The same pass finishes the
+    DP-497 policy migration for names that were unregistered when personas
+    loaded (``ToolPolicy.classify_unmigrated``) and, when any was classified,
+    calls ``on_policies_migrated`` so the caller can save personas.
     """
 
     #: Upper bound on how long ``aclose()`` will wait for the maintenance loop
@@ -355,9 +359,11 @@ class MCPClientManager:
         personas_provider: Optional[Callable[[], Dict[str, "Persona"]]] = None,
         enabled: bool = MCP_ENABLED,
         reconnect_interval: float = MCP_RECONNECT_INTERVAL,
+        on_policies_migrated: Optional[Callable[[], None]] = None,
     ) -> None:
         self._config_path = Path(config_path)
         self._personas_provider = personas_provider
+        self._on_policies_migrated = on_policies_migrated
         self._enabled = enabled
         self._reconnect_interval = reconnect_interval
         self._tool_manager: Optional["ToolManager"] = None
@@ -936,11 +942,33 @@ class MCPClientManager:
 
     def _revalidate_personas(self) -> None:
         """Re-run composition validation for every persona after any live
-        (de)registration — the toolset just changed under their policies."""
+        (de)registration — the toolset just changed under their policies.
+
+        First, finish the DP-497 migration for any listed name whose
+        definition just registered: it moves to what it did before DP-497 (a
+        read stays allow, a write that prompted moves to ask). This runs in the
+        same synchronous step as the registration (no ``await`` between
+        them), so no turn ever sees a newly registered write under a stale
+        allow; until then the name is not offered at all."""
         if self._personas_provider is None:
             return
-        for persona in self._personas_provider().values():
+        catalog = get_all_tool_definitions()
+        classified = False
+        for name, persona in self._personas_provider().items():
+            for tool, was, now in persona.get_tool_policy().classify_unmigrated(catalog):
+                classified = True
+                if was != now:
+                    logger.warning(
+                        f"Persona '{name}' tool policy migrated (DP-497): {tool}: {was} -> {now}"
+                    )
             revalidate_persona_security(persona)
+        if classified and self._on_policies_migrated is not None:
+            try:
+                self._on_policies_migrated()
+            except Exception as e:
+                # The in-memory policies are right; the save is retried by the
+                # next classification or any persona edit.
+                logger.error(f"Saving personas after the DP-497 MCP migration failed: {e}")
 
     # ----------------------------------------------------------------- config
 

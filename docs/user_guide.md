@@ -1443,6 +1443,15 @@ ask on a read you set later is kept). No persona behaves differently; the
 Inspector just stops showing settings that were ignored. The shipped persona
 templates in `config/` carry the corrected states.
 
+MCP tools (`mcp__<server>__<tool>`) are handled per tool, because whether one
+is a read or a write is only known once its server connects, which is after
+personas load (or later, if the server is down). Until then such a name is left
+exactly as saved and marked not yet migrated; it is not offered to the model,
+so it cannot run. When the server registers its tools, each one moves to what
+it did before: a read (e.g. Hindsight's `recall`, `reflect`, `get_*`) stays
+**allow**, a write that used to prompt moves to **ask**, and the persona is
+saved again. A server that never comes back leaves its names as saved.
+
 ### Insecure Composition Blocking
 To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
 - **`network:read` + `local:write`**: Prevents tools that read from the internet from being used by a persona that can write to local storage/files.

@@ -1081,3 +1081,110 @@ async def test_add_server_writes_a_plain_untrusted_entry(
     assert not {"trusted", "capabilities", "bind_args"} & set(entry)
     assert definitions.is_write_tool("mcp__srv__recall") is True
     await manager.aclose()
+
+
+# --- DP-497: MCP names finish the policy migration when their server registers
+
+_HS = "mcp__hindsight-derpr__"
+_ADMIN = "mcp__hindsight-admin__"
+
+
+def _old_personas_file(tmp_path):
+    """A realistic pre-DP-497 entry: static tools plus Hindsight MCP reads and
+    writes, all under allow, no policy_version (prod's shape)."""
+    path = tmp_path / "personas.json"
+    path.write_text(json.dumps({"personas": [{
+        "name": "derpr", "model_name": "m", "prompt": "p",
+        "service_bindings": ["mcp:hindsight-derpr", "mcp:hindsight-admin"],
+        "tool_policy": {"default": "deny", "ask": [], "capabilities_required": [],
+                        "allow": ["web_search", "create_ticket",
+                                  f"{_HS}recall", f"{_HS}get_memory", f"{_HS}update_memory",
+                                  f"{_ADMIN}list_banks"]},
+    }]}), encoding="utf-8")
+    return path
+
+
+def _stored_policy(path):
+    return json.loads(path.read_text(encoding="utf-8"))["personas"][0]["tool_policy"]
+
+
+async def test_mcp_names_migrate_when_their_server_registers(
+        tmp_path, fresh_registry, fake_transport):
+    from src.personas.store import load_personas_from_file, save_personas_to_file
+    path = _old_personas_file(tmp_path)
+
+    # 1. At load no MCP definition exists: static names migrate, MCP names
+    #    stay exactly as stored and are recorded as not yet classified.
+    personas = load_personas_from_file(file_path_override=str(path))
+    policy = personas["derpr"].get_tool_policy()
+    mcp_names = [f"{_HS}recall", f"{_HS}get_memory", f"{_HS}update_memory", f"{_ADMIN}list_banks"]
+    assert policy.allow == ["web_search", *mcp_names]
+    assert policy.ask == ["create_ticket"]
+    assert policy.unmigrated == mcp_names
+    stored = _stored_policy(path)
+    assert stored["unmigrated"] == mcp_names and stored["allow"] == ["web_search", *mcp_names]
+
+    # Not registered = not offered: a stale allow on a write cannot run.
+    offered = {t["function"]["name"] for t in policy.filter_tools(definitions.get_all_tool_definitions())}
+    assert not set(mcp_names) & offered
+
+    # 2. hindsight-derpr registers (trusted: annotations classify); the admin
+    #    server is down at boot.
+    fake_transport["http://hs/mcp"] = FakeSession(tools=[
+        _mcp_tool("recall", annotations=_ann(readOnlyHint=True)),
+        _mcp_tool("get_memory", annotations=_ann(readOnlyHint=True)),
+        _mcp_tool("update_memory"),  # unannotated: a write that prompted
+    ])
+    _write_config(tmp_path, {
+        "hindsight-derpr": {"url": "http://hs/mcp", "trusted": True},
+        "hindsight-admin": {"url": "http://admin/mcp", "trusted": True},
+    })
+    saves = []
+
+    def save():
+        saves.append(1)
+        save_personas_to_file(personas, (), file_path_override=str(path))
+
+    manager = MCPClientManager(config_path=tmp_path / "mcp_servers.json",
+                               personas_provider=lambda: personas, enabled=True,
+                               reconnect_interval=60, on_policies_migrated=save)
+    MCPIntegration(manager).register_tools(ToolManager())
+    await manager.start()
+
+    assert policy.allow == ["web_search", f"{_HS}recall", f"{_HS}get_memory", f"{_ADMIN}list_banks"]
+    assert policy.ask == ["create_ticket", f"{_HS}update_memory"]
+    assert policy.unmigrated == [f"{_ADMIN}list_banks"], "still unregistered: left as stored"
+    assert policy.requires_approval(f"{_HS}update_memory", definitions.get_tool_definition(f"{_HS}update_memory"))
+    assert not policy.requires_approval(f"{_HS}recall", definitions.get_tool_definition(f"{_HS}recall"))
+    assert saves and _stored_policy(path)["unmigrated"] == [f"{_ADMIN}list_banks"]
+
+    # 3. The admin server comes up later: its read stays allow, and the
+    #    persona has nothing left to classify.
+    fake_transport["http://admin/mcp"] = FakeSession(tools=[
+        _mcp_tool("list_banks", annotations=_ann(readOnlyHint=True))])
+    await manager._maintain()
+    assert policy.unmigrated == []
+    assert f"{_ADMIN}list_banks" in policy.allow
+    assert "unmigrated" not in _stored_policy(path)
+
+    # 4. Idempotent: a reload with everything registered changes nothing.
+    count = len(saves)
+    before = path.read_bytes()
+    again = load_personas_from_file(file_path_override=str(path))["derpr"].get_tool_policy()
+    assert (again.allow, again.ask, again.unmigrated) == (policy.allow, policy.ask, [])
+    assert path.read_bytes() == before
+    manager._revalidate_personas()
+    assert len(saves) == count, "nothing left to classify, nothing to save"
+    await manager.aclose()
+
+
+async def test_an_unclassified_name_keeps_its_record_across_an_unrelated_edit(
+        tmp_path, fresh_registry, fake_transport):
+    """An operator edit that leaves an unregistered name's state alone keeps it
+    unclassified; one that moves it makes it the operator's choice."""
+    from src.personas.store import load_personas_from_file
+    persona = load_personas_from_file(file_path_override=str(_old_personas_file(tmp_path)))["derpr"]
+    current = persona.get_tool_policy()
+    persona.set_tool_policy({"allow": [n for n in current.allow if n != f"{_HS}update_memory"],
+                             "ask": [*current.ask, f"{_HS}update_memory"]})
+    assert persona.get_tool_policy().unmigrated == [f"{_HS}recall", f"{_HS}get_memory", f"{_ADMIN}list_banks"]

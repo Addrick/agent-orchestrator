@@ -3,7 +3,7 @@
 # so personas can hold a ToolPolicy without depending on the tools layer.
 
 import logging
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,27 @@ def default_tool_state(definition: Optional[Dict[str, Any]]) -> str:
     return "allow"
 
 
+# The only writes DP-496 let run without a prompt (listed by name under allow,
+# not under ask). The `auto_approvable` key that marked them is gone; the
+# pre-DP-497 rule below must still know what they did.
+DP496_UNPROMPTED_WRITES = frozenset({"queue_codr_task", "copy_from_codr"})
+
+
+def pre_dp497_state(name: str, definition: Dict[str, Any], allow: List[str],
+                    ask: List[str]) -> str:
+    """What a call to a listed tool did before DP-497: ``allow`` (it ran) or
+    ``ask`` (it parked). Reads ran whatever they were listed under; writes
+    parked, except DP-496's two stagr tools listed under allow alone. Needs
+    the tool's definition -- a name whose definition is not registered yet
+    (an MCP tool before its server connects) cannot be classified, and
+    callers leave it as stored (``ToolPolicy.unmigrated``)."""
+    if not definition.get("is_write"):
+        return "allow"
+    if name in DP496_UNPROMPTED_WRITES and name in allow and name not in ask:
+        return "allow"
+    return "ask"
+
+
 def definition_index(definitions: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     """Name -> definition for every entry with a callable name."""
     index: Dict[str, Dict[str, Any]] = {}
@@ -76,13 +97,19 @@ class ToolPolicy:
             allow: Optional[List[str]] = None,
             ask: Optional[List[str]] = None,
             capabilities_required: Optional[List[str]] = None,
-            explicit_overrides: Optional[List[str]] = None
+            explicit_overrides: Optional[List[str]] = None,
+            unmigrated: Optional[List[str]] = None,
     ) -> None:
         self.default = default
         self.allow = allow or []
         self.ask = ask or []
         self.capabilities_required = capabilities_required or []
         self.explicit_overrides = explicit_overrides or []
+        # DP-497: names still listed in their pre-DP-497 state because their
+        # definition was not registered when the policy was migrated (an MCP
+        # tool registers after personas load). Set by the persona store only;
+        # emptied by `classify_unmigrated` once the definitions arrive.
+        self.unmigrated: List[str] = list(unmigrated or [])
 
     @classmethod
     def from_legacy_list(
@@ -121,6 +148,7 @@ class ToolPolicy:
             "ask": self.ask,
             "capabilities_required": self.capabilities_required,
             "policy_version": POLICY_VERSION,
+            **({"unmigrated": list(self.unmigrated)} if self.unmigrated else {}),
         }
 
     def state_of(self, tool_name: str) -> str:
@@ -138,10 +166,42 @@ class ToolPolicy:
         A tool listed nowhere is never offered from this policy, so a call to
         it is refused before it gets here; should one arrive anyway, its
         default state decides (a write still asks)."""
+        if tool_name in self.unmigrated:
+            # Stored before DP-497 and not classified yet: what it did then
+            # (for any tool that can be unclassified -- never DP-496's two --
+            # that is its default). Unregistered, it is not offered at all.
+            return default_tool_state(definition) == "ask"
         state = self.state_of(tool_name)
         if state == "off":
             return default_tool_state(definition) == "ask"
         return state == "ask"
+
+    def classify_unmigrated(
+            self, definitions: Iterable[Dict[str, Any]],
+    ) -> List[Tuple[str, str, str]]:
+        """Finish the DP-497 migration for each `unmigrated` name whose
+        definition is now in ``definitions``: move it to what it did before
+        DP-497 (``pre_dp497_state``) and drop it from `unmigrated`. Names
+        still unregistered stay exactly as stored. Returns ``(name, was,
+        now)`` for every name classified, moved or not -- a non-empty result
+        means the stored form changed and should be saved."""
+        if not self.unmigrated:
+            return []
+        index = definition_index(definitions)
+        done: List[Tuple[str, str, str]] = []
+        for name in list(self.unmigrated):
+            definition = index.get(name)
+            if definition is None:
+                continue
+            was = self.state_of(name)
+            now = pre_dp497_state(name, definition, self.allow, self.ask)
+            if name in self.allow and name in self.ask or was != now:
+                self.allow = [n for n in self.allow if n != name]
+                self.ask = [n for n in self.ask if n != name]
+                (self.allow if now == "allow" else self.ask).append(name)
+            self.unmigrated.remove(name)
+            done.append((name, was, now))
+        return done
 
     def irreversible_allowed(self, definitions: Iterable[Dict[str, Any]]) -> List[str]:
         """Names under allow (not ask) whose definition declares them

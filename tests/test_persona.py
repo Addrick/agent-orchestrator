@@ -1328,7 +1328,7 @@ def test_migration_moves_each_tool_to_what_it_did(tmp_path):
 
     joy = loaded["joy"].get_tool_policy()
     assert joy.allow == ["search_tickets"]
-    assert joy.ask == ["create_ticket", "update_ticket", "merge_tickets"]
+    assert joy.ask == ["merge_tickets", "create_ticket", "update_ticket"]
     assert loaded["joy"].get_explicit_overrides() == ["untrusted_read_network_write"]
 
 
@@ -1406,13 +1406,40 @@ def test_a_stamped_policy_is_not_migrated(tmp_path):
     assert path.read_bytes() == before
 
 
-def test_an_unknown_tool_under_allow_fails_closed(tmp_path):
+def test_an_unregistered_tool_is_left_as_stored_and_recorded(tmp_path):
     """An MCP tool registers after personas load, so the migration cannot
-    read it: ask (logged), never a silent unprompted write."""
+    read it: it stays exactly as stored, recorded in `unmigrated`, and is
+    classified when its server registers (tests/tools/test_mcp_client.py).
+    Guessing would be wrong either way."""
     data = {"personas": [{"name": "p", "model_name": "m", "prompt": "p",
-                          "tool_policy": {"allow": ["mcp__home__do_thing"], "ask": []}}]}
-    policy = _load(_write_old(tmp_path, data))["p"].get_tool_policy()
-    assert policy.ask == ["mcp__home__do_thing"]
+                          "tool_policy": {"allow": ["mcp__home__do_thing", "create_ticket"],
+                                          "ask": []}}]}
+    path = _write_old(tmp_path, data)
+    policy = _load(path)["p"].get_tool_policy()
+    assert policy.allow == ["mcp__home__do_thing"] and policy.ask == ["create_ticket"]
+    assert policy.unmigrated == ["mcp__home__do_thing"]
+    stored = _json.loads(path.read_text(encoding="utf-8"))["personas"][0]["tool_policy"]
+    assert stored["unmigrated"] == ["mcp__home__do_thing"] and stored["policy_version"] == 2
+
+    # A second load (server still down) keeps it as stored and writes nothing.
+    before = path.read_bytes()
+    again = _load(path)["p"].get_tool_policy()
+    assert again.unmigrated == ["mcp__home__do_thing"] and path.read_bytes() == before
+
+
+def test_an_unclassified_name_is_gated_by_what_it_did_before():
+    """Belt and braces: the gate never trusts a stale allow on an unclassified
+    name. A registered write still asks; a read runs; unregistered asks (and
+    is not offered anyway)."""
+    from src.tool_policy import ToolPolicy
+    write = {"is_write": True, "function": {"name": "mcp__s__w"}, "capabilities": {}}
+    read = {"is_write": False, "function": {"name": "mcp__s__r"}, "capabilities": {}}
+    policy = ToolPolicy(allow=["mcp__s__w", "mcp__s__r"], unmigrated=["mcp__s__w", "mcp__s__r"])
+    assert policy.requires_approval("mcp__s__w", write)
+    assert not policy.requires_approval("mcp__s__r", read)
+    assert policy.requires_approval("mcp__s__w", None)
+    assert [t[0] for t in policy.classify_unmigrated([write, read])] == ["mcp__s__w", "mcp__s__r"]
+    assert (policy.allow, policy.ask, policy.unmigrated) == (["mcp__s__r"], ["mcp__s__w"], [])
 
 
 def test_system_personas_migrate_in_memory_only(tmp_path, monkeypatch):
