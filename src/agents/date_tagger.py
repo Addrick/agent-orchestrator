@@ -42,6 +42,7 @@ from config.global_config import (
     DATE_FORMAT_REPORTS_FILE,
     DATE_TAGGER_NAME,
 )
+from src.agents.base import resolve_recipient
 
 logger = logging.getLogger(__name__)
 
@@ -246,20 +247,11 @@ class DateTagger:
         map (mirrors dispatch/reminder). Returns None when unresolvable."""
         defaults = self.agent_config.get("notification_defaults", {})
         channel = defaults.get("channel", "discord_dm")
-        key = defaults.get("recipient")
-        if not key:
-            return None
-        if str(key).isdigit():
-            return str(key)
-        recipients = self.agent_config.get("_recipients", {})
-        info = recipients.get(key, {})
-        if channel == "discord_dm" and info.get("discord_user_id"):
-            return str(info["discord_user_id"])
-        if channel == "discord_channel" and info.get("discord_channel_id"):
-            return str(info["discord_channel_id"])
-        if "email" in channel and info.get("email"):
-            return str(info["email"])
-        return None
+        return resolve_recipient(
+            self.agent_config.get("_recipients"),
+            channel,
+            defaults.get("recipient"),
+        )
 
     def _load_seen(self) -> Set[str]:
         if self._seen_shapes is not None:

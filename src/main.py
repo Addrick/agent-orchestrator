@@ -27,6 +27,7 @@ from src.agents.reminder_agent import ReminderAgent
 from src.agents.codr_agent import CodrAgent
 from src.agents.date_tagger import DateTagger
 from src.agents.content_classifier import ContentClassifier
+from src.agents.base import resolve_recipient
 from src.clients.notification import (
     NotificationRouter,
     DiscordNotifier,
@@ -143,14 +144,13 @@ def _debug_channel_id(agent_config: Dict[str, Any]) -> int:
     the one managr's boot report (DP-412) already posts to. 0 when neither."""
     if DISCORD_DEBUG_CHANNEL:
         return DISCORD_DEBUG_CHANNEL
-    info = (agent_config.get("recipients") or {}).get("debug") or {}
-    channel = str(info.get("discord_channel_id") or "")
-    return int(channel) if channel.isdigit() else 0
+    resolved = resolve_recipient(agent_config.get("recipients"), "discord_channel", "debug")
+    return int(resolved) if resolved and resolved.isdigit() else 0
 
 
 def _schedule_node_artifact_check(app: AppManager,
                                   notification_router: NotificationRouter,
-                                  debug_channel: int) -> None:
+                                  debug_channel: Optional[int] = None) -> None:
     """DP-418: once per start, compare the node's services/pve/ copies against
     the image's and post any drift to the debug channel."""
     if not (PVE_TOOLS_ENABLED and debug_channel):
@@ -193,7 +193,7 @@ def _register_interfaces(
     date_tagger: Optional[Any] = None,
     mcp_bridge: Optional[Any] = None,
     job_completion: Optional[Any] = None,
-    debug_channel: int = 0,
+    debug_channel: Optional[int] = None,
 ) -> None:
     """Register long-running interface tasks (Discord, Gmail).
 
@@ -206,7 +206,7 @@ def _register_interfaces(
     """
     if DISCORD_BOT:
         logger.info("Initializing Discord bot...")
-        discord_bot = create_discord_bot(bot)
+        discord_bot = create_discord_bot(bot, debug_channel_id=debug_channel)
         # DP-230: late-bind the Discord client to the fixr supervisor so agent
         # transcripts/questions can post to per-agent threads. FixrIntegration is
         # constructed before this (step 7.1), so it can't receive the bot at ctor.

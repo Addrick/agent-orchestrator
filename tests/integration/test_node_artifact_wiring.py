@@ -2,6 +2,9 @@
 
 Drives the real composition step (`main._register_interfaces`) with stub
 interfaces and records which tasks it registers.
+
+DP-422: Fast and mock-only startup wiring tests. Stays unmarked by
+pytest.mark.integration so CI's -m "not integration" gate guards startup wiring.
 """
 
 from __future__ import annotations
@@ -13,8 +16,6 @@ import pytest
 
 import src.main as main
 
-pytestmark = pytest.mark.integration
-
 
 class _App:
     def __init__(self) -> None:
@@ -24,7 +25,7 @@ class _App:
         self.tasks[name] = coro
 
 
-def _register(monkeypatch, *, pve: bool, channel: int) -> dict:
+def _register(monkeypatch, *, pve: bool, channel: int, on_create_bot=None) -> dict:
     monkeypatch.setattr(main, "DISCORD_BOT", True)
     monkeypatch.setattr(main, "GMAIL_BOT", False)
     monkeypatch.setattr(main, "WEB_INTERFACE", False)
@@ -33,8 +34,13 @@ def _register(monkeypatch, *, pve: bool, channel: int) -> dict:
 
     async def _start(_token):
         return None
-    monkeypatch.setattr(main, "create_discord_bot",
-                        lambda _bot: SimpleNamespace(start=_start))
+
+    def _create_bot(_bot, **kw):
+        if on_create_bot:
+            on_create_bot(_bot, **kw)
+        return SimpleNamespace(start=_start)
+
+    monkeypatch.setattr(main, "create_discord_bot", _create_bot)
     app = _App()
     bot = SimpleNamespace(get_service=lambda _name: None)
     main._register_interfaces(app, bot, main.NotificationRouter(), debug_channel=channel)
@@ -46,6 +52,14 @@ def _register(monkeypatch, *, pve: bool, channel: int) -> dict:
 
 def test_startup_schedules_the_check(monkeypatch):
     assert "node_artifact_check" in _register(monkeypatch, pve=True, channel=123)
+
+
+def test_register_interfaces_passes_debug_channel_to_discord_bot(monkeypatch):
+    """DP-422: discord_bot must receive the resolved debug_channel_id so on_message
+    can exclude messages in the debug channel."""
+    passed: dict = {}
+    _register(monkeypatch, pve=False, channel=1498, on_create_bot=lambda _bot, **kw: passed.update(kw))
+    assert passed.get("debug_channel_id") == 1498
 
 
 @pytest.mark.parametrize("pve,channel", [(False, 123), (True, 0)])

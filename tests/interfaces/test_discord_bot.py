@@ -946,3 +946,59 @@ async def test_send_capped_splits_up_to_the_post_limit_and_warns_past_it():
     warning = call.args[0]
     assert "was not sent" in warning and "START" in warning
     assert len(warning) <= DISCORD_CHAR_LIMIT
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_on_message_excludes_resolved_debug_channel_with_zero_env(
+    mock_reset, mock_chat_system, mock_message, monkeypatch,
+):
+    """DP-422: in prod DISCORD_DEBUG_CHANNEL is 0 and the debug channel comes
+    from agents.json recipients.debug. Guild messages in that channel must be
+    ignored by on_message, while messages in other channels are handled."""
+    monkeypatch.setattr('src.interfaces.discord_bot.DISCORD_DEBUG_CHANNEL', 0)
+    debug_channel_id = 1498
+    client = create_discord_bot(mock_chat_system, debug_channel_id=debug_channel_id)
+    mock_chat_system.generate_response.return_value = ("Bot reply", ResponseType.LLM_GENERATION, 42, None)
+
+    with patch.object(type(client), 'user', new_callable=PropertyMock, return_value=MagicMock(id=999)):
+        mock_message.channel.id = debug_channel_id
+        await client.on_message(mock_message)
+        mock_chat_system.generate_response.assert_not_called()
+
+        mock_message.channel.id = 5555
+        await client.on_message(mock_message)
+        mock_chat_system.generate_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch('src.interfaces.discord_bot.reset_discord_status', new_callable=AsyncMock)
+async def test_on_message_debug_channel_fallback_and_zero_override(
+    mock_reset, mock_chat_system, mock_message, monkeypatch,
+):
+    """DP-422: when debug_channel_id is omitted (None), fall back to DISCORD_DEBUG_CHANNEL;
+    when debug_channel_id is explicitly 0, non-zero channels are not excluded."""
+    monkeypatch.setattr('src.interfaces.discord_bot.DISCORD_DEBUG_CHANNEL', 8888)
+    mock_chat_system.generate_response.return_value = ("Bot reply", ResponseType.LLM_GENERATION, 42, None)
+
+    # 1. Fallback to DISCORD_DEBUG_CHANNEL when omitted
+    client_default = create_discord_bot(mock_chat_system)
+    with patch.object(type(client_default), 'user', new_callable=PropertyMock, return_value=MagicMock(id=999)):
+        mock_message.channel.id = 8888
+        await client_default.on_message(mock_message)
+        mock_chat_system.generate_response.assert_not_called()
+
+    # 2. debug_channel_id=0 falls back to DISCORD_DEBUG_CHANNEL if set
+    client_fallback = create_discord_bot(mock_chat_system, debug_channel_id=0)
+    with patch.object(type(client_fallback), 'user', new_callable=PropertyMock, return_value=MagicMock(id=999)):
+        mock_message.channel.id = 8888
+        await client_fallback.on_message(mock_message)
+        mock_chat_system.generate_response.assert_not_called()
+
+    # 3. When both are 0, non-zero channels are not excluded
+    monkeypatch.setattr('src.interfaces.discord_bot.DISCORD_DEBUG_CHANNEL', 0)
+    client_zero = create_discord_bot(mock_chat_system, debug_channel_id=0)
+    with patch.object(type(client_zero), 'user', new_callable=PropertyMock, return_value=MagicMock(id=999)):
+        mock_message.channel.id = 8888
+        await client_zero.on_message(mock_message)
+        mock_chat_system.generate_response.assert_called_once()

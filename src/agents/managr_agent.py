@@ -897,18 +897,3 @@ class ManagrAgent(Agent):
             if startup_targets:
                 return list(startup_targets)
         return list(self.agent_config.get("notification_targets", []))
-
-    def _resolve_recipient(self, channel: str, recipient_key: str) -> str:
-        """Resolve a recipient key from agents.json recipients, or pass through."""
-        if recipient_key.isdigit():
-            return recipient_key
-        recipients = self.agent_config.get("_recipients", {})
-        info = recipients.get(recipient_key)
-        if info:
-            if channel == "discord_channel" and info.get("discord_channel_id"):
-                return str(info["discord_channel_id"])
-            if channel == "discord_dm" and info.get("discord_user_id"):
-                return str(info["discord_user_id"])
-            if "email" in channel and info.get("email"):
-                return str(info["email"])
-        return recipient_key
