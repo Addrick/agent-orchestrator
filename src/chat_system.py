@@ -566,10 +566,18 @@ class ChatSystem:
                 #     the patched tool entries are the durable record.
                 user_interaction_id = None
                 retry_assistant_id = None
-                # Inherit taint from any approved write that produced untrusted
-                # output, so the summary turn is marked like the turn that
-                # proposed it.
+                # Inherit taint from any resolved park in the batch whose
+                # proposing turn or approved execution was tainted, so the
+                # summary turn is marked like the turn that proposed it.
                 if any(d.park.turn_tainted for d in continuation.batch):
+                    ctx.turn_tainted = True
+                for d in continuation.batch:
+                    if d.park.turn_tainted:
+                        ctx.turn_tainted = True
+                    for src in d.park.taint_sources:
+                        if src not in ctx.taint_sources:
+                            ctx.taint_sources.append(src)
+                if ctx.taint_sources:
                     ctx.turn_tainted = True
 
             # 3. Tool loop. ToolLoop owns iteration + tool dispatch; this
@@ -727,6 +735,7 @@ class ChatSystem:
                             server_id=ctx.server_id,
                             kind=ev.kind,
                             turn_tainted=ev.turn_tainted,
+                            taint_sources=list(ev.taint_sources),
                         ))
                         if ev.kind == DEFERRAL_KIND_APPROVAL:
                             # Only an approval has something for a human to

@@ -126,6 +126,7 @@ class ParkedWrite:
     # is claimed with plain `take(token)`.
     kind: str = DEFERRAL_KIND_APPROVAL
     turn_tainted: bool = False
+    taint_sources: List[str] = field(default_factory=list)
     # The assistant row whose sealed tool_context holds this call's
     # `awaiting_human_approval` entry — the row patched when it resolves.
     parked_assistant_id: Optional[int] = None
@@ -142,6 +143,28 @@ class ParkedWrite:
     # re-execution guard cannot read a row that does not exist, so `apply` has
     # to remember the outcome in-process instead.
     persisted: bool = True
+
+    def __post_init__(self) -> None:
+        if self.taint_sources:
+            deduped: List[str] = []
+            for s in self.taint_sources:
+                if isinstance(s, str) and s not in deduped:
+                    deduped.append(s)
+            self.taint_sources = deduped
+            if isinstance(self.audit_info, dict):
+                self.audit_info = {**self.audit_info, "taint_sources": list(self.taint_sources)}
+        elif isinstance(self.audit_info, dict):
+            raw = self.audit_info.get("taint_sources")
+            if isinstance(raw, list):
+                extracted: List[str] = []
+                for s in raw:
+                    if isinstance(s, str) and s not in extracted:
+                        extracted.append(s)
+                self.taint_sources = extracted
+            else:
+                self.taint_sources = []
+        else:
+            self.taint_sources = []
 
     @property
     def key(self) -> ConversationKey:
@@ -218,10 +241,18 @@ class ParkedWrite:
                 "; the column did not decode"
                 if "duplicate_refs" in undecodable else "",
             )
+        audit_info = row.get("audit_info") or {}
+        taint_sources: List[str] = []
+        if isinstance(audit_info, dict):
+            raw = audit_info.get("taint_sources")
+            if isinstance(raw, list):
+                for s in raw:
+                    if isinstance(s, str) and s not in taint_sources:
+                        taint_sources.append(s)
         return cls(
             token=str(row["token"]),
             write_call=write_call,
-            audit_info=row.get("audit_info") or {},
+            audit_info=audit_info,
             confirmation_text=row.get("confirmation_text") or "",
             user_identifier=str(row["user_identifier"]),
             persona_name=str(row["persona_name"]),
@@ -232,6 +263,7 @@ class ParkedWrite:
             # represent is approvals.
             kind=str(row.get("kind") or DEFERRAL_KIND_APPROVAL),
             turn_tainted=bool(row.get("turn_tainted")),
+            taint_sources=taint_sources,
             parked_assistant_id=row.get("parked_assistant_id"),
             duplicate_refs=kept,
             created_at=float(row["created_at"]),
@@ -943,6 +975,10 @@ class ConfirmationManager:
             # external bytes at all.
             if get_tool_capabilities(tool_name).get("produces_untrusted"):
                 park.turn_tainted = True
+                if tool_name not in park.taint_sources:
+                    park.taint_sources.append(tool_name)
+                if isinstance(park.audit_info, dict):
+                    park.audit_info = {**park.audit_info, "taint_sources": list(park.taint_sources)}
         elif decision.approved:
             tool_manager = self._tool_manager_lookup()
             try:
@@ -1004,6 +1040,10 @@ class ConfirmationManager:
                 decision.ok = False
             if get_tool_capabilities(tool_name).get("produces_untrusted"):
                 park.turn_tainted = True
+                if tool_name not in park.taint_sources:
+                    park.taint_sources.append(tool_name)
+                if isinstance(park.audit_info, dict):
+                    park.audit_info = {**park.audit_info, "taint_sources": list(park.taint_sources)}
         else:
             # The standing instruction lives HERE, in the patched entry, not in
             # the continuation nudge. The nudge is ephemeral by design, so a
@@ -1037,6 +1077,7 @@ class ConfirmationManager:
             metadata={
                 "audit_info": park.audit_info,
                 "turn_tainted": park.turn_tainted,
+                "taint_sources": list(park.taint_sources),
                 "token": park.token,
                 "call_id": park.call_id,
                 "executed_ok": decision.ok,
@@ -1146,6 +1187,7 @@ class ConfirmationManager:
             server_id=park.server_id,
             kind=kind,
             turn_tainted=park.turn_tainted,
+            taint_sources=list(park.taint_sources),
             parked_assistant_id=park.parked_assistant_id,
         )
         if not self._persist_new(deferred):
