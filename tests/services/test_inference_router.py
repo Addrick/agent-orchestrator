@@ -546,6 +546,12 @@ def test_background_work_stays_off_boxes_not_named_for_it():
     assert router.admit_background(NOW).name == "dt21"
 
 
+def test_a_background_box_name_must_be_a_backend():
+    """A typo would otherwise refuse every Hindsight job forever, silently."""
+    with pytest.raises(ValueError):
+        ir.Router([box("r9700")], MOVE, QUIET, background_names=["r9070"])
+
+
 def test_a_box_running_only_a_background_job_counts_as_idle_for_chat():
     r9700 = box("r9700", strata=True)
     r9700.background = asyncio.Event()
@@ -597,6 +603,9 @@ def _reply(payload, status=b"200 OK", headers=b"Content-Type: application/json\r
     (_reply(b'{"choices": [{"message": {"content": "{\\"facts\\": ['), False),
     (_reply(b"data: {}\n\ndata: [DONE]\n\n", headers=b"Content-Type: text/event-stream\r\n"), True),
     (_reply(b"data: {}\n\n", headers=b"Content-Type: text/event-stream\r\n"), False),
+    (_reply(b'event: message_stop\ndata: {"type": "message_stop"}\n\n',  # /v1/messages: no [DONE]
+            headers=b"Content-Type: text/event-stream\r\n"), True),
+    (_reply(b'event: response.completed\r\ndata: {}\r\n\r\n', headers=b"Content-Type: text/event-stream\r\n"), True),
     (_reply(b"<html>", status=b"502 Bad Gateway", headers=b"Content-Type: text/html\r\n"), True),
     (b"HTTP/1.1 200 OK\r\nContent-Le", False),
     (b"", False),
@@ -707,6 +716,41 @@ async def test_chat_preempts_a_background_job_which_gets_a_503_never_a_short_200
         assert chat_raw.startswith(b"HTTP/1.1 200 OK")
         assert h.router.background_counts["preempted"] == 1
         bg_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_chat_that_falls_back_onto_a_background_box_preempts_its_job():
+    """_hold clears only the first choice; a fallback must not queue behind a job in Strata."""
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        bg_reader, bg_writer = await h.open_bg(HS_JOB)
+        await asyncio.wait_for(engine.started.wait(), 5)
+        engine.hold = False
+        dead = ir.Backend("dt21", "127.0.0.1", 1, healthy=True, model=MODEL)  # nothing listens on port 1
+        client = _CapturingWriter()
+        task = asyncio.ensure_future(ir.Server(h.router)._forward(
+            [dead, h.router.primary], [], ir.rewrite_head([b"POST /v1/chat/completions HTTP/1.1"], 0),
+            True, b"/v1/chat/completions", asyncio.StreamReader(), client))
+        bg_raw = await asyncio.wait_for(bg_reader.read(), 5)
+        assert bg_raw.startswith(b"HTTP/1.1 503")
+        await asyncio.wait_for(task, 5)
+        assert bytes(client.data).startswith(b"HTTP/1.1 200 OK\r\nX-Inference-Backend: r9700")
+        assert h.router.background_counts["preempted"] == 1
+        bg_writer.close()
+
+
+class _CapturingWriter:
+    """A client connection _forward can write to, held open (its reader never ends)."""
+
+    def __init__(self):
+        self.data = bytearray()
+
+    def write(self, chunk):
+        self.data += chunk
+
+    async def drain(self):
+        pass
 
 
 @pytest.mark.asyncio

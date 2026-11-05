@@ -175,6 +175,9 @@ class Router:
         # A chat between steps must not find a Hindsight job on its box: same window as "quiet".
         self.holdoff_s = quiet_s if holdoff_s is None else holdoff_s
         self.background_names = set(background_names) if background_names is not None else {self.primary.name}
+        unknown = self.background_names - {b.name for b in self.backends}
+        if unknown:  # a typo here would silently send every Hindsight job elsewhere
+            raise ValueError(f"background boxes {sorted(unknown)} are not in ROUTER_BACKENDS")
         self.background_counts = {"admitted": 0, "refused": 0, "preempted": 0, "incomplete": 0}
         self.expected_model: Optional[str] = None  # the primary's, kept while it is down
         self.changed = asyncio.Event()  # replaced on each wake; waiters resume in arrival order
@@ -193,6 +196,14 @@ class Router:
                     and backend.background is None and now - backend.last_active >= self.holdoff_s):
                 return backend
         return None
+
+    def preempt(self, backend: Backend) -> None:
+        """Chat wants this box: stop its background job, if one runs and is not already stopping."""
+        job = backend.background
+        if job is not None and not job.is_set():
+            log.info("chat wants %s: preempting its background job", backend.name)
+            self.background_counts["preempted"] += 1
+            job.set()
 
     def wake(self) -> None:
         """A box may have freed up: held requests look again, oldest first."""
@@ -329,14 +340,14 @@ def response_complete(raw: bytes) -> bool:
     status = lines[0].split()
     if len(status) < 2 or not status[0].startswith(b"HTTP/") or not status[1].isdigit():
         return False
-    headers = {k.strip().lower(): v.strip() for k, _, v in (line.partition(b":") for line in lines[1:])}
+    headers = _headers(lines[1:])
     has_framing, framed = _framed_body(headers, body)
     if framed is None:
         return False
     if status[1] != b"200":
         return True  # an error is an error however short; the client must not see a 200 for it
     if b"event-stream" in headers.get(b"content-type", b"").lower():
-        return framed.rstrip().endswith(b"data: [DONE]")
+        return _stream_ended(framed)
     if has_framing:
         return True
     try:
@@ -344,6 +355,18 @@ def response_complete(raw: bytes) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _headers(lines: Iterable[bytes]) -> dict[bytes, bytes]:
+    """Lowercased header name -> value, from a head's lines after its start line."""
+    return {k.strip().lower(): v.strip() for k, _, v in (line.partition(b":") for line in lines)}
+
+
+def _stream_ended(body: bytes) -> bool:
+    """Whether an event stream reached its last event: OpenAI's [DONE], Anthropic's message_stop,
+    or the Responses API's response.completed (the latter two never send [DONE])."""
+    last = body.replace(b"\r\n", b"\n").rstrip().rsplit(b"\n\n", 1)[-1]
+    return last.endswith(b"data: [DONE]") or last.startswith((b"event: message_stop", b"event: response.completed"))
 
 
 def _framed_body(headers: dict[bytes, bytes], body: bytes) -> tuple[bool, Optional[bytes]]:
@@ -381,7 +404,7 @@ async def read_request(reader: asyncio.StreamReader) -> Optional[tuple[list[byte
     except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError, ConnectionError):
         return None
     lines = head[:-4].split(b"\r\n")
-    headers = {k.strip().lower(): v.strip() for k, _, v in (line.partition(b":") for line in lines[1:])}
+    headers = _headers(lines[1:])
     if b"chunked" in headers.get(b"transfer-encoding", b"").lower():
         return lines, await _read_chunked(reader)
     length = int(headers.get(b"content-length", b"0") or 0)
@@ -418,6 +441,14 @@ async def _send(
         writer.write(request)
         await writer.drain()
         status = await asyncio.wait_for(reader.readline(), READ_TIMEOUT_S)
+        parts = status.split()
+        if len(parts) < 2:  # closed or reset before a status line: the box, not the request
+            log.warning("%s answered %r", backend.name, status[:60])
+            writer.close()
+            return None
+        if parts[1] not in RETRY_STATUSES:
+            return reader, writer, status, b""
+        head = await _engine_error_head(backend, reader, status)
     except asyncio.CancelledError:  # the client left: closing this is what stops the generation
         if writer:
             writer.close()
@@ -427,14 +458,6 @@ async def _send(
         if writer:
             writer.close()
         return None
-    parts = status.split()
-    if len(parts) < 2:  # closed or reset before a status line: the box, not the request
-        log.warning("%s answered %r", backend.name, status[:60])
-        writer.close()
-        return None
-    if parts[1] not in RETRY_STATUSES:
-        return reader, writer, status, b""
-    head = await _engine_error_head(backend, reader, status)
     if head is None:
         writer.close()
         return None
@@ -461,9 +484,8 @@ def proxy_failure(head: bytes) -> bool:
     nginx generates, never to upstream ones). An HTML error page counts too: neither Strata nor
     kcpp answers in HTML, and it covers a proxy whose conf predates the header.
     """
-    lines = (line.partition(b":") for line in head.split(b"\r\n"))
-    headers = {k.strip().lower(): v.strip().lower() for k, _, v in lines}
-    return b"x-proxy-error" in headers or headers.get(b"content-type", b"").startswith(b"text/html")
+    headers = _headers(head.split(b"\r\n"))
+    return b"x-proxy-error" in headers or headers.get(b"content-type", b"").lower().startswith(b"text/html")
 
 
 async def _client_closed(reader: asyncio.StreamReader) -> None:
@@ -548,11 +570,8 @@ class Server:
                 order, chain = self.router.route(body, time.monotonic())
                 if not order or (order[0].idle and order[0].background is None):
                     return order, chain
-                job = order[0].background
-                if order[0].idle and job is not None and not job.is_set():
-                    log.info("chat wants %s: preempting its background job", order[0].name)
-                    self.router.background_counts["preempted"] += 1
-                    job.set()  # its task closes the upstream, answers 503, then wakes us
+                if order[0].idle:
+                    self.router.preempt(order[0])  # its task closes the upstream, answers 503, then wakes us
                 changed = asyncio.ensure_future(self.router.changed.wait())
                 await asyncio.wait({gone, changed}, return_when=asyncio.FIRST_COMPLETED)
                 changed.cancel()
@@ -638,6 +657,7 @@ class Server:
         if counted:
             backend.inflight += 1
             backend.last_active = time.monotonic()
+            self.router.preempt(backend)  # a fallback box: _hold only cleared the first choice
         upstream_writer = None
         try:
             sending = asyncio.ensure_future(_send(backend, request))
@@ -689,7 +709,10 @@ async def _get_json(backend: Backend, path: str) -> Optional[dict[str, Any]]:
         if b" 200" not in head.split(b"\r\n", 1)[0]:
             return None
         if b"chunked" in head.lower():
-            body = _dechunk(body)
+            dechunked = _dechunk_strict(body)
+            if dechunked is None:
+                return None
+            body = dechunked
         parsed = json.loads(body)
         return parsed if isinstance(parsed, dict) else None
     except (OSError, ValueError, asyncio.TimeoutError):
@@ -697,18 +720,6 @@ async def _get_json(backend: Backend, path: str) -> Optional[dict[str, Any]]:
     finally:
         if writer:
             writer.close()
-
-
-def _dechunk(body: bytes) -> bytes:
-    out = bytearray()
-    while body:
-        size_line, _, rest = body.partition(b"\r\n")
-        size = int(size_line.split(b";")[0] or b"0", 16)
-        if size == 0:
-            break
-        out += rest[:size]
-        body = rest[size + 2:]
-    return bytes(out)
 
 
 async def poll_forever(router: Router) -> None:

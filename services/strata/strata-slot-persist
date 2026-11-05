@@ -23,7 +23,9 @@ log() { echo "strata-slot-persist: $*"; }
 model() {
     body=$(curl -s -m 5 "$URL/v1/models") || return 0
     case "$body" in *'"value": "loaded"'* | *'"value":"loaded"'*) ;; *'"status"'*) return 0 ;; esac
-    printf '%s' "$body" | sed -n 's/^[^[]*\[[^{]*{[^}]*"id": *"\([^"]*\)".*/\1/p' | tr -c 'A-Za-z0-9._\n-' '_'
+    # The first "id" after "data": [ -- whatever order the model's keys come in.
+    printf '%s' "$body" | sed -n 's/^.*"data": *\[//p' | grep -o '"id": *"[^"]*"' | head -n 1 \
+        | sed 's/^"id": *"\(.*\)"$/\1/' | tr -c 'A-Za-z0-9._\n-' '_'
 }
 
 # slot ACTION FILENAME TIMEOUT -> prints the HTTP status (000 when the server did not answer)

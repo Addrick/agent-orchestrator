@@ -49,7 +49,7 @@ Hindsight's nginx pool (`hindsight-kobold-proxy`, CT100 `/opt/configs/hindsight/
 - **Chat preempts.** A chat request routed to a box that is running a job closes that job's upstream (Strata
   stops within its 0.5 s disconnect watch, verified on CT102 2026-11-04), the job gets a 503, and the chat goes in.
 - The job's reply is read **whole** before anything is sent. A reply that fails its framing (`Content-Length`,
-  chunked terminator, `data: [DONE]`, or unframed JSON that does not parse) becomes a 502. A box's own 5xx
+  chunked terminator, a stream's last event (`data: [DONE]`, `message_stop`, `response.completed`), or unframed JSON that does not parse) becomes a 502. A box's own 5xx
   (Strata's 502 for a schema failure) is passed on and does **not** mark the box down.
 - Each job is sent with `"strata_checkpoint": false` and `Host: ROUTER_PUBLIC_HOST`. Without the flag Strata
   parks every job as a conversation, and five of them evicted a parked 9.6k-token chat (next turn: 0 reused, 4.9 s).

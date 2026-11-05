@@ -30,7 +30,8 @@ class FakeStrata:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 status = fake.statuses.pop(0) if len(fake.statuses) > 1 else fake.statuses[0]
-                self._json(200, {"object": "list", "data": [{"id": MODEL, "status": {"value": status}}]})
+                # status before id: the script must not depend on key order
+                self._json(200, {"object": "list", "data": [{"status": {"value": status}, "id": MODEL}]})
 
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
