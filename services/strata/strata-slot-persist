@@ -1,0 +1,74 @@
+#!/bin/sh
+# strata-slot-persist save|restore -- keep Strata's live conversation across a restart (DP-405B).
+#
+#   save     ExecStop of strata.service: POST /slots/0?action=save while the server still runs.
+#   restore  strata-restore.service: wait until the model is loaded, then POST ?action=restore.
+#
+# Never fails the unit and never blocks a stop past its timeout: a lost cache costs one re-read,
+# a stuck stop costs the box. The file name carries the model id, so a restart on another model
+# never restores a session that is not its own. Only the live conversation is saved: the RAM
+# park (the other conversation-cache slots) is lost on restart either way.
+set -u
+
+URL="${STRATA_URL:-http://127.0.0.1:5001}"
+DIR="${STRATA_SLOT_DIR:-/opt/strata/slots}"      # the server's slot_save_path
+SAVE_TIMEOUT="${STRATA_SAVE_TIMEOUT_S:-40}"       # 135k tokens saved in 1.6 s on CT102 (2026-11-04)
+RESTORE_TIMEOUT="${STRATA_RESTORE_TIMEOUT_S:-120}"
+READY_TIMEOUT="${STRATA_READY_TIMEOUT_S:-900}"    # a cold load is 2-5 min
+POLL="${STRATA_POLL_S:-5}"
+
+log() { echo "strata-slot-persist: $*"; }
+
+# The loaded model's id, made file-name safe; empty while nothing is loaded.
+model() {
+    body=$(curl -s -m 5 "$URL/v1/models") || return 0
+    case "$body" in *'"value": "loaded"'* | *'"value":"loaded"'*) ;; *'"status"'*) return 0 ;; esac
+    # The first "id" after "data": [ -- whatever order the model's keys come in.
+    printf '%s' "$body" | sed -n 's/^.*"data": *\[//p' | grep -o '"id": *"[^"]*"' | head -n 1 \
+        | sed 's/^"id": *"\(.*\)"$/\1/' | tr -c 'A-Za-z0-9._\n-' '_'
+}
+
+# slot ACTION FILENAME TIMEOUT -> prints the HTTP status (000 when the server did not answer)
+slot() {
+    curl -s -m "$3" -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+        "$URL/slots/0?action=$1" -d "{\"filename\": \"$2\"}"
+}
+
+save() {
+    m=$(model)
+    if [ -z "$m" ]; then log "no model loaded; nothing to save"; return 0; fi
+    name="shutdown-live-$m.bin"
+    # Written under a temporary name: a save cut off by the stop timeout must never be restored.
+    code=$(slot save "$name.part" "$SAVE_TIMEOUT")
+    case "$code" in
+        200) mv -f "$DIR/$name.part" "$DIR/$name" && log "saved the live conversation to $DIR/$name" ;;
+        400) rm -f "$DIR/$name.part" "$DIR/$name"; log "nothing live to save; dropped any older copy" ;;
+        *) rm -f "$DIR/$name.part"; log "save failed (HTTP $code); continuing the stop" ;;
+    esac
+}
+
+restore() {
+    waited=0
+    m=$(model)
+    while [ -z "$m" ]; do
+        if [ "$waited" -ge "$READY_TIMEOUT" ]; then log "model not loaded after ${READY_TIMEOUT}s; not restoring"; return 0; fi
+        sleep "$POLL"; waited=$((waited + POLL))
+        m=$(model)
+    done
+    name="shutdown-live-$m.bin"
+    if [ ! -f "$DIR/$name" ]; then log "no saved conversation for $m"; return 0; fi
+    code=$(slot restore "$name" "$RESTORE_TIMEOUT")
+    if [ "$code" = 200 ]; then
+        mv -f "$DIR/$name" "$DIR/$name.restored"  # a crash before the next save must not restore it again
+        log "restored $name"
+    else
+        log "restore failed (HTTP $code); the next turn re-reads its prompt"
+    fi
+}
+
+case "${1:-}" in
+    save) save ;;
+    restore) restore ;;
+    *) echo "usage: $0 save|restore" >&2; exit 2 ;;
+esac
+exit 0

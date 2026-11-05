@@ -17,5 +17,8 @@ services/pve/derpr-egress         text eol=lf
 services/egress/**                text eol=lf
 services/sandbox-net/**           text eol=lf
 
+# DP-405B: CT102's Strata script and systemd units, pushed to the CT from a checkout.
+services/strata/**                text eol=lf
+
 # DP-449: codr task files are shell/heredoc input on Linux and hashed by their checks.
 config/codr_tasks/** text eol=lf
