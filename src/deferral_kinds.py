@@ -54,6 +54,12 @@ DEFERRAL_KIND_APPROVAL = "approval"
 #: state. That id IS the park token; see the note above.
 DEFERRAL_KIND_NODE_JOB = "node_job"
 
+#: A codr ticket stagr queued (DP-493). Answered by the codr agent when the
+#: ticket reaches its final outcome (passed, failed with no attempts left, or
+#: blocked), so stagr gets one continuation turn per ticket and can queue the
+#: next. The ticket ID (`CD-NNN`, never reused) IS the park token.
+DEFERRAL_KIND_CODR_TICKET = "codr_ticket"
+
 #: Key a tool result uses to say "this is not my final answer".
 #:
 #: A handler that kicks off out-of-band work returns an ordinary result dict
@@ -95,9 +101,7 @@ def declared_deferral(result: Any) -> Optional[Tuple[str, str]]:
     happened, the operator still sees the result, and the only thing lost is
     the automatic resume.
     """
-    if not isinstance(result, dict):
-        return None
-    declared = result.get(DEFERRAL_DECLARATION_KEY)
+    declared = _declaration(result)
     if not isinstance(declared, dict):
         return None
     kind = declared.get("kind")
@@ -113,10 +117,41 @@ def declared_deferral(result: Any) -> Optional[Tuple[str, str]]:
     return kind, token
 
 
+def _declaration(result: Any) -> Any:
+    """The declaration in a handler's return value, or in the `execute_tool`
+    envelope around it (`{"result": <handler's return>}`).
+
+    DP-493: both consumers are handed the ENVELOPE — the approval path's
+    `decision.result` and the tool loop's executed result — but this used to
+    read only the top level, where a handler's declaration never is. So no
+    declared deferral was ever recognized live: an approved `install_model`
+    was patched as a completed call and the node's ping found nothing to
+    settle. The tests passed because their fake executors return the
+    handler's dict unwrapped."""
+    if not isinstance(result, dict):
+        return None
+    if DEFERRAL_DECLARATION_KEY in result:
+        return result[DEFERRAL_DECLARATION_KEY]
+    inner = result.get("result")
+    return inner.get(DEFERRAL_DECLARATION_KEY) if isinstance(inner, dict) else None
+
+
+def without_declaration(result: Dict[str, Any]) -> Dict[str, Any]:
+    """`result` (a handler's return or its envelope) minus the declaration,
+    at whichever level it sat: plumbing, never shown to the model."""
+    out = {k: v for k, v in result.items() if k != DEFERRAL_DECLARATION_KEY}
+    inner = out.get("result")
+    if isinstance(inner, dict) and DEFERRAL_DECLARATION_KEY in inner:
+        out["result"] = {k: v for k, v in inner.items() if k != DEFERRAL_DECLARATION_KEY}
+    return out
+
+
 __all__ = [
     "DEFERRAL_KIND_APPROVAL",
     "DEFERRAL_KIND_NODE_JOB",
+    "DEFERRAL_KIND_CODR_TICKET",
     "DEFERRAL_DECLARATION_KEY",
     "declare_deferral",
     "declared_deferral",
+    "without_declaration",
 ]

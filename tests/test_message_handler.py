@@ -737,6 +737,7 @@ _SETTER_TO_COMMAND = {
     'set_service_bindings': 'service_bindings',
     'set_long_term_memory': 'long_term_memory',
     'set_include_ambient_memory': 'include_ambient_memory',
+    'set_auto_approve': 'auto_approve',                          # DP-493
     'set_thinking_level': 'thinking_level',
     'set_max_context_tokens': 'max_context_tokens',
     'set_max_tool_calls': 'max_tool_calls',
@@ -789,6 +790,7 @@ _GETTER_TO_COMMAND = {
     'get_service_bindings': 'service_bindings',
     'get_long_term_memory': 'long_term_memory',
     'get_include_ambient_memory': 'include_ambient_memory',
+    'get_auto_approve': 'auto_approve',                          # DP-493
     'get_ingest_bank': 'ingest_bank',
     'get_thinking_level': 'thinking_level',
     'get_max_context_tokens': 'max_context_tokens',

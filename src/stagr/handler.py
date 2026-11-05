@@ -56,6 +56,7 @@ from config import global_config
 from src.engine.providers.opencode import (
     OpencodeClient, auth_headers, open_auto, persona_sessions, workspace_directory, workspace_held, workspace_lock,
 )
+from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
 from src.stagr.codr_ticket import (
@@ -553,6 +554,12 @@ class StagrToolHandler:
             except OSError as e:
                 return _error(f"could not queue the ticket: {e}")
         logger.info("stagr: queued codr ticket %s (project %s)", name, project)
-        return {"status": "ok", "queued": name,
-                "note": f"Ticket {name}. DERPR starts it when codr is idle and every ticket in depends_on "
-                        f"has passed, in its own worktree of projects/{project}/."}
+        # DP-493: the ticket ID is the deferral's token. When codr's agent
+        # records the ticket's final outcome it settles it, and this
+        # conversation gets one turn with the result.
+        return declare_deferral(
+            {"status": "ok", "queued": name,
+             "note": f"Ticket {name}. DERPR starts it when codr is idle and every ticket in depends_on "
+                     f"has passed, in its own worktree of projects/{project}/. You will be re-invoked here "
+                     f"with its result once it passes, or fails or is blocked for good."},
+            DEFERRAL_KIND_CODR_TICKET, name)

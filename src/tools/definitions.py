@@ -104,6 +104,7 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
 
     _validate_irreversible_if(name, caps.get("irreversible_if"))
     _validate_is_write(name, tool)
+    _validate_auto_approvable(name, tool)
 
 
 def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
@@ -136,6 +137,28 @@ def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
         raise ValueError(
             f"Tool '{name}' 'is_write' must be bool, "
             f"got {type(tool['is_write']).__name__}"
+        )
+
+
+def _validate_auto_approvable(name: str, tool: Dict[str, Any]) -> None:
+    """Assert an optional top-level `auto_approvable` (DP-493) is bool, and
+    only on a reversible write: it lets a persona's `auto_approve` switch run
+    this write without the approval prompt, which must never reach a tool
+    whose effect cannot be taken back."""
+    if "auto_approvable" not in tool:
+        return
+    flag = tool["auto_approvable"]
+    if not isinstance(flag, bool):
+        raise ValueError(
+            f"Tool '{name}' 'auto_approvable' must be bool, got {type(flag).__name__}"
+        )
+    if flag and not tool.get("is_write"):
+        raise ValueError(f"Tool '{name}' is auto_approvable but not is_write")
+    caps = tool.get("capabilities") or {}
+    if flag and (caps.get("irreversible") or caps.get("irreversible_if")
+                 or name in ALWAYS_CONFIRM_TOOLS):
+        raise ValueError(
+            f"Tool '{name}' is irreversible or always-confirm and cannot be auto_approvable"
         )
 
 
@@ -294,6 +317,14 @@ def is_write_tool(tool_name: str) -> bool:
     former import-time `WRITE_TOOLS` set so runtime-registered tools are
     covered."""
     return _REGISTRY.is_write(tool_name)
+
+
+def is_auto_approvable(tool_name: str) -> bool:
+    """Whether a write may run without the approval prompt when the persona's
+    `auto_approve` switch is on (DP-493). Only reversible writes can carry
+    the flag (`_validate_auto_approvable`)."""
+    tool = _REGISTRY.get(tool_name)
+    return bool(tool and tool.get("auto_approvable") is True and tool.get("is_write"))
 
 
 def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:

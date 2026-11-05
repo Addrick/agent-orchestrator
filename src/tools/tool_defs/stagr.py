@@ -247,19 +247,24 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "is_write": True,
+        # DP-493: stagr's `auto_approve` switch lets it queue without a prompt,
+        # once Adam has agreed a sequence of tickets with it.
+        "auto_approvable": True,
         "service_binding": "stagr",
         "capabilities": _caps(),
         "function": {
             "name": "queue_codr_task",
             "description": (
-                "Queue a planned ticket for codr. Needs Adam's approval: the prompt shows every "
-                "field, so it is his approval of your plan. Prepare first: the project's repo in "
+                "Queue a planned ticket for codr. Needs Adam's approval (unless he turned on your "
+                "auto_approve): the prompt shows every field, so it is his approval of your plan. Prepare first: the project's repo in "
                 "projects/<project>/ if it comes from outside, and every package installed and "
                 "verified on codr's box. DERPR gives the ticket the next free ID (CD-NNN, named in "
                 "the result) and starts it when codr is idle and its dependencies have passed, in "
                 "a git worktree of projects/<project>/. spec, plan and packages are what codr "
                 "reads; check_sh is the hidden pass/fail check, run in that worktree after codr "
-                "says it is done. codr never sees it."
+                "says it is done. codr never sees it. When the ticket passes, or fails or is blocked "
+                "for good, you are re-invoked in this conversation with its result: queue the next "
+                "ticket then, not before."
             ),
             "parameters": {
                 "type": "object",
