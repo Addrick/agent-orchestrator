@@ -1903,9 +1903,59 @@ class MemoryManager:
                 return None
         return block_id
 
+    def adopt_retain_block(self, scope: RetainScope, interaction_ids: Sequence[int],
+                           now: Optional[datetime] = None) -> Optional[int]:
+        """A memory rebuild's block (DP-506) over turns no block ever held:
+        rows from before DP-495, below the scope's window start. They join
+        Pending_Retain as untrusted (their taint was never recorded; an
+        untagged retain already read as untrusted) and go into one numbered
+        block created `done`, so it never lowers the prompt floor — these rows
+        left the prompt long ago. The caller sends it directly and re-queues it
+        if the send fails. None when nothing was adopted."""
+        if not interaction_ids:
+            return None
+        now = now or datetime.now(timezone.utc)
+        ids = sorted(int(i) for i in interaction_ids)
+        with self.transaction() as conn:
+            self._window_row(conn, scope, persist=True)
+            conn.executemany(
+                "INSERT INTO Pending_Retain (interaction_id, persona_name, channel, untrusted)"
+                " SELECT interaction_id, persona_name, channel, 1 FROM User_Interactions"
+                " WHERE interaction_id = ? ON CONFLICT(interaction_id) DO NOTHING",
+                [(i,) for i in ids],
+            )
+            block_id = self._new_block(conn, scope, kind="trim", lo_id=ids[0],
+                                       hi_id=ids[-1] + 1, now=now)
+            if not self._number_block(conn, scope, block_id, now):
+                return None
+            conn.execute(
+                "UPDATE Retain_Block SET status = 'done', done_at = ? WHERE block_id = ?",
+                (to_utc(now).isoformat(), block_id),
+            )
+        return block_id
+
+    def unretained_turns(self, persona_name: str) -> List[Dict[str, Any]]:
+        """A persona's user/assistant turns no block holds and none will
+        (DP-506): never queued (before DP-423, or retained by DP-423 and
+        dropped from the queue), or queued, sent and blockless (DP-423).
+        Oldest first, with the columns `retain_scope` needs."""
+        with self._lock:
+            rows = self._get_connection().execute(
+                "SELECT u.interaction_id, u.channel, u.server_id, u.user_identifier"
+                " FROM User_Interactions u"
+                " LEFT JOIN Pending_Retain p ON p.interaction_id = u.interaction_id"
+                " WHERE u.persona_name = ? AND u.author_role IN ('user', 'assistant')"
+                " AND (p.interaction_id IS NULL OR (p.block_id IS NULL"
+                "      AND p.sent_generation IS NOT NULL AND p.sent_generation >= p.generation))"
+                " ORDER BY u.interaction_id",
+                (persona_name,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def retain_blocks(self, *, statuses: Sequence[str] = ("queued",),
                       block_id: Optional[int] = None,
-                      due_at: Optional[datetime] = None) -> List[Dict[str, Any]]:
+                      due_at: Optional[datetime] = None,
+                      persona_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """Blocks in `statuses`, oldest first, each with its scope columns.
         `due_at` leaves out blocks whose refusal backoff runs past it."""
         marks = ",".join("?" * len(statuses))
@@ -1919,6 +1969,9 @@ class MemoryManager:
         if block_id is not None:
             query += " AND b.block_id = ?"
             params.append(block_id)
+        if persona_name is not None:
+            query += " AND b.persona_name = ?"
+            params.append(persona_name)
         if due_at is not None:
             query += " AND (b.next_attempt_at IS NULL OR b.next_attempt_at <= ?)"
             params.append(to_utc(due_at).isoformat())
@@ -2016,10 +2069,13 @@ class MemoryManager:
             ).fetchone() is not None
             # What landed is recorded even when the block was re-queued
             # mid-send: the resend must keep its document ids (`first_ts`) and
-            # delete the parts it no longer produces (`document_ids`).
+            # delete the parts it no longer produces (`document_ids`). A
+            # finished block re-sent by a memory rebuild (DP-506) records them
+            # too, and keeps its status.
             conn.execute(
                 "UPDATE Retain_Block SET first_ts = COALESCE(first_ts, ?), document_ids = ?,"
-                " untrusted = MAX(untrusted, ?) WHERE block_id = ? AND status = 'queued'",
+                " untrusted = MAX(untrusted, ?) WHERE block_id = ?"
+                " AND status IN ('queued', 'done', 'failed')",
                 (to_utc(first_ts).isoformat() if first_ts is not None else None,
                  json.dumps(list(document_ids)), int(untrusted), block_id),
             )

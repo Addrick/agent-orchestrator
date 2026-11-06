@@ -12,6 +12,7 @@ these happen; this module owns *how* and holds the cache state.
 import asyncio
 import json
 import logging
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, cast
@@ -528,6 +529,32 @@ class TurnPersistence:
             first_ts=first_ts, untrusted=untrusted,
         )
         return True
+
+    async def resend_block(self, block: Dict[str, Any]) -> str:
+        """Send a block again into a bank that was emptied (DP-506 rebuild).
+
+        A block still `queued` or `sent` already holds the prompt floor, so it
+        is simply re-queued and the regular flush sends it. A `done` or
+        `failed` block is sent here, under a fresh request id (the bank that
+        knew the old one is gone), and keeps its status, so the rebuild never
+        pulls finished history back into the prompt. One that cannot be sent
+        is re-queued instead: it then holds the prompt open and the flush
+        retries it like any block, so nothing ends up in neither the prompt
+        nor Hindsight. Returns `queued`, `sent` or `unreachable`.
+        """
+        block_id = int(block["block_id"])
+        if block["status"] in ("queued", "sent"):
+            self.memory_manager.requeue_retain_block(block_id)
+            return "queued"
+        try:
+            ok = await self._deliver_block({**block, "request_id": str(uuid.uuid4())})
+        except Exception as e:  # noqa: BLE001 — RetainRefused included
+            logger.warning(f"Rebuild: block {block_id} not sent, re-queued: {e}")
+            ok = None
+        if ok:
+            return "sent"
+        self.memory_manager.requeue_retain_block(block_id)
+        return "queued" if ok is None else "unreachable"
 
     @staticmethod
     def _block_tags(persona: str, rows: List[Dict[str, Any]]) -> List[str]:

@@ -9,6 +9,7 @@ import {
   ingestMemoryPath,
 } from '../api/client'
 import { hasControlToken } from '../api/control_token'
+import { MemoryRebuild } from './MemoryRebuild'
 import type {
   MemoryBank,
   MemoryDocument,
@@ -126,6 +127,11 @@ export function MemoryPanel() {
       await refresh(bank)
     })
   }
+
+  const onRebuilt = useCallback(() => {
+    void loadBanks()
+    void refresh(bank)
+  }, [loadBanks, refresh, bank])
 
   const onDelete = (d: MemoryDocument) => {
     const key = docKey(d)
@@ -293,6 +299,8 @@ export function MemoryPanel() {
           </table>
         )}
       </section>
+
+      <MemoryRebuild onFinished={onRebuilt} />
     </div>
   )
 }

@@ -6,7 +6,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
-    Any, AsyncGenerator, AsyncIterator, Coroutine, Dict, FrozenSet, List, Optional,
+    Any, AsyncGenerator, AsyncIterator, Callable, Coroutine, Dict, FrozenSet, List, Optional,
     Set, Tuple, Union,
 )
 
@@ -56,6 +56,12 @@ from src.tools.turn_context import TurnContext, turn_scope
 from src.personas.store import save_personas_to_file
 
 logger = logging.getLogger(__name__)
+
+# Turns per block when a memory rebuild (DP-506) groups history from before
+# DP-495, which was never cut into blocks. Live cuts take about half a
+# context; this is of the same order, and an oversized block is split into
+# chunk-size parts at send time anyway.
+REBUILD_BLOCK_TURNS = 100
 
 
 @dataclass
@@ -1473,6 +1479,98 @@ class ChatSystem:
         except Exception as e:
             logger.warning(f"Could not patch disposition for Hindsight bank {name}: {e}")
 
+    def memory_persona_names(self) -> List[str]:
+        """Personas that own a Hindsight bank: long-term memory on. Startup
+        provisions these, and a memory rebuild (DP-506) rebuilds these."""
+        return [n for n, p in self.personas.items() if p.get_long_term_memory()]
+
+    async def rebuild_persona_memory(
+        self, name: str, progress: Optional[Callable[[Dict[str, int]], None]] = None,
+    ) -> Dict[str, int]:
+        """Purge a persona's Hindsight bank and send its chat history back (DP-506).
+
+        The bank is deleted outright and provisioned again as at startup.
+        History goes back through the DP-495 block path, never around it:
+        every block on record is sent again (`TurnPersistence.resend_block`),
+        and turns no block ever held (from before DP-495) are adopted into
+        blocks when they sit below their scope's window start, or queued for
+        the next cut when they are still in the prompt. Scopes resolve through
+        the persona's current memory mode, as the idle sweep does.
+
+        Returns counts: `blocks` sent, `queued` (left to the regular flush),
+        `adopted` blocks, `pending` turns queued in the window. Raises
+        RuntimeError when Hindsight is not the backend or stops answering.
+        """
+        from src.memory.backend import HindsightBackend
+        from src.memory.backend.hindsight import HindsightAPIError
+        backend = self.memory_backend
+        if not isinstance(backend, HindsightBackend):
+            raise RuntimeError("memory backend is not Hindsight")
+        persona = self.personas.get(name)
+        if persona is None or not persona.get_long_term_memory():
+            raise RuntimeError(f"persona {name!r} has no long-term memory")
+        counts = {"blocks": 0, "queued": 0, "adopted": 0, "pending": 0, "total": 0}
+
+        def report() -> None:
+            if progress is not None:
+                progress(dict(counts))
+
+        try:
+            await backend.delete_bank(name)
+        except HindsightAPIError as e:
+            if e.status_code != 404:  # a bank never created is already empty
+                raise
+        await self.provision_persona_memory(name)
+
+        counts["adopted"], counts["pending"] = await self._adopt_unretained(persona)
+
+        blocks = self.memory_manager.retain_blocks(statuses=("queued", "sent", "done", "failed"),
+                                  persona_name=name)
+        counts["total"] = len(blocks)
+        report()
+        for block in blocks:
+            outcome = await self.turn_persistence.resend_block(block)
+            if outcome == "unreachable":
+                raise RuntimeError(
+                    f"Hindsight stopped answering at block {block['block_id']} "
+                    f"({counts['blocks']} of {counts['total']} sent); run the rebuild "
+                    "again once it is back"
+                )
+            counts["blocks" if outcome == "sent" else "queued"] += 1
+            report()
+        self.turn_persistence.schedule_flush()
+        return counts
+
+    async def _adopt_unretained(self, persona: Persona) -> Tuple[int, int]:
+        """Give a rebuild's turns that no block ever held (from before DP-495)
+        their place in the block path, scoped by the persona's current memory
+        mode as the idle sweep does: below the window start, into adopted
+        blocks of REBUILD_BLOCK_TURNS; inside it, queued for the next cut.
+        Returns (blocks adopted, turns queued)."""
+        mm = self.memory_manager
+        name = persona.get_name()
+        mode = persona.get_memory_mode()
+        legacy = legacy_window(persona.get_base_history_messages())
+        by_scope: Dict[str, Tuple[RetainScope, List[Dict[str, Any]]]] = {}
+        for row in mm.unretained_turns(name):
+            sc = retain_scope(mode, persona_name=name, channel=row["channel"],
+                              user_identifier=row["user_identifier"],
+                              server_id=row["server_id"], legacy=legacy)
+            by_scope.setdefault(sc.key, (sc, []))[1].append(row)
+        adopted = queued = 0
+        for sc, rows in by_scope.values():
+            start, _ = mm.retain_window(sc)
+            below = [r["interaction_id"] for r in rows if r["interaction_id"] < start]
+            for r in rows:
+                if r["interaction_id"] >= start:
+                    mm.queue_retain(r["interaction_id"], name, r["channel"], untrusted=True)
+                    queued += 1
+            for i in range(0, len(below), REBUILD_BLOCK_TURNS):
+                if mm.adopt_retain_block(sc, below[i:i + REBUILD_BLOCK_TURNS]) is not None:
+                    adopted += 1
+            await asyncio.sleep(0)
+        return adopted, queued
+
     @staticmethod
     async def _patch_retain_chunk_size(backend: Any, name: str) -> None:
         """DP-495: chat blocks are sent whole, so the bank should extract them
@@ -1600,7 +1698,7 @@ class ChatSystem:
         # (model_selector, triage_*, etc.) are single-shot pipeline workers
         # with no accumulating chat history — provisioning would just create
         # empty banks. Gate on `long_term_memory`.
-        targets = [n for n, p in self.personas.items() if p.get_long_term_memory()]
+        targets = self.memory_persona_names()
         if not targets:
             return
         logger.info(f"Initializing Hindsight memory banks for {len(targets)} persona(s)...")

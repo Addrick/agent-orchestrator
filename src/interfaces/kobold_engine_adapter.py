@@ -46,6 +46,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces import infra_panel
+from src.interfaces.memory_rebuild import CONFIRM_PHRASE, MemoryRebuildJob
 from src.interfaces.http_protocol import GuardedH11Protocol
 from src.interfaces.transcript import build_transcript
 from src.interfaces.turn_runs import ReplayGone, TurnRuns
@@ -376,6 +377,8 @@ class KoboldEngineAdapter:
         # Injected as a plain callable so this interface never imports the agent
         # class (interfaces -> agents is a forbidden module boundary).
         self._date_tagger = date_tagger
+        # DP-506: the Imports panel's purge-and-rebuild job (one per process).
+        self._memory_rebuild = MemoryRebuildJob()
         # DP-277: host from KOBOLD_ADAPTER_HOST (default 0.0.0.0 — the app runs
         # containerized and is reached via Docker port publishing + the Caddy
         # TLS front, so the bind is not the network boundary; the operator
@@ -665,6 +668,16 @@ class KoboldEngineAdapter:
     def _confirmations(self) -> "ConfirmationManager":
         """CONFIRM-mode park store — pending map keyed by (user, persona)."""
         return self.chat_system.confirmations
+
+    @property
+    def _memory_persona_names(self) -> Callable[[], List[str]]:
+        """Personas that own a Hindsight bank — the DP-506 rebuild's targets."""
+        return self.chat_system.memory_persona_names
+
+    @property
+    def _rebuild_persona_memory(self) -> Callable[..., Awaitable[Dict[str, int]]]:
+        """DP-506: purge one persona's bank and resend its history."""
+        return self.chat_system.rebuild_persona_memory
 
     async def _provision_persona_memory(self, name: str) -> None:
         """Dynamic bank provisioning (DP-266)."""
@@ -2073,6 +2086,47 @@ class KoboldEngineAdapter:
             return await self._run_backend(
                 self._memory_backend.delete_document(bank_id, document_id)
             )
+
+        @self.app.get("/api/v1/memory/rebuild")
+        async def memory_rebuild_status() -> Any:
+            """DP-506: the rebuild job's progress, plus the personas a new run
+            would rebuild (each loses its whole bank)."""
+            return {**self._memory_rebuild.snapshot(),
+                    "targets": self._memory_persona_names()}
+
+        @self.app.post("/api/v1/memory/rebuild")
+        async def memory_rebuild_start(request: Request) -> Any:
+            """DP-506: purge every memory persona's Hindsight bank and send its
+            chat history back. Operator-token gated by the control-plane
+            middleware; the body must carry `confirm: "PURGE"`."""
+            try:
+                body = await request.json()
+            except (json.JSONDecodeError, ValueError):
+                body = None
+            if not isinstance(body, dict) or body.get("confirm") != CONFIRM_PHRASE:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f'confirm must be "{CONFIRM_PHRASE}"'},
+                )
+            from src.memory.backend import HindsightBackend
+            if not isinstance(self._memory_backend, HindsightBackend):
+                return JSONResponse(
+                    status_code=501,
+                    content={"error": "memory backend is not Hindsight "
+                                      "(set MEMORY_BACKEND=hindsight)"},
+                )
+            if self._memory_rebuild.running:
+                return JSONResponse(status_code=409,
+                                    content={"error": "a memory rebuild is already running"})
+            names = self._memory_persona_names()
+            if not names:
+                return JSONResponse(status_code=400,
+                                    content={"error": "no persona has long-term memory on"})
+            logger.warning("Memory rebuild started from the portal: %s", names)
+            await self._audit_control_change("memory_rebuild", ",".join(names),
+                                             {"personas": names})
+            return JSONResponse(status_code=202,
+                                content=self._memory_rebuild.start(self._rebuild_persona_memory, names))
 
         @self.app.post("/api/v1/memory/banks/{bank_id}/upload")
         async def memory_upload(
