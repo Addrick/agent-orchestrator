@@ -46,6 +46,7 @@ from src.chat_system import (
     ToolCallStartEvent,
 )
 from src.interfaces import infra_panel
+from src.interfaces.http_protocol import GuardedH11Protocol
 from src.interfaces.transcript import build_transcript
 from src.interfaces.turn_runs import ReplayGone, TurnRuns
 from src.memory.date_extraction import LlmTagger, resolve_ingest_anchor
@@ -2430,7 +2431,8 @@ class KoboldEngineAdapter:
 
     async def start(self) -> None:
         logger.info(f"Starting Kobold Engine Adapter on http://{self.host}:{self.port}")
-        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
+        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning",
+                                http=GuardedH11Protocol)
         server = uvicorn.Server(config)
         try:
             await server.serve()
