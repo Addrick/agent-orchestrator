@@ -24,9 +24,13 @@ from src.persona import Persona
 from src.personas.store import load_personas_from_file, save_personas_to_file
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 from tests.helpers import make_bot_logic, OPERATOR_ORIGIN
+from src.tools.definitions import get_all_tool_definitions
 
 
 ALL_OVERRIDES = sorted(KNOWN_OVERRIDES)
+# The full grant, by name: DP-497 retired the '*' wildcard.
+_ALL_TOOL_NAMES = [t["function"]["name"] for t in get_all_tool_definitions()
+                   if t.get("function", {}).get("name") and not t.get("dynamic")]
 
 
 def make_persona(**kwargs):
@@ -45,8 +49,8 @@ def make_persona(**kwargs):
 def test_from_dict_ignores_explicit_overrides():
     """The DP-277 curl attack body: full grant + all three overrides."""
     policy = ToolPolicy.from_dict({
-        "default": "allow",
-        "allow": ["*"],
+        "default": "deny",
+        "allow": _ALL_TOOL_NAMES,
         "explicit_overrides": ALL_OVERRIDES,
     })
     assert policy.explicit_overrides == []
@@ -75,7 +79,7 @@ def test_ctor_policy_dict_cannot_set_overrides():
 
 def test_set_tool_policy_dict_cannot_set_overrides():
     p = make_persona()
-    p.set_tool_policy({"default": "allow", "allow": ["*"], "explicit_overrides": ALL_OVERRIDES})
+    p.set_tool_policy({"default": "deny", "allow": _ALL_TOOL_NAMES, "explicit_overrides": ALL_OVERRIDES})
     assert p.get_explicit_overrides() == []
 
 
@@ -88,7 +92,7 @@ def test_set_tool_policy_preserves_existing_overrides():
 
 def test_set_enabled_tools_preserves_existing_overrides():
     p = make_persona(explicit_overrides=["network_read_local_write"])
-    p.set_enabled_tools(["web_search"])
+    p.set_enabled_tools(["web_search"], get_all_tool_definitions())
     assert p.get_explicit_overrides() == ["network_read_local_write"]
 
 
@@ -254,7 +258,8 @@ async def test_set_tool_policy_command_cannot_grant_overrides(bot_logic, chat_st
     all rules overridden. Even from an OPERATOR origin (the strongest caller),
     the overrides are dropped and the wildcard composition trips quarantine
     instead of validating clean."""
-    payload = json.dumps({"default": "allow", "allow": ["*"], "explicit_overrides": ALL_OVERRIDES})
+    payload = json.dumps({"default": "deny", "allow": _ALL_TOOL_NAMES, "explicit_overrides": ALL_OVERRIDES},
+                         separators=(",", ":"))
     result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, "derpr", "operator", f"set tool_policy {payload}")
     persona = chat_state.personas["derpr"]
     assert persona.get_explicit_overrides() == []

@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from unittest.mock import AsyncMock
 
-from tests.helpers import offer_tools
+from tests.helpers import offer_tools, enable_all_tools
 from config.global_config import RETAIN_IDLE_FINAL_SECONDS
 from src.chat_system import (
     DoneEvent, ErrorEvent, ToolCallResultEvent, ResponseType,
@@ -83,7 +83,7 @@ async def test_ctx_reset_when_postloop_persistence_raises(mocked_chat_system):
     """Normal LLM_GENERATION finish, but assistant persistence raises after
     the loop. reset_turn_context must still run."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "hello"}, {})])
 
@@ -104,7 +104,7 @@ async def test_ctx_reset_on_early_consumer_break(mocked_chat_system):
     """A consumer that stops iterating right after DoneEvent (realistic SSE
     client) must not leave the ContextVar set."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "answer"}, {})])
 
@@ -122,7 +122,7 @@ async def test_ctx_reset_when_audit_logging_raises(mocked_chat_system):
     """PENDING_CONFIRMATION exit: log_audit_event after parking is unguarded.
     If it raises, reset_turn_context must still run."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
     _script_engine(chat_system, [
@@ -148,7 +148,7 @@ async def test_ctx_reset_when_user_turn_logging_raises(mocked_chat_system):
     """_log_user_turn runs before the loop's try-block. If it raises, the
     ContextVar (already set) must still be reset."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [({"type": "text", "content": "hi"}, {})])
 
@@ -176,7 +176,7 @@ async def test_idless_tool_call_gets_stable_matching_tool_call_id(mocked_chat_sy
     the ToolCallResultEvent.call_id — otherwise the next iteration sends the
     model unpaired call/result blocks."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
 
     capture = {"turn_ctx_seen": [], "histories": []}
@@ -220,7 +220,7 @@ async def test_continuation_sets_and_resets_turn_context(mocked_chat_system):
     """The continuation generate_response must run with the turn's scope
     pinned, and the ContextVar must be reset afterward."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
     chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})  # type: ignore[assignment]
@@ -268,7 +268,7 @@ async def test_read_group_executes_concurrently(mocked_chat_system):
     """Two read calls returned in one provider response share a group_id and
     should run concurrently — their executions must overlap in time."""
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     _script_engine(chat_system, [
         ({"type": "tool_calls", "calls": [
@@ -313,7 +313,7 @@ async def test_persona_max_tool_calls_bounds_the_turn(mocked_chat_system):
     with — the turn stops after that many calls, not after MAX_TOOL_CALLS."""
     chat_system, _ = mocked_chat_system
     persona = chat_system.personas["test_persona"]
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     persona.set_max_tool_calls(3)
     offer_tools(chat_system, "test_persona", "get_agent_status")
     _script_engine(chat_system, [
@@ -348,7 +348,7 @@ async def test_budget_exhaustion_answer_is_persisted_and_retained(
     from config.global_config import MAX_TOOL_CALLS
 
     chat_system, memory_manager = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     # One call per response, forever — the live `hypr` shape — then the
     # wrap-up completion the loop asks for once the budget is gone.
@@ -451,7 +451,7 @@ async def test_budget_exhaustion_stays_one_terminal_event_when_wrap_up_dies(
     from src.engine import LLMCommunicationError
 
     chat_system, _ = mocked_chat_system
-    chat_system.personas["test_persona"].set_enabled_tools(["*"])
+    enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
 
     calls = {"n": 0}

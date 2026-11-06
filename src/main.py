@@ -435,7 +435,14 @@ async def main() -> None:
     # even when MCP_ENABLED is false (wiring contract; calls short-circuit).
     from src.tools.mcp_client import MCPClientManager
     from src.tools.mcp_integration import MCPIntegration
-    mcp_manager = MCPClientManager(personas_provider=lambda: bot.personas)
+    from src.personas.store import save_personas_to_file
+    # DP-497: names an old policy listed before their MCP server registered
+    # are migrated when it registers; the manager calls back to save that.
+    mcp_manager = MCPClientManager(
+        personas_provider=lambda: bot.personas,
+        on_policies_migrated=lambda: save_personas_to_file(
+            bot.personas, bot.system_persona_names),
+    )
     bot.register_service(MCPIntegration(mcp_manager))
 
     # 7.5 Register the proposal queue review surface (DP-282, extended DP-240).

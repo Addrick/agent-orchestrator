@@ -1,11 +1,13 @@
 # tests/test_message_handler.py
 
 import pytest
+import json
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.message_handler import BotLogic
 from src.persona import Persona
-from tests.helpers import make_bot_logic, OPERATOR_ORIGIN
+from tests.helpers import make_bot_logic, OPERATOR_ORIGIN, enable_all_tools
+from src.tools.definitions import get_all_tool_definitions
 
 
 @pytest.fixture
@@ -520,19 +522,20 @@ async def test_dump_last_falls_back_to_stripped_names(bot_logic, mock_chat_syste
 
 
 def test_dump_persona_config_shows_enabled_tools_wildcard(bot_logic, mock_chat_system_with_state):
-    """Persona config dump shows '*' when all tools are enabled."""
+    """All tools enabled shows every tool by name: there is no '*' (DP-497)."""
     persona = mock_chat_system_with_state.personas["derpr"]
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     lines = []
     BotLogic._dump_persona_config(lines, persona)
     output = "\n".join(lines)
-    assert "Enabled Tools: *" in output
+    assert "Enabled Tools: *" not in output
+    assert "web_search" in output and "create_ticket" in output
 
 
 def test_dump_persona_config_shows_enabled_tools_specific(bot_logic, mock_chat_system_with_state):
     """Persona config dump shows specific tool names."""
     persona = mock_chat_system_with_state.personas["derpr"]
-    persona.set_enabled_tools(['search_tickets', 'web_search'])
+    persona.set_enabled_tools(['search_tickets', 'web_search'], get_all_tool_definitions())
     lines = []
     BotLogic._dump_persona_config(lines, persona)
     output = "\n".join(lines)
@@ -542,7 +545,7 @@ def test_dump_persona_config_shows_enabled_tools_specific(bot_logic, mock_chat_s
 def test_dump_persona_config_shows_enabled_tools_none(bot_logic, mock_chat_system_with_state):
     """Persona config dump shows 'none' when no tools are enabled."""
     persona = mock_chat_system_with_state.personas["derpr"]
-    persona.set_enabled_tools([])
+    persona.set_enabled_tools([], get_all_tool_definitions())
     lines = []
     BotLogic._dump_persona_config(lines, persona)
     output = "\n".join(lines)
@@ -559,7 +562,7 @@ async def test_set_tool_policy_clears_quarantine_live(bot_logic, mock_chat_syste
     persona._security_block_reasons = ["Insecure composition: network:read + local:write"]
     assert persona.is_security_blocked() is True
 
-    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
         "derpr", "user1", 'set tool_policy {"default":"deny","allow":[]}')
 
     assert persona.is_security_blocked() is False
@@ -572,11 +575,52 @@ async def test_set_tool_policy_allow_all_trips_quarantine_live(bot_logic, mock_c
     persona = mock_chat_system_with_state.personas["derpr"]
     assert persona.is_security_blocked() is False
 
-    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN, 
-        "derpr", "user1", 'set tool_policy {"default":"allow","allow":["*"]}')
+    every = [t["function"]["name"] for t in get_all_tool_definitions()]
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
+        "derpr", "user1", "set tool_policy " + json.dumps({"allow": every}, separators=(",", ":")))
 
     assert persona.is_security_blocked() is True
     assert result is not None and "QUARANTINED" in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_set_tool_policy_refuses_the_wildcard(bot_logic, mock_chat_system_with_state):
+    """DP-497: '*' is retired -- refused with the reason, nothing stored."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    before = persona.get_tool_policy().to_dict()
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
+        "derpr", "user1", 'set tool_policy {"allow":["*"]}')
+    assert result is not None and "retired" in result["response"]
+    assert persona.get_tool_policy().to_dict() == before
+
+
+def _real_catalog(bot_logic):
+    bot_logic.tool_manager = lambda: MagicMock(get_tool_definitions=lambda: get_all_tool_definitions())
+
+
+@pytest.mark.asyncio
+async def test_setting_an_irreversible_tool_to_allow_warns(bot_logic, mock_chat_system_with_state):
+    """DP-497: an irreversible tool set to allow is accepted, and the reply
+    names it; one already allowed before the edit is not repeated."""
+    persona = mock_chat_system_with_state.personas["derpr"]
+    _real_catalog(bot_logic)
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
+        "derpr", "user1", 'set tool_policy {"allow":["merge_tickets","search_tickets"]}')
+    assert persona.get_tool_policy().state_of("merge_tickets") == "allow"
+    warning = result["response"].split("Irreversible", 1)[1]
+    assert "merge_tickets" in warning and "search_tickets" not in warning
+
+    again = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
+        "derpr", "user1", 'set tool_policy {"allow":["merge_tickets","web_search"]}')
+    assert "Irreversible" not in again["response"]
+
+
+@pytest.mark.asyncio
+async def test_setting_an_irreversible_tool_to_ask_does_not_warn(bot_logic, mock_chat_system_with_state):
+    _real_catalog(bot_logic)
+    result = await bot_logic.preprocess_message(OPERATOR_ORIGIN,
+        "derpr", "user1", 'set tool_policy {"ask":["merge_tickets"]}')
+    assert result["mutated"] is True and "Irreversible" not in result["response"]
 
 
 class TestExtractMessageContentGoogleNative:
@@ -618,7 +662,7 @@ def bot_logic_with_tools(mock_chat_system_with_state):
     mock_tool_manager.get_tool_definitions.return_value = [
         {"type": "function", "function": {"name": "web_search"}},
         {"type": "google_grounding", "function": {"name": "google_grounding_search"}},
-        {"type": "function", "function": {"name": "create_ticket"}},
+        {"type": "function", "is_write": True, "function": {"name": "create_ticket"}},
         {"type": "function", "function": {"name": "search_tickets"}},
     ]
     mock_chat_system_with_state.tool_manager = mock_tool_manager
@@ -630,13 +674,16 @@ async def test_set_tools_all(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
     result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools all")
     assert result["mutated"] is True
-    assert persona.get_enabled_tools() == ['*']
+    # DP-497: every tool by name, each at its default -- no wildcard.
+    assert persona.get_enabled_tools() == [
+        "create_ticket", "google_grounding_search", "search_tickets", "web_search"]
+    assert persona.get_tool_policy().ask == ["create_ticket"]
 
 
 @pytest.mark.asyncio
 async def test_set_tools_none(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "user1", "set tools none")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == []
@@ -662,7 +709,7 @@ async def test_set_tools_invalid_name_returns_error(bot_logic_with_tools, mock_c
 @pytest.mark.asyncio
 async def test_set_tools_all_with_excludes(bot_logic_with_tools, mock_chat_system_with_state):
     persona = mock_chat_system_with_state.personas["derpr"]
-    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN, 
+    result = await bot_logic_with_tools.preprocess_message(OPERATOR_ORIGIN,
         "derpr", "user1", "set tools all -google_grounding_search -web_search"
     )
     assert result["mutated"] is True

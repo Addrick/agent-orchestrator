@@ -1,9 +1,10 @@
 # tests/integration/test_unprompted_write_deferral.py
-"""DP-493/DP-496: a write the persona may run without a prompt (tool
-`auto_approvable`, listed under `allow` in the persona's tool policy) still
-parks the deferral its result declares, and
-that deferral resumes the turn's own conversation exactly as one parked after
-an approval does (tests/integration/test_resume_kernel_convergence.py).
+"""DP-493/DP-497: a write listed under `allow` in the persona's tool policy
+runs without a prompt, still parks the deferral its result declares, and that
+deferral resumes the turn's own conversation exactly as one parked after an
+approval does (tests/integration/test_resume_kernel_convergence.py). Since
+DP-497 the policy is the only gate, for every tool: allow runs, ask parks --
+a read under ask included.
 
 Real MemoryManager + ToolLoop, mocked engine; `create_ticket` stands in for
 `queue_codr_task` because the mechanism is tool-agnostic (that the real tool
@@ -15,7 +16,6 @@ import pytest
 
 from src.chat_system import DoneEvent, PendingConfirmationEvent
 from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
-from src.tools import tool_loop
 from tests.integration.test_resume_kernel_convergence import (
     _confirm_persona, _drain, _set_engine, _text, _calls, _tool_entries,
 )
@@ -25,15 +25,16 @@ pytestmark = pytest.mark.integration
 CALL = {"id": "q1", "name": "create_ticket", "arguments": {"title": "t", "body": "b"}}
 
 
-@pytest.fixture
-def auto_approvable(monkeypatch):
-    monkeypatch.setattr(tool_loop, "is_auto_approvable", lambda name: name == "create_ticket")
-
-
 def _policy(persona, *, allow=(), ask=()):
-    """The persona's tool policy (DP-496): the wildcard `_confirm_persona`
-    set, plus `allow`/`ask` listings by name."""
-    persona.set_tool_policy({"default": "allow", "allow": ["*", *allow], "ask": list(ask)})
+    """Move the named tools to `allow` / `ask` in the persona's policy
+    (`_confirm_persona` enabled every tool at its default); a name in both
+    lists stays in both."""
+    current = persona.get_tool_policy()
+    moved = set(allow) | set(ask)
+    persona.set_tool_policy({
+        "allow": [n for n in current.allow if n not in moved] + list(allow),
+        "ask": [n for n in current.ask if n not in moved] + list(ask),
+    })
     return persona
 
 
@@ -61,7 +62,7 @@ async def _turn(chat_system, user="adam"):
 
 
 @pytest.mark.asyncio
-async def test_a_write_under_allow_runs_in_the_turn_and_parks_its_deferral(mocked_chat_system, auto_approvable):
+async def test_a_write_under_allow_runs_in_the_turn_and_parks_its_deferral(mocked_chat_system):
     chat_system, mem_manager = mocked_chat_system
     _allowed(chat_system)
     executed = _tool(chat_system)
@@ -80,7 +81,7 @@ async def test_a_write_under_allow_runs_in_the_turn_and_parks_its_deferral(mocke
 
 
 @pytest.mark.asyncio
-async def test_its_deferral_resumes_once_with_the_outcome(mocked_chat_system, auto_approvable):
+async def test_its_deferral_resumes_once_with_the_outcome(mocked_chat_system):
     chat_system, mem_manager = mocked_chat_system
     _allowed(chat_system)
     executed = _tool(chat_system)
@@ -102,10 +103,10 @@ async def test_its_deferral_resumes_once_with_the_outcome(mocked_chat_system, au
 @pytest.mark.asyncio
 @pytest.mark.parametrize("allow, ask", [
     ((), ["create_ticket"]),                   # under ask
-    ((), ()),                                  # only the wildcard: not an explicit allow
+    ((), ()),                                  # enabled at its default: a write asks
     (["create_ticket"], ["create_ticket"]),    # under both: ask wins
-], ids=["ask", "wildcard", "both"])
-async def test_a_write_not_explicitly_allowed_parks_for_approval(mocked_chat_system, auto_approvable, allow, ask):
+], ids=["ask", "default", "both"])
+async def test_a_write_not_allowed_parks_for_approval(mocked_chat_system, allow, ask):
     chat_system, _ = mocked_chat_system
     _policy(_confirm_persona(chat_system), allow=allow, ask=ask)
     executed = _tool(chat_system)
@@ -116,21 +117,61 @@ async def test_a_write_not_explicitly_allowed_parks_for_approval(mocked_chat_sys
     assert len(chat_system.confirmations.list_for("adam", "test_persona")) == 1
 
 
+READ = {"id": "r1", "name": "get_agent_status", "arguments": {"agent_id": "a"}}
+
+
+def _read_tool(chat_system):
+    ran = []
+
+    async def handler(**kwargs):
+        ran.append(kwargs)
+        return {"status": "ok", "agents": []}
+    chat_system.tool_manager._handlers["get_agent_status"] = handler
+    return ran
+
+
+async def _read_turn(chat_system):
+    _set_engine(chat_system, [_calls(READ), _text("Checked.")])
+    return await _drain(chat_system.stream_response("test_persona", "adam", "ops", "status?"))
+
+
 @pytest.mark.asyncio
-async def test_allow_does_not_reach_a_write_that_is_not_auto_approvable(mocked_chat_system):
-    """Scope (DP-496): only the marked writes follow allow/ask; every other
-    write still prompts, whatever the policy lists."""
+async def test_a_read_under_allow_runs(mocked_chat_system):
     chat_system, _ = mocked_chat_system
-    _allowed(chat_system)
-    executed = _tool(chat_system)
+    _policy(_confirm_persona(chat_system), allow=["get_agent_status"])
+    ran = _read_tool(chat_system)
 
-    events = await _turn(chat_system)
+    events = await _read_turn(chat_system)
 
-    assert executed == [] and [e for e in events if isinstance(e, PendingConfirmationEvent)]
+    assert ran == [{"agent_id": "a"}]
+    assert not [e for e in events if isinstance(e, PendingConfirmationEvent)]
 
 
 @pytest.mark.asyncio
-async def test_a_failed_unprompted_write_parks_nothing(mocked_chat_system, auto_approvable):
+async def test_a_read_under_ask_parks_and_runs_once_approved(mocked_chat_system):
+    """DP-497: ask on a read is real -- the read waits in the same approval
+    park a write uses, and runs only after the click."""
+    chat_system, mem_manager = mocked_chat_system
+    _policy(_confirm_persona(chat_system), ask=["get_agent_status"])
+    ran = _read_tool(chat_system)
+
+    events = await _read_turn(chat_system)
+
+    assert ran == [], "it waited"
+    assert [e for e in events if isinstance(e, PendingConfirmationEvent)]
+    (park,) = chat_system.confirmations.list_for("adam", "test_persona")
+    assert park.write_call["name"] == "get_agent_status"
+    assert _tool_entries(mem_manager)["r1"]["status"] == "awaiting_human_approval"
+
+    _set_engine(chat_system, [_text("No agents running.")])
+    await _drain(chat_system.stream_resolve_park("adam", "test_persona", park.token, approved=True))
+
+    assert ran == [{"agent_id": "a"}]
+    assert _tool_entries(mem_manager)["r1"]["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_unprompted_write_parks_nothing(mocked_chat_system):
     chat_system, _ = mocked_chat_system
     _allowed(chat_system)
     _tool(chat_system, payload={"status": "error", "message": "nope"})

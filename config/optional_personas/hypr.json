@@ -38,18 +38,20 @@
           "pve_status",
           "list_models",
           "gpu_status",
+          "hf_search",
+          "hf_files",
+          "install_status"
+        ],
+        "ask": [
           "start_guest",
           "stop_guest",
           "reboot_guest",
           "reboot_node",
           "set_active_model",
-          "hf_search",
-          "hf_files",
-          "install_model",
-          "install_status"
+          "install_model"
         ],
-        "ask": [],
-        "capabilities_required": []
+        "capabilities_required": [],
+        "policy_version": 2
       },
       "meta_visible": false,
       "origin_allowlist": []

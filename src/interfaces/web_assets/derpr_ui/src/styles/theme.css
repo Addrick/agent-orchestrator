@@ -629,9 +629,6 @@ body.persona-blocked .secbanner { display: block; }
 .toolnote.err { color: var(--danger); border: 1px solid rgba(229,114,114,0.4); background: var(--danger-bg); }
 
 /* tools tab: tool_policy editor */
-.polhead { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line-2); }
-.polhead .lbl { font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--ink-faint); }
-.polhead select { flex: 1; }
 
 /* per-tool tri-state (off / allow / ask) segmented control */
 .toolrow .tristate { margin-left: auto; display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }

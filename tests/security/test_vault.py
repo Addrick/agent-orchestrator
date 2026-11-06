@@ -59,6 +59,7 @@ def test_known_refs_returns_managed_keys():
         "ANTHROPIC_API_KEY",
         "GOOGLE_GENERATIVEAI_API_KEY",
         "ZAMMAD_API_KEY",
+        "NCBI_API_KEY",
     )
 
 

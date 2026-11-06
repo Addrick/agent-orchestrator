@@ -8,6 +8,7 @@ import re
 from config.global_config import MAX_TOOL_CALLS
 from src.confirmations import ConfirmationManager, Decision, ParkedWrite
 from tests.helpers import (
+    enable_all_tools,
     make_chat_system, offer_tools, only_pending_token,
     route_stream_through_generate_response,
 )
@@ -23,6 +24,7 @@ from src.engine import TextEngine, LLMCommunicationError
 from src.engine.providers.opencode import workspace_directory, workspace_held, workspace_hold, workspace_lock
 from src.persona import Persona, ExecutionMode, MemoryMode
 from src.clients.service_integration import ServiceIntegration
+from src.tools.definitions import get_all_tool_definitions
 
 
 @pytest.fixture
@@ -343,7 +345,7 @@ async def test_generate_response_handles_generic_exception(chat_system_with_mock
 async def test_generate_response_exits_after_max_tool_calls(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "test_tool")
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     tool_call = {'type': 'tool_calls', 'calls': [{'id': 'c1', 'name': 'test_tool', 'arguments': {}}]}
     # Make the text engine always return a tool call
     text_engine_mock.generate_response.return_value = (tool_call, {})
@@ -368,7 +370,7 @@ async def test_tool_use_in_autonomous_mode(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
@@ -416,7 +418,7 @@ async def test_confirm_mode_gates_write_tools(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'call_1', 'name': 'update_ticket', 'arguments': {'state': 'closed'}}]}
@@ -443,7 +445,7 @@ async def test_confirm_mode_auto_executes_read_only_tools(chat_system_with_mocks
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "search_tickets")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'call_1', 'name': 'search_tickets', 'arguments': {'query': 'test'}}]}
@@ -464,7 +466,7 @@ async def test_confirm_mode_mixed_tools_executes_reads_and_pends_writes(chat_sys
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "search_tickets", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     tool_call = {'type': 'tool_calls',
                  'calls': [
@@ -507,7 +509,7 @@ async def test_approving_a_park_executes_and_summarizes(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     token = await _park_one_write(system, text_engine_mock)
 
@@ -594,7 +596,7 @@ async def test_denying_a_park_executes_nothing(chat_system_with_mocks):
     """Denial runs no tool but still drives a summary turn."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     token = await _park_one_write(system, text_engine_mock)
 
@@ -621,7 +623,7 @@ async def test_continuation_can_chain_a_read(chat_system_with_mocks):
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "update_ticket", "get_ticket_details")
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     token = await _park_one_write(system, text_engine_mock)
 
@@ -656,7 +658,7 @@ async def test_resolving_twice_executes_once(chat_system_with_mocks):
     """
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     token = await _park_one_write(system, text_engine_mock)
 
@@ -682,7 +684,7 @@ async def test_token_from_another_conversation_is_refused(chat_system_with_mocks
     refused claim must leave the park live rather than consuming it."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     token = await _park_one_write(system, text_engine_mock)
 
@@ -722,7 +724,7 @@ def test_get_model_prefix(model_name, expected_prefix):
 async def test_grounding_filtered_for_non_grounding_models(chat_system_with_mocks):
     """google_grounding_search should be filtered out for non-grounding-compatible models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     grounding_tool = {
         "type": "google_grounding",
@@ -751,7 +753,7 @@ async def test_grounding_filtered_for_non_grounding_models(chat_system_with_mock
 async def test_grounding_kept_for_compatible_gemini_models(chat_system_with_mocks, model_name):
     """google_grounding_search should be kept for grounding-compatible Gemini models."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     grounding_tool = {
         "type": "google_grounding",
@@ -779,7 +781,7 @@ async def test_grounding_kept_for_compatible_gemini_models(chat_system_with_mock
 async def test_grounding_filtered_for_incompatible_models(chat_system_with_mocks, model_name):
     """Grounding should be filtered for all incompatible model prefixes."""
     system, _, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     persona.set_model_name(model_name)
 
     grounding_tool = {
@@ -954,10 +956,10 @@ def test_build_conversation_history_live_advances_override(chat_system_with_mock
 def test_filter_tools_wildcard(chat_system_with_mocks):
     """Wildcard enabled_tools returns all compatible tools."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
     tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
+    persona.set_enabled_tools(['*'], [tool_a, tool_b])  # expanded by name (DP-497)
 
     result = system.request_builder.filter_tools_for_persona(persona)
     assert len(result) == 2
@@ -966,7 +968,7 @@ def test_filter_tools_wildcard(chat_system_with_mocks):
 def test_filter_tools_specific_names(chat_system_with_mocks):
     """Specific enabled_tools filters to only those tools."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['tool_a'])
+    persona.set_enabled_tools(['tool_a'], get_all_tool_definitions())
     tool_a = {"type": "function", "function": {"name": "tool_a", "parameters": {}}}
     tool_b = {"type": "function", "function": {"name": "tool_b", "parameters": {}}}
     tool_manager_mock.get_tool_definitions.return_value = [tool_a, tool_b]
@@ -979,7 +981,7 @@ def test_filter_tools_specific_names(chat_system_with_mocks):
 def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
     """Tools with a service_binding are removed when the persona lacks that binding."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     persona.set_service_bindings([])  # No service bindings
     zammad_tool = {"type": "function", "service_binding": "zammad",
                    "function": {"name": "search_tickets", "parameters": {}}}
@@ -995,7 +997,7 @@ def test_filter_tools_removes_unbound_service_tools(chat_system_with_mocks):
 def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
     """Tools with a service_binding are included when the persona has that binding."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     persona.set_service_bindings(["zammad"])
     zammad_tool = {"type": "function", "service_binding": "zammad",
                    "function": {"name": "search_tickets", "parameters": {}}}
@@ -1011,7 +1013,7 @@ def test_filter_tools_includes_bound_service_tools(chat_system_with_mocks):
 def test_filter_tools_includes_agent_tools_with_agents_binding(chat_system_with_mocks):
     """Agent tools are included when the persona has the 'agents' service binding."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     persona.set_service_bindings(["agents"])
     agent_tool = {"type": "function", "service_binding": "agents",
                   "function": {"name": "get_agent_status", "parameters": {}}}
@@ -1030,7 +1032,7 @@ def test_filter_tools_includes_agent_tools_with_agents_binding(chat_system_with_
 def test_filter_tools_excludes_agent_tools_without_binding(chat_system_with_mocks):
     """Agent tools are excluded when the persona lacks the 'agents' service binding."""
     system, _, _, persona, tool_manager_mock = chat_system_with_mocks
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     persona.set_service_bindings(["zammad"])
     agent_tool = {"type": "function", "service_binding": "agents",
                   "function": {"name": "get_agent_status", "parameters": {}}}
@@ -1318,7 +1320,7 @@ async def test_generate_response_logs_tool_context(chat_system_with_mocks):
     system, memory_mock, text_engine_mock, persona, tool_manager_mock = chat_system_with_mocks
     memory_mock.get_channel_history.return_value = []
     memory_mock.log_message.return_value = 1
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
 
     tool_call = {'type': 'tool_calls',
                  'calls': [{'id': 'c1', 'name': 'web_search', 'arguments': {'query': 'test'}}]}
@@ -1719,7 +1721,7 @@ async def test_stream_response_interleaves_tool_events_with_tokens(chat_system_w
     ToolCallResult between TokenEvent runs in a single linear stream."""
     system, memory_mock, text_engine, persona, tool_manager_mock = chat_system_with_mocks
     offer_tools(system, "test_persona", "search_tickets")
-    persona.set_enabled_tools(['*'])
+    enable_all_tools(persona)
     memory_mock.get_channel_history.return_value = []
     memory_mock.log_message.side_effect = [10, 42]
 

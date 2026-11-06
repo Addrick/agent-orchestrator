@@ -246,13 +246,16 @@ def test_add_note_def_is_internal_only_and_not_exfil_capable():
 
 # --- DP-306: approval classification must be unskippable --------------------
 #
-# Three predicates answer "does this call need human approval?":
-#   1. definitions.is_write_tool()        -> tool_loop's universal write audit
-#   2. mcp_bridge._is_gated()             -> is_write OR capabilities.irreversible
-#   3. definitions.is_irreversible()      -> capabilities + argument-aware classifier
-# Two of the three read top-level `is_write`. Nothing used to require it, so a
-# definition could omit it, register cleanly, and be silently ungated. These
-# tests pin the flag as mandatory and pin the predicates to each other.
+# Since DP-497 a persona's call parks iff its saved state is ask
+# (`ToolPolicy.requires_approval`). The definition still decides two things:
+#   1. definitions.is_write_tool() / tool_policy.default_tool_state()
+#        -> the state a tool gets when enabled without one (write -> ask)
+#   2. mcp_bridge._is_gated()  -> default state ask (is_write OR irreversible):
+#        the bridge has no saved states, so every bridge tool sits at its default
+#   3. definitions.is_irreversible() -> capabilities + argument-aware classifier
+# Nothing used to require `is_write`, so a definition could omit it, register
+# cleanly, and default to allow / be ungated at the bridge. These tests pin
+# the flag as mandatory and pin the predicates to each other.
 
 
 def test_validator_rejects_missing_is_write():
@@ -410,31 +413,17 @@ def test_gated_tools_are_announced_to_subagents(tool):
     assert "requires human approval" in McpBridge._to_mcp_tool(tool).description
 
 
-def test_always_confirm_tools_exist_and_are_writes():
-    """`ALWAYS_CONFIRM_TOOLS` is a name-keyed list consumed by tool_loop.
-
-    NOTE (DP-315): despite its name it does NOT gate anything today. Its only
-    runtime effect is `tool_loop.py:378`, which appends a "HIGH-IMPACT" badge to
-    the confirmation text -- every write already parks unconditionally. So this
-    test keeps a *label* honest, not a predicate. A typo still matters: it would
-    silently drop the badge on the tool that most needs it.
-    """
-    assert definitions.ALWAYS_CONFIRM_TOOLS, (
-        "ALWAYS_CONFIRM_TOOLS is empty -- every assertion below passes vacuously"
-    )
-    names = {t["function"]["name"] for t in ALL_TOOL_DEFINITIONS
-             if t.get("function", {}).get("name")}
-    for tool_name in definitions.ALWAYS_CONFIRM_TOOLS:
-        assert tool_name in names, (
-            f"ALWAYS_CONFIRM_TOOLS names '{tool_name}', which is not a real tool"
-        )
-        assert definitions.is_write_tool(tool_name), (
-            f"ALWAYS_CONFIRM_TOOLS names '{tool_name}' but it is not a write tool"
-        )
+def test_the_removed_auto_approvable_key_is_refused():
+    """DP-497: allow/ask is the only approval gate, so the DP-496
+    `auto_approvable` marking would do nothing -- a definition that still
+    carried it would read as a gate that is not there."""
+    tool = _make_tool("legacy_marked")
+    tool["auto_approvable"] = True
+    with pytest.raises(ValueError, match="auto_approvable"):
+        validate_tool_capabilities(tool)
 
 
-# NOTE: the inverse direction -- "every statically irreversible tool is in
-# ALWAYS_CONFIRM_TOOLS" -- is NOT asserted. It does not hold (`create_ticket`
-# and `reboot_node` are irreversible and unlisted), but the omission is harmless
-# today because the set only drives a badge: every write parks regardless. It
-# becomes a real gap only if an autonomy tier is ever built. See DP-315.
+def test_the_always_confirm_list_is_gone():
+    """DP-497: it only labelled two tools that were already irreversible."""
+    assert not hasattr(definitions, "ALWAYS_CONFIRM_TOOLS")
+    assert not hasattr(definitions, "is_auto_approvable")

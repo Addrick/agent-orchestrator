@@ -134,6 +134,11 @@ export interface ToolDef {
   name: string
   description: string
   is_write: boolean
+  // DP-497: setting an irreversible tool to allow asks the operator first.
+  irreversible?: boolean
+  // DP-497: the state a tool gets when enabled without one ("on"):
+  // reads allow, writes and irreversible tools ask.
+  default_state?: 'allow' | 'ask'
   // owning service (e.g. 'zammad'); null/absent for built-in/local tools.
   service_binding?: string | null
   capabilities: ToolCapabilities

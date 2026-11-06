@@ -25,10 +25,11 @@ from src.chat_system import ChatSystem
 from src.engine import TextEngine
 from src.interfaces.kobold_engine_adapter import KoboldEngineAdapter as KoboldAdapter
 from src.persona import Persona, ExecutionMode
-from tests.helpers import make_chat_system, offer_tools
+from tests.helpers import make_chat_system, offer_tools, enable_all_tools
 from tests.provider_stream_mocks import google_stream
 
 import pytest
+from src.tools.definitions import get_all_tool_definitions
 
 
 @pytest.fixture(autouse=True)
@@ -437,7 +438,7 @@ def test_chat_completions_stream_emits_derpr_tool_frames():
     adapter, mm, persona, chat_system = _make_real_adapter(
         stream_messages=stream_messages,
     )
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     chat_system.tool_manager.execute_tool = AsyncMock(
         return_value={"result": [{"id": 7}]},
     )
@@ -549,7 +550,7 @@ def test_chat_completions_stream_emits_derpr_confirm_frame():
         stream_messages=_confirm_stream_messages(),
     )
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})
 
     body = _chat_body("open a ticket", stream=True)
@@ -580,7 +581,7 @@ def test_confirm_route_approves_and_streams_continuation():
         stream_messages=_confirm_stream_messages(),
     )
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
 
     executed = []
 
@@ -1095,7 +1096,7 @@ def test_parked_write_turn_persists_normally_and_carries_its_token():
     adapter, mm, persona, chat_system = _make_real_adapter(
         stream_messages=_parked_write_stream(),
     )
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
 
     body = _chat_body("make a ticket", stream=True)
     body["derpr_user_text"] = "make a ticket"
@@ -1159,7 +1160,7 @@ def test_derpr_confirm_frame_redacts_write_arguments():
         adapter, mm, persona, chat_system = _make_real_adapter(
             stream_messages=_parked_write_with_secret_stream(secret),
         )
-        persona.set_enabled_tools(["*"])
+        enable_all_tools(persona)
 
         body = _chat_body("make a ticket", stream=True)
         body["derpr_user_text"] = "make a ticket"
@@ -1451,6 +1452,24 @@ def test_tools_catalog_returns_expected_fields():
     assert t["capabilities"]["locality"] == "network"
     assert t["capabilities"]["sensitivity"] == "public"
     assert t["capabilities"]["produces_untrusted"] is True
+    assert t["irreversible"] is False and t["default_state"] == "allow"
+
+
+def test_tools_catalog_marks_irreversible_tools_and_their_default():
+    """DP-497: the Inspector warns before an irreversible tool goes to allow,
+    and its "on" button uses `default_state` (reads allow, writes ask)."""
+    from src.tools.definitions import get_tool_definition
+    adapter, mm, _ = _make_adapter_with_seeded_db()
+    adapter.chat_system.tool_manager = MagicMock()
+    adapter.chat_system.tool_manager.get_tool_definitions.return_value = [
+        get_tool_definition(n) for n in ("delete_user", "update_ticket", "search_tickets")
+    ]
+    with TestClient(adapter.app) as client:
+        tools = {t["name"]: t for t in client.get("/api/v1/tools/catalog").json()["tools"]}
+    assert (tools["delete_user"]["irreversible"], tools["delete_user"]["default_state"]) == (True, "ask")
+    assert (tools["update_ticket"]["irreversible"], tools["update_ticket"]["default_state"]) == (False, "ask")
+    assert (tools["search_tickets"]["irreversible"], tools["search_tickets"]["default_state"]) == (False, "allow")
+    mm.close()
 
 
 def test_tools_catalog_capabilities_present_even_if_null():
@@ -1477,7 +1496,7 @@ def test_tools_catalog_capabilities_present_even_if_null():
 
 def test_persona_extended_includes_enabled_tools():
     adapter, mm, persona = _make_adapter_with_seeded_db()
-    persona.set_enabled_tools(["tool1", "tool2"])
+    persona.set_enabled_tools(["tool1", "tool2"], get_all_tool_definitions())
 
     with TestClient(adapter.app) as client:
         r = client.get("/api/v1/persona/test_persona")

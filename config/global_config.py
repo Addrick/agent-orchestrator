@@ -842,6 +842,23 @@ HF_HTTP_TIMEOUT = float(os.environ.get("HF_HTTP_TIMEOUT", "20"))
 HF_SEARCH_LIMIT_MAX = int(os.environ.get("HF_SEARCH_LIMIT_MAX", "20"))
 HF_FILES_LIMIT_MAX = int(os.environ.get("HF_FILES_LIMIT_MAX", "60"))
 
+# PubMed search (DP-501) — the `pubmed_search` tool, via NCBI E-utilities.
+# NCBI_API_KEY (secret, .env only) — optional; lifts NCBI's limit from 3 to 10
+#   requests/s. Registered in the credential vault so the egress/log scrubber
+#   redacts it: NCBI only accepts it as a URL query parameter, and httpx logs
+#   request URLs.
+# NCBI_EMAIL — optional contact address NCBI asks clients to send alongside
+#   `tool=`; unset sends none.
+# PUBMED_API_BASE — E-utilities root, overridable for tests/mirrors.
+# PUBMED_SEARCH_LIMIT_MAX — ceiling on `max_results`, same reasoning as
+#   HF_SEARCH_LIMIT_MAX: each hit carries a third-party abstract.
+# PUBMED_ABSTRACT_MAX_CHARS — per-abstract cut; a cut is flagged in the hit.
+NCBI_EMAIL = os.environ.get("NCBI_EMAIL", "")
+PUBMED_API_BASE = os.environ.get("PUBMED_API_BASE", "https://eutils.ncbi.nlm.nih.gov/entrez/eutils")
+PUBMED_HTTP_TIMEOUT = float(os.environ.get("PUBMED_HTTP_TIMEOUT", "20"))
+PUBMED_SEARCH_LIMIT_MAX = int(os.environ.get("PUBMED_SEARCH_LIMIT_MAX", "20"))
+PUBMED_ABSTRACT_MAX_CHARS = int(os.environ.get("PUBMED_ABSTRACT_MAX_CHARS", "3000"))
+
 # Node job completion callback (DP-343). The node's install and promote jobs are
 # detached under systemd-run — they outlive the SSH call that started them, so
 # nothing inside derpr is awake when one finishes. Both node scripts POST the

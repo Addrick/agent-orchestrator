@@ -53,6 +53,7 @@ _DERPR_SECRET_VARS = (
     "OPENAI_API_KEY",
     "GOOGLE_GENERATIVEAI_API_KEY",
     "ZAMMAD_API_KEY",
+    "NCBI_API_KEY",              # pubmed_search (DP-501)
     "DISCORD_API_KEY",
     "GH_TOKEN",                  # fixr re-injects; every other route drops it
     "PVE_SSH_KEY",               # path to the proxmox host private key

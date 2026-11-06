@@ -2,7 +2,7 @@
 
 import logging
 from enum import Enum, auto
-from typing import Optional, Dict, Any, List, Tuple, Type, TypeVar, Union
+from typing import Optional, Dict, Any, Iterable, List, Tuple, Type, TypeVar, Union
 
 from config import global_config
 from src.generation_params import GenerationParams
@@ -90,6 +90,7 @@ class Persona:
             ltm_max_items: Optional[int] = None,
             ltm_max_tokens: Optional[int] = None,
             ltm_budget: Optional[str] = None,
+            tool_definitions: Optional[Iterable[Dict[str, Any]]] = None,
     ) -> None:
         self._name: str = persona_name
         self._model_name: str = model_name
@@ -195,7 +196,16 @@ class Persona:
         elif isinstance(tool_policy, dict):
             self._tool_policy = ToolPolicy.from_dict(tool_policy)
         else:
-            self._tool_policy = ToolPolicy.from_legacy_list(self._enabled_tools)
+            # DP-497: each enabled tool gets its default state, which needs
+            # the tool catalog -- a leaf cannot import it, so a caller listing
+            # tools without a policy must hand it in.
+            if self._enabled_tools and tool_definitions is None:
+                raise ValueError(
+                    "enabled_tools without a tool_policy needs tool_definitions "
+                    "to resolve each tool's default state (DP-497)"
+                )
+            self._tool_policy = ToolPolicy.from_legacy_list(
+                self._enabled_tools, tool_definitions or ())
 
         self._grandfather_overrides(explicit_overrides)
 
@@ -285,8 +295,6 @@ class Persona:
 
     def get_enabled_tools(self) -> List[str]:
         """Returns the list of tool names this persona is allowed to use."""
-        if self._tool_policy.default == "allow" and "*" in self._tool_policy.allow:
-            return ["*"]
         # Combine allowed and ask tools for the engine to consider both
         return sorted(list(set(self._tool_policy.allow + self._tool_policy.ask)))
 
@@ -908,8 +916,12 @@ class Persona:
         self._service_bindings = bindings
         logger.info(f"Persona '{self._name}' service_bindings set to {self._service_bindings}.")
 
-    def set_enabled_tools(self, new_tools: List[str]) -> None:
-        """Sets the list of tools the persona is allowed to use, updating the policy.
+    def set_enabled_tools(
+            self, new_tools: List[str], definitions: Iterable[Dict[str, Any]],
+    ) -> None:
+        """Enables exactly ``new_tools``, each at its default state (DP-497:
+        reads allow, writes and irreversible tools ask; ``"*"`` expands to the
+        catalog's non-dynamic tools). ``definitions`` is the live catalog.
 
         Pure mutator — does NOT re-run security validation. Operator-facing edit
         paths (`set tools` / `set tool_policy` dev commands, web tools modal) call
@@ -921,8 +933,9 @@ class Persona:
         # otherwise a benign `set tools` edit would silently drop a
         # grandfathered override and quarantine the persona.
         prior_overrides = self._tool_policy.explicit_overrides
-        self._tool_policy = ToolPolicy.from_legacy_list(new_tools)
+        self._tool_policy = ToolPolicy.from_legacy_list(new_tools, definitions)
         self._tool_policy.explicit_overrides = prior_overrides
+        self._enabled_tools = self.get_enabled_tools()
         logger.info(f"Persona '{self._name}' enabled tools set to: {self._enabled_tools}")
 
     def set_tool_policy(self, policy: Union[Dict[str, Any], ToolPolicy]) -> None:
@@ -933,7 +946,8 @@ class Persona:
         it) and the persona's current overrides are preserved across the
         replacement; only ``set_explicit_overrides`` changes them.
         """
-        prior_overrides = self._tool_policy.explicit_overrides
+        prior = self._tool_policy
+        prior_overrides = prior.explicit_overrides
         if isinstance(policy, dict):
             self._tool_policy = ToolPolicy.from_dict(policy)
         else:
@@ -942,8 +956,15 @@ class Persona:
         # a ToolPolicy instance built with its own overrides would otherwise
         # bypass the gated setter (or silently drop a grandfathered grant).
         self._tool_policy.explicit_overrides = prior_overrides
+        # DP-497: a name still awaiting classification (its MCP server has not
+        # registered) stays unclassified if this edit left its state as it
+        # was; a name the operator moved now holds a state they chose.
+        self._tool_policy.unmigrated = [
+            n for n in prior.unmigrated
+            if self._tool_policy.state_of(n) == prior.state_of(n) != "off"
+        ]
         # Update legacy list for compatibility
-        self._enabled_tools = self._tool_policy.allow
+        self._enabled_tools = self.get_enabled_tools()
         logger.info(f"Persona '{self._name}' tool policy updated.")
 
     def set_explicit_overrides(self, overrides: List[str]) -> List[str]:

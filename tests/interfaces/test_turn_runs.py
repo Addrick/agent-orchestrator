@@ -17,6 +17,7 @@ import uvicorn
 
 from config import global_config
 from src.interfaces.turn_runs import DONE_FRAME, ReplayGone, TurnRuns
+from tests.helpers import enable_all_tools
 from tests.interfaces.test_kobold_engine_adapter import (
     KoboldAdapter,
     _fetch_portal_rows,
@@ -395,7 +396,7 @@ async def test_an_approval_continuation_survives_a_dropped_connection():
 
     adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
     persona.set_execution_mode(ExecutionMode.CONFIRM)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     executed: List[str] = []
 
     async def fake_execute(name, _offered, **kwargs):

@@ -10,7 +10,8 @@ given — the shape of an injected `<tool_call>`.
 import pytest
 
 from src.persona import ExecutionMode
-from tests.helpers import offer_tools
+from tests.helpers import offer_tools, enable_all_tools
+from src.tools.definitions import get_all_tool_definitions
 
 pytestmark = pytest.mark.integration
 
@@ -53,7 +54,7 @@ async def test_registered_tool_outside_the_persona_bindings_does_not_run(mocked_
     chat_system, _ = mocked_chat_system
     persona = chat_system.personas["test_persona"]
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
-    persona.set_enabled_tools(["*"])
+    enable_all_tools(persona)
     # get_agent_status is `agents`-bound; the persona has no bindings, so the
     # wildcard does not reach it.
     ran = _recording(chat_system, "get_agent_status")
@@ -74,7 +75,7 @@ async def test_registered_tool_outside_the_persona_allowlist_does_not_run(mocked
     chat_system, _ = mocked_chat_system
     persona = chat_system.personas["test_persona"]
     persona.set_execution_mode(ExecutionMode.AUTONOMOUS)
-    persona.set_enabled_tools(["get_agent_history"])
+    persona.set_enabled_tools(["get_agent_history"], get_all_tool_definitions())
     offer_tools(chat_system, "test_persona", "get_agent_history", "get_agent_status")
     ran = _recording(chat_system, "get_agent_status")
 
@@ -84,7 +85,7 @@ async def test_registered_tool_outside_the_persona_allowlist_does_not_run(mocked
 
     # Positive control: widen the allowlist and the identical call runs, so
     # the refusal above was the allowlist and nothing else.
-    persona.set_enabled_tools(["get_agent_history", "get_agent_status"])
+    persona.set_enabled_tools(["get_agent_history", "get_agent_status"], get_all_tool_definitions())
     _script(chat_system, _call("get_agent_status", agent_id="a"), _text("ok"))
     await _turn(chat_system)
     assert ran == [{"agent_id": "a"}]
@@ -115,7 +116,7 @@ async def test_write_naming_another_bank_is_refused_before_it_parks(
     })
     chat_system, _ = mocked_chat_system
     persona = chat_system.personas["test_persona"]
-    persona.set_enabled_tools([name])
+    persona.set_enabled_tools([name], get_all_tool_definitions())
     ran = _recording(chat_system, name)
     offer_tools(chat_system, "test_persona", name)
 

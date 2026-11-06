@@ -104,5 +104,5 @@ async def test_zammad_merge_enrichment():
     text = park.confirmation_text
     print(f"\nGenerated merge confirmation text:\n{text}")
 
-    assert "[ZAMMAD, INTERNAL, IRREVERSIBLE, HIGH-IMPACT]" in text
+    assert "[ZAMMAD, INTERNAL, IRREVERSIBLE]" in text
     assert "Merge #202605130001 into #202605130002 ('New Ticket')" in text

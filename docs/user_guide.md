@@ -123,7 +123,7 @@ Continue works **only with `model local` served by KoboldCPP**, on messages **wi
 
 **Create a persona (DP-231):** a **`+ new`** button beside the persona picker opens a create dialog. It captures the essentials — name (the routing key, lowercase `[a-z0-9_-]` only, no spaces), system prompt, model, memory mode, temperature, max tokens, and history window. Name is the only required field; a blank prompt/model falls back to the engine defaults (the prompt defaults to `you are in character as <name>`, matching the `add` dev command). On create the persona is persisted (`POST /api/v1/personas` → `personas.json`) and the portal switches to it, so the full **Inspector** — including the Tools tab for service bindings and tool policy — is immediately available to finish configuring it. A duplicate or malformed name is rejected with the engine's error shown inline.
 
-**Bulk tool toggles (DP-231):** the Inspector's **Tools** tab has a *set all tools* row (off · allow · ask) that flips every tool at once, plus per-service-group *off · allow* quick-set buttons in each group header — useful when configuring a freshly created persona that should start with most tools on (or off). Changes still save through the same `set tool_policy` path that revalidates the security composition. Service groups start **collapsed** on load (DP-430) — click a group header to expand it; the header still shows its tool count and how many are allowed/ask.
+**Bulk tool toggles (DP-231, DP-497):** the Inspector's **Tools** tab has a *set all tools* row (off · on · allow · ask) that flips every tool at once, plus the same four buttons in each service-group header — useful when configuring a freshly created persona that should start with most tools on (or off). **on** enables each tool at its default: reads **allow**, writes **ask** (see [Allow vs ask](#allow-vs-ask)). Setting an irreversible tool to **allow**, one at a time or in bulk, first asks you to confirm and names the irreversible tools. Changes still save through the same `set tool_policy` path that revalidates the security composition. Service groups start **collapsed** on load (DP-430) — click a group header to expand it; the header still shows its tool count and how many are allowed/ask.
 
 **Channel rail (DP-136 6b):** the left rail lists every channel the active persona has history in, grouped by originating interface (Web UI / Discord / Zammad / Gmail). Clicking a channel re-scopes the transcript and the next submit to it — a CHANNEL-memory-mode persona shows only that channel's history, a GLOBAL one merges all channels regardless. **`+ new`** points the view at a fresh `web_ui_*` tag; no row exists until the first submit, which materializes the channel in the DB (and the rail).
 
@@ -156,7 +156,7 @@ If Proxmox access is disabled (`PVE_TOOLS_ENABLED` unset, or no host key mounted
 
 **Slash dev-commands:** a portal message starting with `/` is routed to the dev-command endpoint instead of the LLM — e.g. `/set temperature 0.8` or `/what models` runs the same command surface Discord uses, and the response renders as a dismissible inline row (mutating commands also refresh the Inspector). The composer hints this live (`leading / = dev-command`); there is currently no escape for sending a literal chat message that starts with `/` (the draft is trimmed before the check).
 
-**LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would prepend to your message — re-fetched as you type so the preview mirrors the per-message recall recomputed at submit. It refreshes 400 ms after you stop typing, with at most one recall in flight: if you keep typing while one runs, only your latest draft is sent once it returns, so on a large bank the preview can lag your typing by a few seconds (DP-492). Switching persona or channel drops a pending preview. The persona pane's **long-term memory** section tunes that recall (DP-491): `ltm_max_items` (how many memories go into each message), `ltm_max_tokens` and `ltm_budget` (Hindsight only). Empty fields use the default. They save through the same persona PATCH and match the `set ltm_*` dev commands.
+**LTM recall toggle:** the composer's **LTM recall** chip controls whether long-term-memory retrieval runs for this persona (it saves through `long_term_memory` on the persona, so it persists). When on, the context panel previews the `ltm_block` the engine would prepend to your message — re-fetched as you type so the preview mirrors the per-message recall recomputed at submit. It refreshes 400 ms after you stop typing, with at most one recall in flight: if you keep typing while one runs, only your latest draft is sent once it returns, so on a large bank the preview can lag your typing by a few seconds (DP-492). Switching persona or channel drops a pending preview. Loading a persona shows its transcript straight away; the LTM preview fills in a few seconds later when its recall returns, instead of holding the whole page on "loading transcript…" until then (DP-498). The persona pane's **long-term memory** section tunes that recall (DP-491): `ltm_max_items` (how many memories go into each message), `ltm_max_tokens` and `ltm_budget` (Hindsight only). Empty fields use the default. They save through the same persona PATCH and match the `set ltm_*` dev commands.
 
 **Voice availability:** the mic (hold-to-talk), *voice auto-send*, and *listen* (always-listening dictation) controls appear only when the browser supports audio capture **and** the engine reports `voice_web` in `GET /api/v1/capabilities` (i.e. `VOICE_WEB_ENABLED` is set and the `/voice/*` routes are mounted). With voice disabled server-side the controls are hidden rather than failing on every press.
 
@@ -336,7 +336,8 @@ back with `what origin_allowlist`; clear it with `set origin_allowlist none`.
 | `top_k <integer>` | Positive integer | Top-k sampling limit |
 | `display_name <on\|off>` | on/off | Whether persona name prefixes chat responses |
 | `execution_mode <mode>` | autonomous, confirm | Tool execution approval behavior |
-| `tools <spec>` | all, none, tool_name, or `all -excluded` | Enable/disable tools. Supports exclusion syntax: `set tools all -web_search` |
+| `tools <spec>` | all, none, tool_name, or `all -excluded` | Enable/disable tools, each at its default state (reads allow, writes ask — see [Allow vs ask](#allow-vs-ask)). `all` lists every tool by name (MCP tools excepted); there is no wildcard. Supports exclusion syntax: `set tools all -web_search` |
+| `tool_policy <json>` | `{"allow": [...], "ask": [...]}` | Set each tool's state explicitly. An irreversible tool named under `allow` is accepted with a warning in the reply. `"*"` is refused. |
 | `explicit_overrides <spec>` | Override names, JSON list, or `none` | **Privileged (DP-277):** the only way to suppress a tool-composition security rule. Audit-logged; not settable via `set tool_policy` or the persona API. See [Tool Security](#tool-security). |
 | `memory_mode <mode>` | See Memory Modes below | History retrieval scope |
 | `service_bindings <list\|none>` | Comma-separated service names | e.g., `set service_bindings zammad,agents` |
@@ -1215,8 +1216,8 @@ Once present, `hypr` is the persona to talk to about the box itself, from **any*
 interface that routes to a persona (Discord, the web portal, `/derpr`) — unless
 you narrow that with an origin allowlist as above. It holds
 the `proxmox` binding and nothing else: it can read the node's topology and power/model state,
-and it can act on them — but every destructive action is a write tool, so it
-**parks for your approval** on whatever surface you asked from. `reboot_node` is
+and it can act on them — but every destructive action is a write tool, shipped
+under **ask**, so it **parks for your approval** on whatever surface you asked from. `reboot_node` is
 additionally flagged irreversible.
 
 What it can do:
@@ -1408,12 +1409,68 @@ The system tracks the "trustworthiness" of the conversation context. If a person
 - When a turn is tainted, any subsequent write-tool approval request will carry a warning: `⚠️ Context contains untrusted content from: [source]`.
 
 ### Allow vs ask
-The Inspector's per-tool setting (off · allow · ask; `allow`/`ask` in
-`set tool_policy`) decides whether a persona has a tool at all. Whether a call
-waits for approval is decided by the tool: every write asks, whatever the
-setting says. The one exception today is stagr's `copy_from_codr` and `queue_codr_task`, which run
-without a prompt when listed by name under allow (DP-496, see
-[stagr Tools](#stagr-tools-requires-service_bindings-stagr-dp-456)); the `*` wildcard does not count as listing them.
+Every tool a persona has is in one of three states, set per tool in the
+Inspector's Tools tab (or with `allow`/`ask` in `set tool_policy`), and that
+state is the **only** thing that decides whether a call waits for you (DP-497):
+
+- **off** — the persona does not have the tool; the model never sees it.
+- **allow** — the call runs straight away, with no prompt.
+- **ask** — the call parks for your approval and runs only once you approve
+  it, the same approve/deny prompt a write has always had. Reads and writes
+  alike: a read set to ask waits too, which is how you protect a read you would
+  rather see before it runs.
+
+What a tool *is* (read or write) no longer overrides the setting. It only
+decides the **default** a tool gets when you enable it without choosing a
+state — the Inspector's **on** button, `set tools`, `set tools all`: reads
+start at **allow**, writes at **ask**.
+
+**Irreversible tools** (`delete_user`, `merge_tickets`, `create_ticket`,
+`reboot_node`, an MCP tool not marked `destructiveHint: false`, … — the tool
+catalog marks them) are ordinary tools that default to **ask**. You can set one
+to allow, but you are warned first: the Inspector asks you to confirm and names
+it, and `set tool_policy` accepts it with a warning in its reply.
+
+**There is no wildcard.** `"*"` used to mean "every tool", which would let a
+tool added later run unprompted without you ever choosing that. `set tools all`
+lists every tool by name at its default; `set tool_policy` refuses `"*"`; and a
+saved `"*"` (or a legacy `enabled_tools: ["*"]`) is expanded to the current
+tools at their defaults when the persona loads. MCP tools are never included
+this way — list them by name.
+
+A write running under allow that starts longer work (stagr's
+`queue_codr_task`, hypr's `install_model`) still waits for that work to end and
+resumes the conversation, the same as an approved one.
+
+**One-time migration (DP-497).** Before DP-497 the setting did not do what it
+showed: a write under allow still asked (except stagr's `copy_from_codr` and
+`queue_codr_task`), and a read under ask still ran. The first time a saved
+persona loads after the upgrade its policy is rewritten to what it actually
+did — each such write moves from allow to ask, each such read from ask to
+allow, and a `"*"` is expanded — each change is logged with the persona's name,
+and the file is saved with a policy version so the rewrite never runs again (an
+ask on a read you set later is kept). No persona behaves differently; the
+Inspector just stops showing settings that were ignored. The shipped persona
+templates in `config/` carry the corrected states.
+
+MCP tools (`mcp__<server>__<tool>`) are handled per tool, because whether one
+is a read or a write is only known once its server connects, which is after
+personas load (or later, if the server is down). Until then such a name is left
+exactly as saved and marked not yet migrated; it is not offered to the model,
+so it cannot run. When the server registers its tools, each one moves to what
+it did before: a read (e.g. Hindsight's `recall`, `reflect`, `get_*`) stays
+**allow**, a write that used to prompt moves to **ask**, and the persona is
+saved again. A server that never comes back leaves its names as saved.
+
+The Inspector's Tools tab lists such names (any saved tool with no registered
+definition) as one more group, **unavailable**, at the bottom. They are ordinary
+tools there: off · allow · ask per row, the group's own bulk buttons, and the
+**set all tools** row covers them too, so "all off" really is all off. Saving the
+tab writes each one back as set; **off** drops it from the policy. Two things
+need a definition the UI does not have yet, so they fall back the way the engine
+does with none: **on** (defaults) sets them to **ask**, and **allow** asks you to
+confirm because the tool may be irreversible. Before this, saving the tab while
+an MCP server was down silently dropped every one of that server's tools.
 
 ### Insecure Composition Blocking
 To prevent sophisticated injection attacks, the system refuses to load any persona whose tool configuration creates an inherently insecure path. Common blocked compositions include:
@@ -1431,7 +1488,7 @@ A composition rule can be deliberately suppressed for a persona with an **explic
 - Overrides survive `set tools` / `set tool_policy` edits (they are persona-level, not part of the policy dict) and persist as a top-level `explicit_overrides` key in the persona save file; legacy files that stored them inside `tool_policy` are migrated on load.
 
 ### Irreversibility Flags
-Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Tools can also be dynamically flagged based on their arguments via an `irreversible_if` classifier (currently unused — `add_note_to_ticket` used one while it could write customer-visible notes; it is now internal-only). These flags are surfaced in the approval dialogue to highlight high-stakes actions.
+Some tools are marked as **IRREVERSIBLE** (e.g., `delete_user`). Tools can also be dynamically flagged based on their arguments via an `irreversible_if` classifier (currently unused — `add_note_to_ticket` used one while it could write customer-visible notes; it is now internal-only). These flags are surfaced in the approval dialogue to highlight high-stakes actions, and they are why a tool defaults to **ask** and warns before you set it to **allow** ([Allow vs ask](#allow-vs-ask)). The separate "always confirm" list (`merge_tickets`, `delete_user`, both already irreversible) is gone, and with it the HIGH-IMPACT badge, which only ever repeated IRREVERSIBLE.
 
 ### Credential Scoping
 Machine secrets — provider API keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVEAI_API_KEY`) and the Zammad API token — are kept out of the LLM's reach by design:
@@ -1514,6 +1571,7 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | Tool | Type | Description |
 |------|------|-------------|
 | `web_search` | Read | Search the web via DuckDuckGo. Params: `query`, `max_results` (default 5). |
+| `pubmed_search` | Read | Search PubMed via NCBI E-utilities (DP-501). Params: `query` (PubMed syntax: `[tiab]`, `[au]`, `[dp]`, `[pt]` tags, AND/OR/NOT), `max_results` (default 5, capped by `PUBMED_SEARCH_LIMIT_MAX`, default 20), `sort` (`relevance` or `date`). Each hit: PMID, title, first 6 authors, journal, year, DOI, abstract (cut at `PUBMED_ABSTRACT_MAX_CHARS`, default 3000, and flagged `abstract_truncated`), and `full_text_url` when the free PMC full text exists. Needs no account; set `NCBI_API_KEY` in `.env` to raise NCBI's limit from 3 to 10 requests/s, and optionally `NCBI_EMAIL`. |
 | `google_grounding_search` | Special | Enables Google's native search grounding. Gemini models only. |
 
 ### Zammad Tools (requires `service_bindings: ["zammad"]`)
@@ -1682,9 +1740,10 @@ All default-off.
 Manage the Proxmox host that runs the stack: reboot the node or a guest, start/stop
 a guest, and swap which koboldcpp model serves `:5001` on the GPU container. Every
 action executes over SSH to the pve node (`pct`/`qm`/`systemctl`/`reboot`); all
-**destructive** tools are write tools, so they **park for your approval** before
-running (`reboot_node` is additionally flagged irreversible). Read tools run
-straight through.
+**destructive** tools are write tools, shipped under **ask**, so they **park for your approval** before
+running (`reboot_node` is additionally flagged irreversible). Read tools ship
+under allow and run straight through. Like every tool, each follows its
+allow/ask setting ([Allow vs ask](#allow-vs-ask)).
 
 | Tool | Type | Description |
 |------|------|-------------|
@@ -1798,7 +1857,7 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `stagr_shell` | no | Run bash on the setup box; returns exit code and output |
 | `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
 | `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
-| `request_network` | yes | Ask to turn the setup box's LAN or WAN on, with a reason |
+| `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
@@ -1809,16 +1868,13 @@ and no persona is given them: `sandbox_net_status` (both boxes' switches,
 allowlists, open connections, proxy log) and `set_sandbox_net` (flip any
 switch of either box; the operator's click is the approval).
 
-**ask or allow (DP-496).** stagr ships with `copy_from_codr` and
-`queue_codr_task` under **ask**: each call waits for your approval. Set one to
-**allow** in the Inspector's Tools tab (or with `set tool_policy`) and stagr runs
-it straight away, with no prompt. The network requests (`request_network`,
-`request_web_access`) always wait for you, whatever the setting: a switch or a
-new host is never run unprompted. Only a tool listed **by name** under allow counts: a
-policy whose allow list is the `*` wildcard still asks. The choice is saved with
-the persona and survives a restart. A `queue_codr_task` run without a prompt
-still wakes stagr when its ticket ends. For every other tool of every persona,
-ask and allow make no difference to approval: a write always asks.
+**ask or allow (DP-496, DP-497).** stagr ships with `copy_from_codr`,
+`queue_codr_task`, `request_network` and `request_web_access` under **ask**:
+each call waits for your approval. Set one to **allow** in the Inspector's
+Tools tab (or with `set tool_policy`) and stagr runs it straight away, with no
+prompt — the same rule as every other tool ([Allow vs ask](#allow-vs-ask)).
+The choice is saved with the persona and survives a restart. A
+`queue_codr_task` run without a prompt still wakes stagr when its ticket ends.
 
 ### HuggingFace Model Tools (requires `service_bindings: ["huggingface"]`)
 
@@ -2114,11 +2170,13 @@ Security model for discovered tools:
 - `trusted`, `capabilities` and `bind_args` are only set by editing
   `data/mcp_servers.json`; `add_mcp_server` always creates a plain, untrusted
   entry, so a model-proposed install can't classify itself.
-- **Never in the wildcard.** `enabled_tools: ["*"]` / `allow: ["*"]` policies
-  do NOT include MCP tools. A persona must list each `mcp__<server>__<tool>`
-  explicitly in `allow`/`ask` **and** bind `mcp:<server>` in
-  `service_bindings`. This means installing a server can never silently widen
-  (or quarantine) an unrelated persona.
+- **Listed by name only.** `set tools all` and the load-time expansion of a
+  legacy `"*"` policy do NOT include MCP tools. A persona must list each
+  `mcp__<server>__<tool>` explicitly in `allow`/`ask` **and** bind
+  `mcp:<server>` in `service_bindings`. This means installing a server can
+  never silently widen (or quarantine) an unrelated persona. Enabled with
+  **on**, a discovered write starts at ask and a read at allow; an
+  irreversible one warns before you set it to allow.
 - **Per-server egress domain.** Each server is its own domain under the
   composition rules: reading and writing the same server is a closed loop;
   combining a server's tools with foreign-domain tools (web search, zammad, a
@@ -2272,6 +2330,12 @@ Setup:
 | `MCP_BRIDGE_PATH` | Path the bridge mounts at on the portal app (default `/mcp`). |
 
 How a subagent's tool call is handled:
+
+The bridge has no per-tool allow/ask setting: `MCP_BRIDGE_TOOLS` only says
+which tools are exposed, so every bridge tool sits at the default a persona's
+tool gets when enabled without a state (DP-497) — reads allow, writes and
+irreversible tools ask. There is no way to let a subagent run a write
+unprompted.
 
 - **Read-only tool** → runs immediately and returns its result, like any tool call.
 - **Write or irreversible tool** → **does not run.** It is queued as a proposal
