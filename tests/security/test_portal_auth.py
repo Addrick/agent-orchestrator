@@ -182,6 +182,36 @@ def test_data_plane_post_paths_not_gated():
     })
 
 
+def test_draft_previews_are_open_posts_and_carry_a_long_draft(token_set):
+    """DP-500: ltm_block and assemble are reads that POST the draft in a JSON
+    body (a 74k-char draft in a URL overran uvicorn's 16 KB request head).
+    They must stay as open as the GETs they replaced, and the draft must
+    arrive whole."""
+    adapter, _, _ = _make_adapter()
+    adapter.chat_system.assemble_request = AsyncMock(return_value=None)
+    draft = "x" * 74_000
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/session/p/ltm_block", json={"query": draft, "channel": "c"})
+        assert r.status_code == 200
+        client.post("/api/v1/session/p/assemble", json={"message": draft, "retry": True})
+    kwargs = adapter.chat_system.get_session_memory_block.call_args.kwargs
+    assert kwargs["query"] == draft and kwargs["channel"] == "c"
+    kwargs = adapter.chat_system.assemble_request.call_args.kwargs
+    assert kwargs["message"] == draft and kwargs["is_retry"] is True
+
+
+@pytest.mark.parametrize("path", [
+    "/api/v1/session/p/reset",
+    "/api/v1/session/p/ltm_block/x",
+    "/api/v1/session/p/x/ltm_block",
+    "/api/v1/sessionX/p/assemble",
+])
+def test_draft_preview_exemption_does_not_leak(token_set, path):
+    adapter, _, _ = _make_adapter()
+    with TestClient(adapter.app) as client:
+        assert client.post(path, json={}).status_code == 401
+
+
 def test_voice_stt_uploads_not_gated(token_set):
     """The voice STT uploads (mounted on this app by register_voice_web) are
     data plane — the SPA mic and the /voice PTT page send no token. Routes

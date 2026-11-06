@@ -32,7 +32,7 @@ from typing import (
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -351,6 +351,10 @@ class KoboldEngineAdapter:
         "/voice/transcribe",
         "/voice/utterance",
     })
+    # DP-500: reads that carry the whole draft, so they POST a JSON body rather
+    # than put it in a URL (uvicorn caps the request head at 16 KB). Read-only
+    # and open exactly as their GET predecessors were (DP-333's accepted risk).
+    DATA_PLANE_POST_RE = re.compile(r"^/api/v1/session/[^/]+/(?:ltm_block|assemble)$")
 
     def __init__(self, chat_system: ChatSystem, host: Optional[str] = None, port: int = 5003,
                  date_tagger: Optional[LlmTagger] = None,
@@ -475,7 +479,9 @@ class KoboldEngineAdapter:
         `/session/{p}/transcript` (history, plus live park tokens and their
         confirmation text), `/session/{p}/ltm_block`
         (long-term-memory search on a caller-supplied query),
-        `/interaction/{id}/versions`, and the Hindsight bank listings — none of
+        `/interaction/{id}/versions`, and the Hindsight bank listings (DP-500:
+        `assemble` and `ltm_block` are now POSTs, open via DATA_PLANE_POST_RE
+        instead of the GET exemption — same exposure) — none of
         which consult a persona's DP-330 `origin_allowlist`, because none of
         them route through `BotLogic.preprocess_message`. The boundary holding
         this closed is the network: `Caddyfile` serves private addresses with
@@ -492,7 +498,8 @@ class KoboldEngineAdapter:
         async def control_plane_auth(request: Request, call_next: Any) -> Any:
             if request.method in ("GET", "HEAD", "OPTIONS"):
                 return await call_next(request)
-            if request.url.path in self.DATA_PLANE_POST_PATHS:
+            if (request.url.path in self.DATA_PLANE_POST_PATHS
+                    or self.DATA_PLANE_POST_RE.match(request.url.path)):
                 return await call_next(request)
             # DP-240: the MCP bridge runs its own per-dispatch token check in
             # its ASGI wrapper, before the MCP SDK is entered. Exempt only when
@@ -942,13 +949,13 @@ class KoboldEngineAdapter:
                 })
             return {"channels": channels}
 
-        @self.app.get("/api/v1/session/{persona}/ltm_block")
+        @self.app.post("/api/v1/session/{persona}/ltm_block")
         async def ltm_block(
             persona: str,
-            query: str = "",
-            channel: str = "web_ui",
-            user_identifier: str = "portal",
-            server_id: Optional[str] = None,
+            query: str = Body(""),
+            channel: str = Body("web_ui"),
+            user_identifier: str = Body("portal"),
+            server_id: Optional[str] = Body(None),
         ) -> Any:
             """Retrieve an LTM memory block for the given persona and query text.
 
@@ -958,6 +965,10 @@ class KoboldEngineAdapter:
             inject. DP-136: `channel`/`user_identifier`/`server_id` are accepted so the
             recalled block is scoped to the active channel (defaults preserve the
             single web_ui/portal behavior).
+
+            DP-500: a read, but POST with a JSON body — the query is the whole
+            draft, and in a URL a long draft overran uvicorn's 16 KB request-head
+            buffer (400, preview silently gone). Data plane, so no token.
 
             DP-492: draft previews (non-empty `query`) are single-flight per
             (persona, user, channel, server). The SPA calls this as the user
@@ -999,15 +1010,17 @@ class KoboldEngineAdapter:
                     del self._ltm_block_inflight[key]
             return {"block": block}
 
-        @self.app.get("/api/v1/session/{persona}/assemble")
+        @self.app.post("/api/v1/session/{persona}/assemble")
         async def assemble(
             persona: str,
-            message: str = "",
-            channel: str = "web_ui",
-            ltm: bool = True,
-            retry: bool = False,
+            message: str = Body(""),
+            channel: str = Body("web_ui"),
+            ltm: bool = Body(True),
+            retry: bool = Body(False),
         ) -> Any:
             """Dry-run request assembler — the Raw-req parity inspector source.
+
+            DP-500: POST with a JSON body for the same reason as `ltm_block`.
 
             Runs the SAME assembly path as a live `/v1/chat/completions` submit
             (history rebuild from DB + LTM injection + token truncation + param

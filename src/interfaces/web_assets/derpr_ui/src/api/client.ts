@@ -71,6 +71,20 @@ async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await r.json()) as T
 }
 
+// A read whose input is too big for a URL (DP-500): same semantics as getJSON,
+// carried in a JSON body. The server allowlists these POSTs as data plane.
+async function postReadJSON<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(BASE + path, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  _liveSeen = true
+  if (!r.ok) throw new Error(`${path} → ${r.status}`)
+  return (await r.json()) as T
+}
+
 async function liveOr<T>(live: () => Promise<T>, mock: () => T): Promise<T> {
   try {
     const v = await live()
@@ -302,12 +316,13 @@ export function getLtmBlock(
   channel?: string,
   signal?: AbortSignal,
 ): Promise<string | null> {
-  const qs = new URLSearchParams({ query })
-  if (channel) qs.set('channel', channel)
+  // DP-500: POST, because the query is the whole draft — in a URL, a draft
+  // past ~16 KB overran the server's request-head buffer and 400'd.
   return liveOr(
     async () => {
-      const r = await getJSON<LtmBlockResponse>(
-        `/api/v1/session/${encodeURIComponent(persona)}/ltm_block?${qs}`,
+      const r = await postReadJSON<LtmBlockResponse>(
+        `/api/v1/session/${encodeURIComponent(persona)}/ltm_block`,
+        channel ? { query, channel } : { query },
         signal,
       )
       if (r.superseded) throw new Error('ltm_block preview superseded')
@@ -377,11 +392,11 @@ export function getAssembled(
   message = '',
   retry = false,
 ): Promise<AssembledRequest> {
-  const q = new URLSearchParams({ message, retry: String(retry) }).toString()
   return liveOr(
     () =>
-      getJSON<AssembledRequest>(
-        `/api/v1/session/${encodeURIComponent(persona)}/assemble?${q}`,
+      postReadJSON<AssembledRequest>(
+        `/api/v1/session/${encodeURIComponent(persona)}/assemble`,
+        { message, retry },
       ),
     () => MOCK_ASSEMBLED,
   )

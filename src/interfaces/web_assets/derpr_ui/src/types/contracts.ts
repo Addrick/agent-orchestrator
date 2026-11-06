@@ -143,7 +143,7 @@ export interface ToolsCatalog {
   tools: ToolDef[]
 }
 
-// ---- GET /api/v1/session/{persona}/ltm_block ----
+// ---- POST /api/v1/session/{persona}/ltm_block (JSON body, DP-500) ----
 export interface LtmBlockResponse {
   block: string | null
   // DP-492: a newer draft preview for the same persona+channel cancelled
@@ -242,7 +242,7 @@ export interface DevCommandResponse {
   mutated?: boolean
 }
 
-// ---- GET /api/v1/session/{persona}/assemble (S5 parity inspector) ----
+// ---- POST /api/v1/session/{persona}/assemble (S5 parity inspector; JSON body, DP-500) ----
 export interface AssembledMessage {
   role: string
   content: string

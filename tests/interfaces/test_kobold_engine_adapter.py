@@ -831,7 +831,7 @@ def test_create_persona_rolls_back_on_save_failure(tmp_path, monkeypatch):
 def test_ltm_block_unknown_persona_returns_404():
     adapter, mm, _ = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/session/nobody/ltm_block?query=hello")
+        r = client.post("/api/v1/session/nobody/ltm_block", json={"query": "hello"})
     assert r.status_code == 404
     mm.close()
 
@@ -839,7 +839,7 @@ def test_ltm_block_unknown_persona_returns_404():
 def test_ltm_block_returns_null_when_retrieval_returns_none():
     adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=AsyncMock(return_value=None))
     with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/session/test_persona/ltm_block?query=hello")
+        r = client.post("/api/v1/session/test_persona/ltm_block", json={"query": "hello"})
     assert r.status_code == 200
     assert r.json() == {"block": None}
     mm.close()
@@ -851,7 +851,7 @@ def test_ltm_block_returns_block_string_when_retrieval_succeeds():
         retrieve_memory_block=AsyncMock(return_value=expected)
     )
     with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/session/test_persona/ltm_block?query=tell+me+about+pets")
+        r = client.post("/api/v1/session/test_persona/ltm_block", json={"query": "tell me about pets"})
     assert r.status_code == 200
     assert r.json()["block"] == expected
     mm.close()
@@ -861,7 +861,7 @@ def test_ltm_block_passes_query_text_to_retrieval():
     mock_retrieve = AsyncMock(return_value=None)
     adapter, mm, persona = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
     with TestClient(adapter.app) as client:
-        client.get("/api/v1/session/test_persona/ltm_block", params={"query": "my query text"})
+        client.post("/api/v1/session/test_persona/ltm_block", json={"query": "my query text"})
     mock_retrieve.assert_awaited_once()
     assert mock_retrieve.call_args.kwargs.get("query") == "my query text"
     mm.close()
@@ -871,7 +871,7 @@ def test_ltm_block_empty_query_passes_none():
     mock_retrieve = AsyncMock(return_value=None)
     adapter, mm, persona = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
     with TestClient(adapter.app) as client:
-        client.get("/api/v1/session/test_persona/ltm_block")
+        client.post("/api/v1/session/test_persona/ltm_block")
     mock_retrieve.assert_awaited_once()
     # empty query string is forwarded as "" to the public seam — the seam itself
     # collapses falsy values to None before retrieval.
@@ -899,9 +899,9 @@ def _gated_retrieve():
 
 
 async def _get(client, query, channel="web_ui"):
-    return await client.get(
+    return await client.post(
         "/api/v1/session/test_persona/ltm_block",
-        params={"query": query, "channel": channel},
+        json={"query": query, "channel": channel},
     )
 
 
@@ -2005,7 +2005,7 @@ def test_assemble_matches_live_wire_messages():
 def test_assemble_endpoint_unknown_persona_returns_404():
     adapter, mm, _, _ = _make_real_adapter()
     with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/session/nobody/assemble?message=hi")
+        r = client.post("/api/v1/session/nobody/assemble", json={"message": "hi"})
     assert r.status_code == 404
     assert "not found" in r.json()["error"].lower()
     mm.close()
@@ -2017,7 +2017,7 @@ def test_assemble_endpoint_returns_parity_contract_shape():
     adapter, mm, persona, chat_system = _make_real_adapter()
     persona.set_inject_timestamp(False)
     with TestClient(adapter.app) as client:
-        r = client.get("/api/v1/session/test_persona/assemble?message=hello+world")
+        r = client.post("/api/v1/session/test_persona/assemble", json={"message": "hello world"})
     assert r.status_code == 200
     body = r.json()
 
@@ -2176,9 +2176,9 @@ def test_ltm_block_passes_channel_to_retrieval():
     mock_retrieve = AsyncMock(return_value=None)
     adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
     with TestClient(adapter.app) as client:
-        client.get(
+        client.post(
             "/api/v1/session/test_persona/ltm_block",
-            params={"query": "q", "channel": "web_ui_alt"},
+            json={"query": "q", "channel": "web_ui_alt"},
         )
     mock_retrieve.assert_awaited_once()
     assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui_alt"
@@ -2189,7 +2189,7 @@ def test_ltm_block_defaults_channel_to_web_ui():
     mock_retrieve = AsyncMock(return_value=None)
     adapter, mm, _ = _make_adapter_with_seeded_db(retrieve_memory_block=mock_retrieve)
     with TestClient(adapter.app) as client:
-        client.get("/api/v1/session/test_persona/ltm_block", params={"query": "q"})
+        client.post("/api/v1/session/test_persona/ltm_block", json={"query": "q"})
     assert mock_retrieve.call_args.kwargs.get("channel") == "web_ui"
     mm.close()
 
