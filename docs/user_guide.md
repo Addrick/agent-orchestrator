@@ -1570,6 +1570,7 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | Tool | Type | Description |
 |------|------|-------------|
 | `web_search` | Read | Search the web via DuckDuckGo. Params: `query`, `max_results` (default 5). |
+| `pubmed_search` | Read | Search PubMed via NCBI E-utilities (DP-501). Params: `query` (PubMed syntax: `[tiab]`, `[au]`, `[dp]`, `[pt]` tags, AND/OR/NOT), `max_results` (default 5, capped by `PUBMED_SEARCH_LIMIT_MAX`, default 20), `sort` (`relevance` or `date`). Each hit: PMID, title, first 6 authors, journal, year, DOI, abstract (cut at `PUBMED_ABSTRACT_MAX_CHARS`, default 3000, and flagged `abstract_truncated`), and `full_text_url` when the free PMC full text exists. Needs no account; set `NCBI_API_KEY` in `.env` to raise NCBI's limit from 3 to 10 requests/s, and optionally `NCBI_EMAIL`. |
 | `google_grounding_search` | Special | Enables Google's native search grounding. Gemini models only. |
 
 ### Zammad Tools (requires `service_bindings: ["zammad"]`)

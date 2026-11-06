@@ -52,4 +52,44 @@ SEARCH_TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "is_write": False,
+        "capabilities": {
+            "produces_untrusted": True,
+            "irreversible": False,
+            "locality": "network",
+            "sensitivity": "public",
+        },
+        "function": {
+            "name": "pubmed_search",
+            "description": "Searches PubMed (NCBI) for biomedical literature. Returns PMID, "
+                           "title, authors, journal, year, DOI, abstract, and a free PMC "
+                           "full-text link when one exists. Accepts PubMed query syntax: "
+                           "field tags like `crispr[tiab]`, `smith j[au]`, `2023:2025[dp]`, "
+                           "`review[pt]`, and AND/OR/NOT.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "PubMed search query.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of articles to return (default: 5, "
+                                       "capped by PUBMED_SEARCH_LIMIT_MAX).",
+                        "default": 5,
+                    },
+                    "sort": {
+                        "type": "string",
+                        "enum": ["relevance", "date"],
+                        "description": "`relevance` (default) or `date` (newest first).",
+                        "default": "relevance",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]

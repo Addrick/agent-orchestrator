@@ -19,6 +19,7 @@ from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.persona import Persona
 from src.tools.ingest_path import IngestPathHandler
+from src.tools.pubmed import PubMedSearchHandler
 from src.tools.tool_manager import (
     MemoryRecallHandler, MemorySourceHandler, MemoryToolHandler, ToolManager,
     WebSearchHandler,
@@ -77,6 +78,7 @@ def build_tool_manager(
     """
     tool_manager = ToolManager()
     WebSearchHandler().register(tool_manager)
+    PubMedSearchHandler().register(tool_manager)
     MemoryToolHandler(memory_manager).register(tool_manager)
     MemoryRecallHandler(memory_manager.backend).register(tool_manager)
     MemorySourceHandler(memory_manager.backend).register(tool_manager)

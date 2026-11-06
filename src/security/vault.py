@@ -23,6 +23,7 @@ class CredentialVault:
         "ANTHROPIC_API_KEY",
         "GOOGLE_GENERATIVEAI_API_KEY",
         "ZAMMAD_API_KEY",
+        "NCBI_API_KEY",
     )
 
     def __init__(
