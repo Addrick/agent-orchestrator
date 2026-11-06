@@ -257,9 +257,11 @@ def managed_zammad_user(live_chat_system):
         user_data = zammad_client.create_user(email=PERSISTENT_TEST_USER_EMAIL, firstname="Pytest", lastname="User")
         user_id = user_data['id']
 
-    tickets = zammad_client.search_tickets(query=f"customer_id:{user_id}")
-    for ticket in tickets:
-        zammad_client.delete_ticket(ticket['id'])
+    # Direct DB list, not search: ES lags and caps at 50 hits, which let
+    # this user's tickets leak across runs (DP-507).
+    for ticket in zammad_client.list_tickets():
+        if ticket.get('customer_id') == user_id:
+            zammad_client.delete_ticket(ticket['id'])
 
     yield {"id": user_id, "identifier": f"Pytest User <{PERSISTENT_TEST_USER_EMAIL}>"}
 

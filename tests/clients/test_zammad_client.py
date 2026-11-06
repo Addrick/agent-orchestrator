@@ -138,6 +138,30 @@ def test_search_tickets_with_sorting(mock_make_request, zammad_client):
     mock_make_request.assert_called_once_with('get', 'tickets/search', params=expected_params)
 
 
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_list_tickets_follows_pagination(mock_make_request, zammad_client):
+    """list_tickets returns every page, not just the first (DP-507)."""
+    full_page = [{'id': i} for i in range(100)]
+    mock_make_request.side_effect = [full_page, full_page, [{'id': 999}]]
+
+    tickets = zammad_client.list_tickets(params={'expand': 'true'})
+
+    assert len(tickets) == 201
+    assert tickets[-1] == {'id': 999}
+    pages = [c.kwargs['params']['page'] for c in mock_make_request.call_args_list]
+    assert pages == [1, 2, 3]
+    assert all(c.kwargs['params']['expand'] == 'true' for c in mock_make_request.call_args_list)
+
+
+@patch('src.clients.zammad_client.ZammadClient._make_request')
+def test_list_tickets_stops_on_empty_page(mock_make_request, zammad_client):
+    """An exact multiple of per_page ends on an empty page, not a loop."""
+    mock_make_request.side_effect = [[{'id': i} for i in range(100)], []]
+
+    assert len(zammad_client.list_tickets()) == 100
+    assert mock_make_request.call_count == 2
+
+
 # --- User Method Tests ---
 
 @patch('src.clients.zammad_client.ZammadClient._make_request')

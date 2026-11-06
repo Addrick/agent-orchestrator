@@ -91,10 +91,8 @@ async def test_tool_create_and_update_lifecycle(tool_manager, zammad_client):
         assert 'result' in response
         assert response['result']['ticket_id'] == ticket_id
         
-        # 3. Verify via list API (direct DB check)
-        details = zammad_client.list_tickets(params={'expand': 'true'})
-        created = next((t for t in details if t['id'] == ticket_id), None)
-        assert created is not None
+        # 3. Verify by id (direct DB read, no search index or list pagination)
+        created = zammad_client.get_ticket(ticket_id)
         assert created['title'] == "[TOOL TEST] Lifecycle"
         
     finally:
