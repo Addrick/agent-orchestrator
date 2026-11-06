@@ -154,6 +154,21 @@ def test_oversized_block_splits_on_turns_each_part_carrying_the_previous_tail():
     assert parts[1]["context"] == CONTEXT_PREAMBLE + turns[1]
 
 
+def test_configured_context_tail_stays_small_for_hindsight_rerank():
+    """DP-505: Hindsight prepends each fact's stored `context` to every rerank
+    candidate, so the configured tail bounds recall cost. With the real setting and
+    a realistic long history (a pasted document as the last turn), the context must
+    stay within the cap and keep the newest text, not the oldest."""
+    cap = global_config.RETAIN_CONTEXT_TAIL_CHARS
+    assert cap <= 1000, "a large context tail multiplies Hindsight rerank cost (DP-505)"
+    prior = [f"[2026-11-05 20:{i:02d}] Adam: question {i} " + "w" * 300 for i in range(11)]
+    prior.append("[2026-11-05 20:59] Adam: " + "pasted pdf text " * 400 + "END-OF-PASTE")
+    ctx = split_block(["stagr: reply"], 40000, prior=prior, tail_chars=cap)[0]["context"]
+    assert ctx.startswith(CONTEXT_PREAMBLE)
+    assert len(ctx) - len(CONTEXT_PREAMBLE) <= cap
+    assert ctx.endswith("END-OF-PASTE")
+
+
 def test_a_single_turn_larger_than_the_chunk_is_its_own_part():
     parts = split_block(["s", "L" * 500, "e"], 100, tail_chars=10)
     assert [p["content"] for p in parts] == ["s", "L" * 500, "e"]
