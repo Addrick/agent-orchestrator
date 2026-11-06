@@ -1517,14 +1517,15 @@ The web portal (`:5003`) is the capability control surface — its persona/tools
 > ### ⚠️ Reads are not authenticated — the portal must stay on a trusted network (DP-333)
 >
 > "Reads stay open" above is literal: the operator-token middleware exempts
-> **every** `GET`, so anyone who can reach `:5003` can read, with no credential:
+> **every** `GET` — plus the two draft-preview reads, which are POSTs because the draft
+> is too long for a URL (DP-500) — so anyone who can reach `:5003` can read, with no credential:
 >
 > | route | what it returns |
 > |---|---|
 > | `GET /api/v1/persona/{name}` | the persona's full configuration, **including its system prompt** |
-> | `GET /api/v1/session/{p}/assemble` | the exact assembled system prompt, rebuilt history and resolved parameters a live submit would send |
+> | `POST /api/v1/session/{p}/assemble` | the exact assembled system prompt, rebuilt history and resolved parameters a live submit would send |
 > | `GET /api/v1/session/{p}/transcript` | the conversation transcript, plus any live parked action's confirmation text and token |
-> | `GET /api/v1/session/{p}/ltm_block` | long-term-memory retrieval for a **caller-supplied query** — i.e. arbitrary search over stored memories |
+> | `POST /api/v1/session/{p}/ltm_block` | long-term-memory retrieval for a **caller-supplied query** — i.e. arbitrary search over stored memories |
 > | `GET /api/v1/interaction/{id}/versions` | per-message edit history |
 > | `GET /api/v1/memory/banks…` | Hindsight bank and document listings |
 > | `GET /api/v1/infra/status` | the Proxmox node's guest inventory, VRAM and switchable models (DP-439) — and each call runs SSH reads against the node |
