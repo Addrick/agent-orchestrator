@@ -45,7 +45,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -58,7 +58,7 @@ from src.engine.providers.local import REQUESTER_HEADER, requester_header
 from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
-from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header
+from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header, parse_positive_int
 from src.agents.codr_transcript import TranscriptMirror
 from src.engine.providers.opencode import (
     AUTO_FIELD, INJECTED_FIELD, OpencodeClient, auth_headers, current_turn_start,
@@ -121,6 +121,7 @@ class CodrTask:
     # Empty = the ticket is its own project (`default_project`).
     project: str = ""
     depends_on: Tuple[str, ...] = ()
+    max_seconds: Optional[int] = None
 
     @property
     def project_name(self) -> str:
@@ -163,11 +164,12 @@ def _ticket_fields(ticket_id: str, header: Dict[str, str], default_attempts: int
     unknown = sorted(set(header) - set(HEADER_KEYS))
     if unknown:
         raise ValueError(f"unknown header key(s): {', '.join(unknown)} (known: {', '.join(HEADER_KEYS)})")
-    fields: Dict[str, Any] = {"max_attempts": default_attempts, "title": header.get("title", "")}
-    if "max_attempts" in header:
-        if not re.fullmatch(r"\d+", header["max_attempts"]) or int(header["max_attempts"]) < 1:
-            raise ValueError(f"`max_attempts:` must be a whole number of at least 1, not {header['max_attempts']!r}")
-        fields["max_attempts"] = int(header["max_attempts"])
+    fields: Dict[str, Any] = {
+        "max_attempts": parse_positive_int(header["max_attempts"], "`max_attempts:`") if "max_attempts" in header else default_attempts,
+        "title": header.get("title", ""),
+    }
+    if "max_seconds" in header:
+        fields["max_seconds"] = parse_positive_int(header["max_seconds"], "`max_seconds:`")
     project = header.get("project", "") or default_project(ticket_id)
     if not PROJECT_RE.fullmatch(project):
         raise ValueError(f"project name {project!r} must be lowercase letters, digits and '-'")
@@ -235,40 +237,48 @@ REMOVED = "removed"
 FINAL_STATES = (PASSED, FAILED, BLOCKED, REMOVED)
 
 
+def _task_failed(done: List[str], max_attempts: int) -> bool:
+    return "pass" not in done and (len(done) >= max_attempts or any(o != "fail" for o in done))
+
+
+def _dep_state(dep: str, path: Tuple[str, ...], by_id: Dict[str, CodrTask],
+               outcomes: Dict[str, List[str]],
+               state_fn: Callable[[str, Tuple[str, ...]], Tuple[str, str]]) -> Tuple[str, str]:
+    """What `dep` makes of the ticket at the end of `path`."""
+    if dep in path:
+        return BLOCKED, f"its dependencies form a cycle ({' -> '.join(path + (dep,))})"
+    if dep not in by_id:
+        if "pass" in outcomes.get(dep, []):
+            return OPEN, ""
+        return HELD, f"it depends on `{dep}`, which is not in the queue"
+    found = state_fn(dep, path + (dep,))[0]
+    if found in (FAILED, BLOCKED):
+        return BLOCKED, f"it depends on `{dep}`, which {'failed for good' if found == FAILED else 'is blocked'}"
+    return (OPEN, "") if found == PASSED else (WAITING, f"it waits for `{dep}`")
+
+
 def queue_states(tasks: List[CodrTask], outcomes: Dict[str, List[str]]) -> Dict[str, Tuple[str, str]]:
     """{ticket id: (state, why)} from each ticket's recorded attempt
-    outcomes. `passed`; `failed` (no pass and no attempts left); `blocked`
-    (a dependency failed for good, is blocked itself, or is in a cycle: it
-    will never start); `held` (a dependency is not in the queue and never
-    passed); `waiting` (a dependency has not passed yet); else `open`, ready
-    to start. `outcomes` may hold tickets no longer in the queue: one that
-    passed and whose folder was removed still satisfies its dependents, as
-    stagr's `queue_codr_task` accepts it as a dependency."""
+    outcomes. `passed`; `failed` (no pass and no attempts left, or any attempt
+    ended non-retryable such as timed_out or stuck); `blocked` (a dependency
+    failed for good, is blocked itself, or is in a cycle: it will never start);
+    `held` (a dependency is not in the queue and never passed); `waiting`
+    (a dependency has not passed yet); else `open`, ready to start. `outcomes`
+    may hold tickets no longer in the queue: one that passed and whose folder
+    was removed still satisfies its dependents, as stagr's `queue_codr_task`
+    accepts it as a dependency."""
     by_id = {t.id: t for t in tasks}
     states: Dict[str, Tuple[str, str]] = {}
-
-    def dep_state(dep: str, path: Tuple[str, ...]) -> Tuple[str, str]:
-        """What `dep` makes of the ticket at the end of `path`."""
-        if dep in path:
-            return BLOCKED, f"its dependencies form a cycle ({' -> '.join(path + (dep,))})"
-        if dep not in by_id:
-            if "pass" in outcomes.get(dep, []):
-                return OPEN, ""
-            return HELD, f"it depends on `{dep}`, which is not in the queue"
-        found = state(dep, path + (dep,))[0]
-        if found in (FAILED, BLOCKED):
-            return BLOCKED, f"it depends on `{dep}`, which {'failed for good' if found == FAILED else 'is blocked'}"
-        return (OPEN, "") if found == PASSED else (WAITING, f"it waits for `{dep}`")
 
     def state(tid: str, path: Tuple[str, ...]) -> Tuple[str, str]:
         if tid not in states:
             done = outcomes.get(tid, [])
             if "pass" in done:
                 states[tid] = (PASSED, "")
-            elif len(done) >= by_id[tid].max_attempts:
+            elif _task_failed(done, by_id[tid].max_attempts):
                 states[tid] = (FAILED, "")
             else:
-                found = [dep_state(dep, path) for dep in by_id[tid].depends_on]
+                found = [_dep_state(dep, path, by_id, outcomes, state) for dep in by_id[tid].depends_on]
                 # The worst one counts: blocked, then held, then waiting.
                 states[tid] = next((f for rank in (BLOCKED, HELD, WAITING) for f in found if f[0] == rank),
                                    (OPEN, ""))
@@ -705,9 +715,10 @@ _WAKE_INSTRUCTION = {
     PASSED: ("codr's ticket finished after your turn ended; nobody has just asked you about it. It "
              "passed its check and was merged. Say so in a line or two. If this conversation agreed "
              "on a next ticket, prepare it and queue it now with queue_codr_task; if not, stop."),
-    FAILED: ("codr's ticket ended after your turn ended: it failed its check on every attempt. Say "
-             "what the last check output shows went wrong. Do not queue the next ticket on your own "
-             "if it builds on this one; report and wait for Adam."),
+    FAILED: ("codr's ticket ended after your turn ended without passing (failed its check with no "
+             "attempts left, timed out, or stayed stuck after the loop guard's nudge). Say what "
+             "went wrong from the last check output or reason. Do not queue the next ticket on your "
+             "own if it builds on this one; report and wait for Adam."),
     BLOCKED: ("codr's ticket will never start: a ticket it depends on failed for good or is blocked. "
               "Report it and wait for Adam."),
     REMOVED: ("codr's ticket was taken out of the queue (its folder is gone) before it passed. "
@@ -1160,6 +1171,8 @@ class CodrAgent(Agent):
             first = not any(message_meta(m, AUTO_FIELD) for m in msgs)
             context = parse_context(await client.run_shell(context_script(task))) if first else None
             meta = {"task": task.id, "attempt": attempt, "nudges": 0, "started": time.time()}
+            if task.max_seconds is not None:
+                meta["max_seconds"] = task.max_seconds
             await self._prompt(client, sid, persona, self._task_prompt(task, attempt, previous, context), meta)
             await self._mirror(client, sid, task.id)
         logger.info("codr agent: started task %s attempt %d", task.id, attempt)
@@ -1197,8 +1210,12 @@ class CodrAgent(Agent):
 
     def _stuck_reason(self, turn: List[Dict[str, Any]], auto: Dict[str, Any]) -> Tuple[Optional[str], bool]:
         """(reason, nudgeable). An overrun is never nudged: the attempt is out of time."""
-        if time.time() - float(auto.get("started") or time.time()) > float(self.cfg["max_turn_seconds"]):
-            return f"the attempt ran past {int(self.cfg['max_turn_seconds'])} s", False
+        raw_limit = auto.get("max_seconds")
+        limit = raw_limit if raw_limit is not None else self.cfg["max_turn_seconds"]
+        started = auto.get("started")
+        started_ts = time.time() if started is None else float(started)
+        if time.time() - started_ts > float(limit):
+            return f"the attempt ran past {int(limit)} s", False
         reason = detect_loop(turn)
         if reason:
             return reason, True
@@ -1236,10 +1253,16 @@ class CodrAgent(Agent):
             await self._prompt(client, sid, persona, nudge, {**auto, "nudges": 1})
             logger.info("codr agent: nudged task %s: %s", task.id, reason)
             return
-        await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": "aborted", "reason": reason}})
-        await self._record(auto, "aborted", {"reason": reason}, task)
+        if not nudgeable:
+            outcome = "timed_out"
+        elif task is None:
+            outcome = "aborted"
+        else:
+            outcome = "stuck"
+        await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": outcome, "reason": reason}})
+        await self._record(auto, outcome, {"reason": reason}, task)
         if task is not None:
-            await self._note_attempt(client, task, auto, "aborted", {"reason": reason})
+            await self._note_attempt(client, task, auto, outcome, {"reason": reason})
 
     async def _wait_idle(self, client: OpencodeClient, sid: str, limit: float = 20.0) -> None:
         deadline = time.monotonic() + limit

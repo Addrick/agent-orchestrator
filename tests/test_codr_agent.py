@@ -6,6 +6,7 @@
 
 import json
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -436,10 +437,13 @@ async def test_a_loop_is_nudged_once_then_aborted(fake, tmp_path):
     for _ in range(3):
         _tool_step(fake, sid, inp={"command": "cat x"})
     await agent.deploy()
-    assert _auto_messages(fake, sid)[1]["parts"][0]["metadata"][AUTO]["result"] == "aborted"
+    assert _auto_messages(fake, sid)[1]["parts"][0]["metadata"][AUTO]["result"] == "stuck"
     (row,) = agent.memory_manager.rows
-    assert row["outcome"] == "aborted"
-    assert "**ABORTED**" in router.sent[-1][2] and "same `bash` call" in router.sent[-1][2]
+    assert row["outcome"] == "stuck"
+    assert "**STUCK**" in router.sent[-1][2] and "same `bash` call" in router.sent[-1][2]
+    # DP-482: stuck ends the ticket immediately; max_attempts is 3 but no second attempt starts.
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 2
 
 
 async def test_an_overrun_is_aborted_without_a_nudge(fake, tmp_path):
@@ -451,8 +455,12 @@ async def test_an_overrun_is_aborted_without_a_nudge(fake, tmp_path):
     _tool_step(fake, sid)
     await agent.deploy()
     assert len(_auto_messages(fake, sid)) == 1
-    assert agent.memory_manager.rows[0]["outcome"] == "aborted"
-    assert "ran past 0 s" in router.sent[-1][2]
+    assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["result"] == "timed_out"
+    assert agent.memory_manager.rows[0]["outcome"] == "timed_out"
+    assert "**TIMED_OUT**" in router.sent[-1][2] and "ran past 0 s" in router.sent[-1][2]
+    # DP-482: timed_out ends the ticket immediately; max_attempts is 3 but no second attempt starts.
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1
 
 
 async def test_a_stall_counts_as_stuck(fake, tmp_path, monkeypatch):
@@ -679,6 +687,9 @@ def test_a_ticket_without_a_header_is_its_own_project(tmp_path):
     ("max_attempts: 0\n\nBuild it.", "`max_attempts:` must be"),
     ("title: a\ntitle: b\n\nBuild it.", "appears twice"),
     ("depends_on: t\n\nBuild it.", "cannot depend on itself"),
+    ("max_seconds: 0\n\nBuild it.", "must be a whole number of at least 1"),
+    ("max_seconds: -5\n\nBuild it.", "must be a whole number of at least 1"),
+    ("max_seconds: abc\n\nBuild it.", "must be a whole number of at least 1"),
 ])
 def test_a_bad_header_skips_the_ticket_with_the_reason(tmp_path, text, error):
     _task(tmp_path, "t", text=text)
@@ -703,6 +714,10 @@ def test_queue_states_follow_the_dependencies():
     assert _states(deps, {"a": ["fail", "pass"]})["b"] == "open"
     failed = _states(deps, {"a": ["fail", "aborted"]})
     assert (failed["a"], failed["b"], failed["c"]) == ("failed", "blocked", "blocked")
+    timed_out = _states(deps, {"a": ["timed_out"]}, attempts=3)
+    assert (timed_out["a"], timed_out["b"], timed_out["c"]) == ("failed", "blocked", "blocked")
+    stuck = _states(deps, {"a": ["stuck"]}, attempts=3)
+    assert (stuck["a"], stuck["b"], stuck["c"]) == ("failed", "blocked", "blocked")
 
 
 def test_a_dependency_that_passed_and_left_the_queue_still_counts():
@@ -728,7 +743,7 @@ async def test_a_bad_header_is_posted_once_and_the_queue_moves_on(fake, tmp_path
     await agent.deploy()                                       # 02-b attempt 2 starts
     notices = [b for _, _, b in router.sent if "01-a" in b]
     assert notices == ["codr ticket `01-a`: skipped: unknown header key(s): priority "
-                       "(known: title, project, depends_on, max_attempts)"]
+                       "(known: title, project, depends_on, max_attempts, max_seconds)"]
 
 
 async def test_a_ticket_whose_dependency_failed_is_blocked_posted_once_and_never_started(fake, tmp_path):
@@ -933,15 +948,81 @@ def test_the_reader_round_trips_what_stagr_writes(tmp_path):
     """DP-489 writes TASK.md with `codr_ticket.render_task_md`; this side parses it."""
     from src.stagr.codr_ticket import render_task_md
     text = render_task_md(title="notes auth", project="notes", depends_on=["CD-001", "CD-002"], max_attempts=4,
+                          max_seconds=1800,
                           spec="Add logins.", plan="Extend app.py.", packages="none")
     _task(tmp_path, "CD-003", text=text)
     (tmp_path / ".last-ticket-number").write_text("3\n")        # stagr's high-water mark: not a ticket
     tasks, errors = codr_agent.load_tickets(tmp_path, 3)
     assert errors == {}
     (task,) = tasks
-    assert (task.title, task.project, task.depends_on, task.max_attempts) == (
-        "notes auth", "notes", ("CD-001", "CD-002"), 4)
+    assert (task.title, task.project, task.depends_on, task.max_attempts, task.max_seconds) == (
+        "notes auth", "notes", ("CD-001", "CD-002"), 4, 1800)
     assert task.text == "## Spec\n\nAdd logins.\n\n## Plan\n\nExtend app.py.\n\n## Packages\n\nnone"
+
+
+async def test_task_max_seconds_overrides_agent_config(fake, tmp_path):
+    """DP-482: max_seconds on a task overrides max_turn_seconds on the agent."""
+    _task(tmp_path, "01-a", text="max_seconds: 10\n\nBuild it.")
+    _task(tmp_path, "02-b", text="Build it.")
+    tasks, errors = codr_agent.load_tickets(tmp_path, 3)
+    assert errors == {}
+    assert tasks[0].max_seconds == 10
+    assert tasks[1].max_seconds is None
+
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, max_turn_seconds=604800)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+
+    # Started 15s ago: past task's 10s max_seconds, well under agent's 604800s
+    auto_msg = _auto_messages(fake, sid)[0]
+    auto_part = agent._auto_part(auto_msg)
+    assert auto_part["metadata"][AUTO]["max_seconds"] == 10
+    auto_part["metadata"][AUTO]["started"] = time.time() - 15
+
+    await agent.deploy()
+    assert agent.memory_manager.rows[0]["outcome"] == "timed_out"
+    assert "ran past 10 s" in router.sent[-1][2]
+
+
+def test_max_seconds_single_line_legacy_header(tmp_path):
+    """DP-482: single-line legacy form max_seconds: N works as header."""
+    _task(tmp_path, "CD-001", text="max_seconds: 10\nBuild it.")
+    tasks, errors = codr_agent.load_tickets(tmp_path, 3)
+    assert errors == {}
+    assert tasks[0].max_seconds == 10
+    assert tasks[0].text == "Build it."
+
+
+def test_task_failed_helper_is_standalone_safe():
+    assert not codr_agent._task_failed(["pass"], 1)
+    assert not codr_agent._task_failed(["fail", "pass"], 2)
+    assert codr_agent._task_failed(["fail"], 1)
+    assert codr_agent._task_failed(["fail", "fail"], 2)
+    assert codr_agent._task_failed(["timed_out"], 3)
+    assert codr_agent._task_failed(["stuck"], 3)
+
+
+async def test_a_removed_ticket_stuck_in_loop_is_recorded_as_aborted(fake, tmp_path):
+    """If the ticket folder is deleted while running, second strike records aborted."""
+    import shutil
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    for _ in range(3):
+        _tool_step(fake, sid)
+    await agent.deploy()
+    shutil.rmtree(tmp_path / "01-a")
+    for _ in range(3):
+        _tool_step(fake, sid, inp={"command": "cat x"})
+    await agent.deploy()
+    assert _auto_messages(fake, sid)[1]["parts"][0]["metadata"][AUTO]["result"] == "aborted"
+    (row,) = agent.memory_manager.rows
+    assert row["outcome"] == "aborted"
+    assert "**ABORTED**" in router.sent[-1][2]
 
 
 # --- DP-484: a session and a channel per ticket --------------------------------

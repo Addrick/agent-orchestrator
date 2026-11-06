@@ -7,6 +7,7 @@ stagr's `queue_codr_task` writes a ticket's TASK.md; the codr agent's
     project: <[a-z0-9-]+>
     depends_on: CD-001, CD-004
     max_attempts: 3
+    max_seconds: 3600
 
     ## Spec
     ...
@@ -16,7 +17,7 @@ stagr's `queue_codr_task` writes a ticket's TASK.md; the codr agent's
     ...
 
 The header is `key: value` lines, ended by the first blank line; codr never
-sees it. `depends_on` and `max_attempts` are optional. The body is the ticket
+sees it. `depends_on`, `max_attempts` and `max_seconds` are optional. The body is the ticket
 text codr reads.
 
 Ticket IDs are `CD-NNN` (three digits or more), allocated by DERPR and never
@@ -30,18 +31,37 @@ import them from there.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 TICKET_PREFIX = "CD"
 TICKET_ID_RE = re.compile(rf"^{TICKET_PREFIX}-(\d{{3,}})$")
 PROJECT_RE = re.compile(r"^[a-z0-9-]+$")
-HEADER_KEYS = ("title", "project", "depends_on", "max_attempts")
+HEADER_KEYS = ("title", "project", "depends_on", "max_attempts", "max_seconds")
 SECTIONS = ("Spec", "Plan", "Packages")
 
 CODR_AGENT_NAME = "codr"
 ATTEMPT_ACTION = "task_attempt"
+
+
+def parse_positive_int(value: Any, label: str) -> int:
+    """Parse a strictly positive whole number (>= 1).
+    Raises ValueError on bad input."""
+    if isinstance(value, bool):
+        raise ValueError(f"{label} must be a whole number of at least 1, not {value!r}")
+    if isinstance(value, int):
+        if value >= 1:
+            return value
+    elif isinstance(value, float):
+        if math.isfinite(value) and value.is_integer() and int(value) >= 1:
+            return int(value)
+    elif isinstance(value, str):
+        s = value.strip()
+        if re.fullmatch(r"\d+", s) and int(s) >= 1:
+            return int(s)
+    raise ValueError(f"{label} must be a whole number of at least 1, not {value!r}")
 
 
 _HEADER_LINE = re.compile(r"([a-z][a-z_]*):[ \t]*(.*?)\s*")
@@ -100,6 +120,7 @@ def ticket_number(task_id: str) -> Optional[int]:
 
 
 def render_task_md(*, title: str, project: str, depends_on: Iterable[str], max_attempts: Optional[int],
+                   max_seconds: Optional[int] = None,
                    spec: str, plan: str, packages: str) -> str:
     """A ticket's TASK.md: the header, one blank line, then the sections.
     Values are taken as already validated (one line each)."""
@@ -109,5 +130,7 @@ def render_task_md(*, title: str, project: str, depends_on: Iterable[str], max_a
         header.append(f"depends_on: {', '.join(deps)}")
     if max_attempts is not None:
         header.append(f"max_attempts: {max_attempts}")
+    if max_seconds is not None:
+        header.append(f"max_seconds: {max_seconds}")
     body = "\n\n".join(f"## {name}\n\n{text.strip()}" for name, text in zip(SECTIONS, (spec, plan, packages)))
     return "\n".join(header) + "\n\n" + body + "\n"

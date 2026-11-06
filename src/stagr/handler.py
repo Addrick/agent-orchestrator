@@ -60,7 +60,8 @@ from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
 from src.stagr.codr_ticket import (
-    ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, render_task_md, ticket_id, ticket_number,
+    ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, parse_positive_int,
+    render_task_md, ticket_id, ticket_number,
 )
 from src.stagr.net import BOXES, ZONES, SandboxNet
 
@@ -472,8 +473,15 @@ class StagrToolHandler:
         items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
         return list(dict.fromkeys(str(i).strip() for i in items if str(i).strip()))
 
+    @staticmethod
+    def _positive_int(value: Any, name: str) -> Union[int, Dict[str, Any]]:
+        try:
+            return parse_positive_int(value, name)
+        except ValueError as e:
+            return _error(str(e))
+
     def _ticket(self, title: Any, project: Any, depends_on: Any, spec: Any, plan: Any, packages: Any,
-                check_sh: Any, max_attempts: Any) -> Union[Dict[str, Any], Tuple[str, List[str]]]:
+                check_sh: Any, max_attempts: Any, max_seconds: Any = None) -> Union[Dict[str, Any], Tuple[str, List[str]]]:
         """(TASK.md, depends_on) once every field checks out, or the error.
         Whether depends_on names real tickets is checked when it is written."""
         line = str(title or "").strip()
@@ -490,21 +498,26 @@ class StagrToolHandler:
                 return _error(f"{field} must not be empty (packages may say none).")
         attempts: Optional[int] = None
         if max_attempts is not None:
-            try:
-                attempts = int(max_attempts)
-            except (TypeError, ValueError):
-                return _error("max_attempts must be a whole number.")
-            if attempts < 1:
-                return _error("max_attempts must be at least 1.")
+            res = self._positive_int(max_attempts, "max_attempts")
+            if isinstance(res, dict):
+                return res
+            attempts = res
+        seconds: Optional[int] = None
+        if max_seconds is not None:
+            res = self._positive_int(max_seconds, "max_seconds")
+            if isinstance(res, dict):
+                return res
+            seconds = res
         return render_task_md(title=line, project=name, depends_on=deps, max_attempts=attempts,
+                              max_seconds=seconds,
                               spec=str(spec), plan=str(plan), packages=str(packages)), deps
 
     async def _queue_preview(self, title: Any = None, project: Any = None, depends_on: Any = None,
                              spec: Any = None, plan: Any = None, packages: Any = None, check_sh: Any = None,
-                             max_attempts: Any = None, **_: Any) -> Optional[str]:
+                             max_attempts: Any = None, max_seconds: Any = None, **_: Any) -> Optional[str]:
         """The approval prompt's enrichment: the ID the ticket would get now,
         or why it would be refused. The prompt itself shows every field."""
-        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts)
+        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts, max_seconds)
         if isinstance(ticket, dict):
             return f"⚠️ will be refused: {ticket['message']}"
         seen = self._seen_tickets(global_config.CODR_TASKS_DIR)
@@ -516,11 +529,11 @@ class StagrToolHandler:
 
     async def _queue_codr_task(self, title: Any = None, project: Any = None, spec: Any = None, plan: Any = None,
                                packages: Any = None, check_sh: Any = None, depends_on: Any = None,
-                               max_attempts: Any = None) -> Dict[str, Any]:
+                               max_attempts: Any = None, max_seconds: Any = None) -> Dict[str, Any]:
         """Runs once the operator approved it (the prompt shows every field),
         or unprompted when stagr's tool policy lists it under `allow`
         (DP-496). DERPR picks the ID, so two tickets never share one."""
-        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts)
+        ticket = self._ticket(title, project, depends_on, spec, plan, packages, check_sh, max_attempts, max_seconds)
         if isinstance(ticket, dict):
             return ticket
         text, deps = ticket

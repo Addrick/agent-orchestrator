@@ -726,9 +726,10 @@ create the folder by hand:
   - `depends_on:` comma-separated ticket IDs. The ticket waits until all of them have
     passed (below).
   - `max_attempts:` overrides the default.
+  - `max_seconds:` overrides max_turn_seconds for this ticket (how long one attempt may run before it is stopped as timed_out).
 
   Any other key is an error: DERPR logs it, posts it once to codr's channel, and
-  skips the ticket rather than guess. A bad `project:` or `max_attempts:` value, or a
+  skips the ticket rather than guess. A bad `project:`, `max_attempts:` or `max_seconds:` value, or a
   folder name that can't be a branch name, is skipped the same way. A file whose
   first line is not `key: value` has no header, so old tasks keep working, and so
   does the older form, a `max_attempts: N` first line with the text right under it.
@@ -770,9 +771,14 @@ the turn ends, DERPR runs the check in the worktree:
 - **pass**: DERPR merges the ticket's branch into the project's main (below), and a
   one-line result (ticket, attempt, PASS/FAIL, run time, where it merged) is posted
   to codr's channel;
-- **fail**: if attempts remain, the next tick starts a new attempt with the check's
-  output (its last 2,500 characters); if not, the ticket is marked failed and the
-  result is posted.
+- **fail**: DERPR retries only when the check ran and failed (`fail`, including merge
+  conflict) and attempts remain: the next tick starts a new attempt with the check's
+  output (its last 2,500 characters). An overrun (`timed_out`) or a loop or stall
+  still stuck after its one nudge (`stuck`) ends the ticket immediately without
+  starting another attempt (no check output carries over, so retrying with the same
+  budget would repeat it); if attempts run out or the attempt was not retryable,
+  the ticket is marked failed and the result is posted. To go on after timed_out
+  or stuck, requeue or rename as a new ticket.
 
 Every attempt is recorded in the agent action log (ticket, attempt, outcome, run
 time, and codr's final reply), and as one line in codr's notes file for the ticket.
@@ -883,9 +889,10 @@ also show in the ticket's channel, as the call itself.
 
 The first time in a task attempt, DERPR stops the turn and starts a new one with a
 nudge naming what repeated and asking codr to change approach. The second time,
-it stops the turn, records the attempt as `aborted`, and posts the reason to the
-channel. Running past `max_turn_seconds` aborts right away and posts the reason, with no nudge: the
-attempt is out of time.
+it stops the turn, records the attempt as `stuck`, and posts the reason to the
+channel. Running past the ticket's `max_seconds` (or `max_turn_seconds` by default)
+stops right away, records the attempt as `timed_out`, and posts the reason, with no nudge: the
+attempt is out of time. Either `stuck` or `timed_out` ends the ticket immediately with no further attempts.
 
 **More than one model server.** codr can hand subtasks to a `pool` subagent
 (opencode's `task` tool, in the background if it wants to keep working). codr and
@@ -943,7 +950,7 @@ Settings, per instance in `agents.json` under `codr`:
   is posted (logged instead).
 - `persona` (default `codr`): which opencode persona the agent drives.
 - `max_attempts` (default `3`) per task.
-- `max_turn_seconds` (default `604800`, one week), `stall_seconds` (default `900`).
+- `max_turn_seconds` (default `604800`, one week; default per-attempt limit when a ticket sets no `max_seconds:`), `stall_seconds` (default `900`).
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but
@@ -1059,7 +1066,7 @@ only thing that talks to both:
     command works there, before it queues.
   - **Dependencies** (`depends_on`, optional): earlier tickets this one builds on.
     Each must be queued or already attempted, or the call is refused.
-  - **Check**: the hidden pass/fail script; and optionally `max_attempts`.
+  - **Check**: the hidden pass/fail script; and optionally `max_attempts` and `max_seconds`.
 
   The approval prompt shows every field, with the ID the ticket would get now (or a ⚠️
   line saying why it would be refused), so approving it is approving the plan.
@@ -1069,13 +1076,13 @@ only thing that talks to both:
   into `data/codr_tasks/CD-NNN/`, and the tool's reply names the ID. The agent
   starts it on its next tick when codr is idle.
 - **stagr hears when a ticket ends (DP-493).** When a ticket stagr queued
-  reaches its final outcome (it passed, it failed with no attempts left, it is
+  reaches its final outcome (it passed, it failed -- whether check attempts were exhausted, timed out, or stayed stuck -- it is
   blocked, or its folder was deleted before it passed), the codr agent wakes
   stagr in the conversation it queued the ticket from, on its next tick. stagr
   gets one turn with the result (the outcome, the attempts, where it merged, the
-  last check output) and is told what to do with it: after a pass, queue the
+  last check output or reason) and is told what to do with it: after a pass, queue the
   next ticket if you agreed one; after a failure, report and wait for you. A
-  failed attempt that codr will retry does not wake it. stagr's reply is saved in
+  failed check attempt that codr will retry does not wake it. stagr's reply is saved in
   that conversation and also posted to codr's channel, under codr's result line,
   as `stagr [CD-NNN]: <reply>`; if the turn parked an approval (with
   `queue_codr_task` under ask, that is the next ticket), the post says so, and
@@ -1864,7 +1871,7 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
-| `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
+| `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts, max_seconds); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
 
 Two more tools sit behind the same binding for the portal's INFRA panel only,
 and no persona is given them: `sandbox_net_status` (both boxes' switches,
