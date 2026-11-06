@@ -979,3 +979,34 @@ async def test_a_down_box_does_not_delay_another_boxs_poll(monkeypatch):
         poller.cancel()
         with pytest.raises(asyncio.CancelledError):
             await poller
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_poll_answer_does_not_end_that_boxs_polling(monkeypatch):
+    # One loop per box: an exception in one box's poll used to end only its loop, leaving it
+    # "healthy" with frozen flags while the other box kept polling. It now counts as a failed poll.
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    polls = 0
+    polled_again = asyncio.Event()
+
+    async def get_json(backend, path):
+        nonlocal polls
+        if path != "/v1/models":
+            return None
+        polls += 1
+        if polls >= 3:
+            polled_again.set()
+        return {"data": [{"id": "m", "status": "loaded"}]}  # a string status: note_poll raises on it
+
+    monkeypatch.setattr(ir, "_get_json", get_json)
+    monkeypatch.setattr(ir, "POLL_INTERVAL_S", 0.01)
+    poller = asyncio.ensure_future(ir.poll_forever(router))
+    try:
+        await asyncio.wait_for(polled_again.wait(), 1.0)
+        await asyncio.sleep(0)  # let the third poll's handler run
+        assert router.backends[0].poll_failures >= ir.POLL_FAILURES_DOWN
+        assert not router.backends[0].healthy
+    finally:
+        poller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poller

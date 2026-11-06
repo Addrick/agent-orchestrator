@@ -729,6 +729,8 @@ class Server:
             if sent:
                 return
             if job is not None:
+                if backend.healthy:
+                    log.warning("%s is down (did not answer a dispatch); the next poll re-checks it", backend.name)
                 backend.healthy = False  # the next poll restores it
         _respond(writer, b"503 Service Unavailable", {"error": "no inference server answered"})
 
@@ -829,7 +831,17 @@ async def poll_forever(router: Router) -> None:
     # busy flags and statusline sample with it (DP-499).
     async def poll_box(backend: Backend) -> None:
         while True:
-            await poll_backend(router, backend)
+            failures = backend.poll_failures
+            try:
+                await poll_backend(router, backend)
+            except Exception:
+                # An answer note_poll cannot read (a non-dict "status" or "live") must not end this
+                # box's loop: the others keep running, so its flags would freeze as last seen, healthy
+                # included. It counts as a failed poll, as unparseable JSON already does; note_poll
+                # may have zeroed the count before it raised, so it resumes from before this poll.
+                log.exception("%s poll failed", backend.name)
+                backend.poll_failures = failures
+                router.note_poll(backend, None, None)
             router.wake()  # busy flags and quiet timers change without a request ending
             await asyncio.sleep(POLL_INTERVAL_S)
 
