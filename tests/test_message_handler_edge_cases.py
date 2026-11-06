@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.message_handler import BotLogic
 from src.persona import ExecutionMode, MemoryMode, Persona
 from tests.helpers import make_bot_logic, OPERATOR_ORIGIN
+from src.tools.definitions import get_all_tool_definitions
 
 
 # --- Fixtures ---
@@ -51,9 +52,10 @@ def bot_with_tools(chat_system):
     tm = MagicMock()
     tm.get_tool_definitions.return_value = [
         {"type": "function", "function": {"name": "web_search"}},
-        {"type": "function", "function": {"name": "create_ticket"}},
+        {"type": "function", "is_write": True, "function": {"name": "create_ticket"}},
         {"type": "function", "function": {"name": "search_tickets"}},
         {"type": "function", "function": {"name": "google_grounding_search"}},
+        {"type": "function", "dynamic": True, "function": {"name": "mcp__srv__x"}},
     ]
     chat_system.tool_manager = tm
     return make_bot_logic(chat_system)
@@ -225,7 +227,7 @@ async def test_set_memory_mode_invalid_enum(bot):
 @pytest.mark.asyncio
 async def test_set_tools_none_keyword(bot_with_tools):
     persona = _persona(bot_with_tools)
-    persona.set_enabled_tools(["web_search"])
+    persona.set_enabled_tools(["web_search"], get_all_tool_definitions())
     result = await bot_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "u1", "set tools none")
     assert result["mutated"] is True
     assert persona.get_enabled_tools() == []
@@ -256,7 +258,11 @@ async def test_set_tools_all_wildcard(bot_with_tools):
     persona = _persona(bot_with_tools)
     result = await bot_with_tools.preprocess_message(OPERATOR_ORIGIN, "derpr", "u1", "set tools all")
     assert result["mutated"] is True
-    assert persona.get_enabled_tools() == ["*"]
+    # DP-497: listed by name at defaults; an MCP (dynamic) tool is not included.
+    assert persona.get_enabled_tools() == [
+        "create_ticket", "google_grounding_search", "search_tickets", "web_search"]
+    assert persona.get_tool_policy().state_of("create_ticket") == "ask"
+    assert persona.get_tool_policy().state_of("web_search") == "allow"
 
 
 @pytest.mark.asyncio

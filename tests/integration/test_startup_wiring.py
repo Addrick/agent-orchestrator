@@ -17,6 +17,7 @@ from src.clients.zammad_service import ZammadIntegration
 from memory.memory_manager import MemoryManager
 from src.engine import TextEngine
 from src.persona import Persona, MemoryMode
+from src.tools.definitions import get_all_tool_definitions
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from src.tools.tool_manager import MemorySourceHandler
 from config.global_config import TEST_MEMORY_DATABASE_FILE
@@ -39,7 +40,7 @@ def wired_system():
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="gemini-2.5-flash",
-            prompt="test", enabled_tools=["*"],
+            prompt="test", enabled_tools=["*"], tool_definitions=get_all_tool_definitions(),
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             service_bindings=["zammad", "agents", "fixr", "voice", "proxmox",
                               "huggingface", "stagr", "mcp", "proposals"],

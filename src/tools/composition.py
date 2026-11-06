@@ -34,13 +34,11 @@ def resolve_policy_tools(policy: ToolPolicy) -> List[Dict[str, Any]]:
     """The subset of the live tool catalog a policy exposes (allow + ask).
 
     Validation runs against the GLOBAL definitions (not binding-filtered),
-    matching the original load-time check: ``['*']`` is always the full
-    *static* toolset regardless of ``service_bindings``. Reads the registry
-    (not the static ``ALL_TOOL_DEFINITIONS``) so runtime-registered tools are
-    composition-checked too — but delegates the expansion to
-    ``ToolPolicy.filter_tools`` so the wildcard's dynamic-tool exclusion
-    (DP-268: ``['*']`` never auto-includes MCP-discovered defs) is the same
-    here as at request time, by construction.
+    matching the original load-time check: a listed tool counts regardless of
+    ``service_bindings``. Reads the registry (not the static
+    ``ALL_TOOL_DEFINITIONS``) so runtime-registered tools are
+    composition-checked too, and delegates to ``ToolPolicy.filter_tools`` so
+    the set is the same here as at request time, by construction.
     """
     return policy.filter_tools(get_all_tool_definitions())
 

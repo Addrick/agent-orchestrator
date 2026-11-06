@@ -46,6 +46,7 @@ from src.confirmations import DENIAL_INSTRUCTION
 from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode, MemoryMode, Persona
+from src.tools.definitions import get_all_tool_definitions
 from src.tools.tool_loop import PARK_STATUS_DUPLICATE
 from tests.helpers import make_chat_system
 from tests.live.conftest import LLM_LIVE_MAX_TOKENS
@@ -120,7 +121,7 @@ def probe():
         persona_name=PERSONA,
         model_name=_model_name(),
         prompt=PROBE_PROMPT,
-        enabled_tools=["create_ticket"],
+        enabled_tools=["create_ticket"], tool_definitions=get_all_tool_definitions(),
         memory_mode=MemoryMode.CHANNEL_ISOLATED,
         history_messages=20,
     )

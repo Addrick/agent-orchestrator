@@ -3,6 +3,7 @@
 import pytest
 from src.persona import Persona
 from config import global_config
+from src.tools.definitions import get_all_tool_definitions
 
 # Use known values for the default limits in tests
 TEST_DEFAULT_HISTORY_MESSAGES = 15
@@ -451,7 +452,10 @@ def test_meta_visible_absent_in_legacy_config_defaults_false(base_persona_args, 
 
 # An insecure tool composition: allow-all exposes web/agent/zammad tools at once,
 # tripping the network:read+local:write and pii:read+foreign-egress rules.
-_INSECURE_POLICY = {"default": "allow", "allow": ["*"], "ask": []}
+# Every tool by name (DP-497 retired '*'): an insecure composition.
+_INSECURE_POLICY = {"default": "deny", "ask": [],
+                    "allow": [t["function"]["name"] for t in get_all_tool_definitions()
+                              if t.get("function", {}).get("name")]}
 # Zammad-only is the documented same-origin clean set.
 _SECURE_ZAMMAD_TOOLS = [
     "get_ticket_details", "create_ticket", "update_ticket", "search_tickets",
@@ -492,7 +496,7 @@ def test_set_enabled_tools_is_a_pure_mutator(base_persona_args):
     """The raw setter does NOT re-validate (internal callers use it freely);
     re-validation is an explicit, operator-edit-boundary concern (DP-128)."""
     p = Persona(**base_persona_args, service_bindings=["zammad", "agents"])
-    p.set_enabled_tools(["*"])  # insecure composition, but setter stays quiet
+    p.set_enabled_tools(["*"], get_all_tool_definitions())  # insecure composition, but setter stays quiet
     assert p.is_security_blocked() is False
 
 
@@ -504,7 +508,7 @@ def test_revalidate_clears_quarantine_after_scoping_tools(base_persona_args):
                 security_block_reasons=["Insecure composition: network:read + local:write"])
     from src.tools.composition import revalidate_persona_security
     assert p.is_security_blocked() is True
-    p.set_enabled_tools(_SECURE_ZAMMAD_TOOLS)
+    p.set_enabled_tools(_SECURE_ZAMMAD_TOOLS, get_all_tool_definitions())
     assert revalidate_persona_security(p) is False
     assert p.is_security_blocked() is False
     assert p.get_security_block_reasons() == []
@@ -515,7 +519,7 @@ def test_revalidate_trips_block_on_insecure_edit(base_persona_args):
     quarantines it."""
     from src.tools.composition import revalidate_persona_security
     p = Persona(**base_persona_args, service_bindings=["zammad"],
-                enabled_tools=_SECURE_ZAMMAD_TOOLS)
+                enabled_tools=_SECURE_ZAMMAD_TOOLS, tool_definitions=get_all_tool_definitions())
     assert p.is_security_blocked() is False
     p.set_tool_policy(_INSECURE_POLICY)
     assert revalidate_persona_security(p) is True
@@ -761,7 +765,13 @@ def test_hypr_declares_the_proxmox_binding_and_matching_policy():
     # the binding, ToolPolicy on the names) — a persona with only one of them
     # loads fine and then silently has no tools, so pin both.
     assert hypr["tool_policy"]["default"] == "deny"
-    assert set(hypr["tool_policy"]["allow"]) == set(hypr["enabled_tools"])
+    policy = hypr["tool_policy"]
+    assert set(policy["allow"]) | set(policy["ask"]) == set(hypr["enabled_tools"])
+    # DP-497: the destructive writes ship under ask, so they park.
+    assert set(policy["ask"]) == {
+        "start_guest", "stop_guest", "reboot_guest", "reboot_node",
+        "set_active_model", "install_model",
+    }
 
 
 def test_hypr_enabled_tools_are_all_real_tools_of_its_bindings():
@@ -1247,3 +1257,240 @@ def test_hypr_template_still_leaves_the_arithmetic_itself_to_the_tools():
     for gone in ("1010 MiB", "500 MiB", "bytes per element", "n_kv_head",
                  "n_layer", "block_count", "34/32", "sliding-window"):
         assert gone not in prompt, gone
+
+
+# --- DP-497: the one-time stored-policy migration ---------------------------
+#
+# Before DP-497 allow/ask was mostly ignored at call time: a write asked
+# whatever it was listed under (except stagr's queue_codr_task/copy_from_codr
+# under allow, DP-496) and a read ran even under ask. The loader rewrites an
+# unversioned policy to what it actually did, saves it stamped
+# `policy_version: 2`, and never migrates a stamped one again.
+
+import json as _json  # noqa: E402
+import logging as _logging  # noqa: E402
+
+# A realistic pre-DP-497 personas.json: the shape prod writes (to_dict), with
+# writes under allow (hypr / joy-style), stagr's four gated tools under allow
+# as prod had them, a read under ask, a legacy enabled_tools-only entry with
+# the wildcard, overrides still inside tool_policy, and one malformed entry
+# the loader skips but must not erase.
+_OLD_SAVE = {
+    "personas": [
+        {"name": "hypr", "model_name": "m", "prompt": "p",
+         "enabled_tools": ["pve_status", "reboot_node", "set_active_model"],
+         "service_bindings": ["proxmox"],
+         "tool_policy": {"default": "deny",
+                         "allow": ["pve_status", "reboot_node", "set_active_model"],
+                         "ask": [], "capabilities_required": []}},
+        {"name": "stagr", "model_name": "m", "prompt": "p",
+         "service_bindings": ["stagr"],
+         "tool_policy": {"default": "deny",
+                         "allow": ["stagr_shell", "queue_codr_task", "copy_from_codr",
+                                   "request_network", "request_web_access"],
+                         "ask": ["list_web_access"], "capabilities_required": []}},
+        {"name": "joy", "model_name": "m", "prompt": "p",
+         "service_bindings": ["zammad"],
+         "tool_policy": {"default": "deny",
+                         "allow": ["search_tickets", "create_ticket", "update_ticket"],
+                         "ask": ["merge_tickets"], "capabilities_required": [],
+                         "explicit_overrides": ["untrusted_read_network_write"]}},
+        {"name": "legacy", "model_name": "m", "prompt": "p", "enabled_tools": ["*"]},
+        {"model_name": "m", "prompt": "an entry with no name"},
+    ],
+    "models": {"keep": "me"},
+}
+
+
+def _write_old(tmp_path, data=None):
+    path = tmp_path / "personas.json"
+    path.write_text(_json.dumps(data or _OLD_SAVE), encoding="utf-8")
+    return path
+
+
+def _load(path):
+    from src.personas.store import load_personas_from_file
+    loaded = load_personas_from_file(file_path_override=str(path))
+    assert loaded is not None
+    return loaded
+
+
+def test_migration_moves_each_tool_to_what_it_did(tmp_path):
+    loaded = _load(_write_old(tmp_path))
+
+    hypr = loaded["hypr"].get_tool_policy()
+    assert (hypr.allow, hypr.ask) == (["pve_status"], ["reboot_node", "set_active_model"])
+
+    stagr = loaded["stagr"].get_tool_policy()
+    # DP-496 let exactly these two run unprompted; the network requests asked.
+    assert stagr.allow == ["stagr_shell", "queue_codr_task", "copy_from_codr", "list_web_access"]
+    assert stagr.ask == ["request_network", "request_web_access"]
+
+    joy = loaded["joy"].get_tool_policy()
+    assert joy.allow == ["search_tickets"]
+    assert joy.ask == ["merge_tickets", "create_ticket", "update_ticket"]
+    assert loaded["joy"].get_explicit_overrides() == ["untrusted_read_network_write"]
+
+
+def test_migration_expands_a_stored_wildcard_at_defaults(tmp_path):
+    legacy = _load(_write_old(tmp_path))["legacy"].get_tool_policy()
+    assert "*" not in legacy.allow + legacy.ask
+    assert "web_search" in legacy.allow and "delete_user" in legacy.ask
+    assert not [n for n in legacy.allow + legacy.ask if n.startswith("mcp__")]
+
+
+def test_migration_is_logged_per_persona(tmp_path, caplog):
+    with caplog.at_level(_logging.WARNING, logger="src.personas.store"):
+        _load(_write_old(tmp_path))
+    text = caplog.text
+    assert "Persona 'hypr' tool policy migrated (DP-497): reboot_node: allow -> ask" in text
+    assert "Persona 'stagr' tool policy migrated (DP-497): request_network: allow -> ask" in text
+    assert "Persona 'stagr' tool policy migrated (DP-497): list_web_access: ask -> allow" in text
+    assert "queue_codr_task:" not in text  # unchanged, not logged
+
+
+def test_migration_is_saved_stamped_and_loses_nothing(tmp_path):
+    path = _write_old(tmp_path)
+    _load(path)
+    saved = _json.loads(path.read_text(encoding="utf-8"))
+
+    entries = {e.get("name"): e for e in saved["personas"]}
+    assert None in entries, "the skipped entry survives the rewrite"
+    assert saved["models"] == {"keep": "me"}
+    for name in ("hypr", "stagr", "joy", "legacy"):
+        assert entries[name]["tool_policy"]["policy_version"] == 2
+    assert entries["hypr"]["tool_policy"]["ask"] == ["reboot_node", "set_active_model"]
+    # overrides that lived inside tool_policy move to the top-level key
+    assert entries["joy"]["explicit_overrides"] == ["untrusted_read_network_write"]
+    assert "explicit_overrides" not in entries["joy"]["tool_policy"]
+
+
+def test_migration_runs_once(tmp_path, caplog):
+    """Idempotent: a second load changes nothing and writes nothing."""
+    path = _write_old(tmp_path)
+    first = {n: p.get_tool_policy().to_dict() for n, p in _load(path).items()}
+    after_first = path.read_bytes()
+
+    caplog.clear()
+    with caplog.at_level(_logging.WARNING, logger="src.personas.store"):
+        second = {n: p.get_tool_policy().to_dict() for n, p in _load(path).items()}
+    assert second == first
+    assert path.read_bytes() == after_first
+    assert "migrated" not in caplog.text
+
+
+def test_an_ask_on_a_read_set_after_migration_is_kept(tmp_path):
+    """The point of the version stamp: a later ask on a read is Adam's
+    choice, not a v1 policy that never prompted."""
+    path = _write_old(tmp_path)
+    _load(path)
+    saved = _json.loads(path.read_text(encoding="utf-8"))
+    stagr = next(e for e in saved["personas"] if e.get("name") == "stagr")
+    stagr["tool_policy"]["allow"].remove("stagr_shell")
+    stagr["tool_policy"]["ask"].append("stagr_shell")
+    path.write_text(_json.dumps(saved), encoding="utf-8")
+
+    policy = _load(path)["stagr"].get_tool_policy()
+    assert policy.state_of("stagr_shell") == "ask"
+
+
+def test_a_stamped_policy_is_not_migrated(tmp_path):
+    """Key present (policy_version 2): a write under allow stays allow."""
+    data = {"personas": [{"name": "p", "model_name": "m", "prompt": "p",
+                          "tool_policy": {"allow": ["create_ticket"], "ask": ["web_search"],
+                                          "policy_version": 2}}]}
+    path = _write_old(tmp_path, data)
+    before = path.read_bytes()
+    policy = _load(path)["p"].get_tool_policy()
+    assert (policy.allow, policy.ask) == (["create_ticket"], ["web_search"])
+    assert path.read_bytes() == before
+
+
+def test_an_unregistered_tool_is_left_as_stored_and_recorded(tmp_path):
+    """An MCP tool registers after personas load, so the migration cannot
+    read it: it stays exactly as stored, recorded in `unmigrated`, and is
+    classified when its server registers (tests/tools/test_mcp_client.py).
+    Guessing would be wrong either way."""
+    data = {"personas": [{"name": "p", "model_name": "m", "prompt": "p",
+                          "tool_policy": {"allow": ["mcp__home__do_thing", "create_ticket"],
+                                          "ask": []}}]}
+    path = _write_old(tmp_path, data)
+    policy = _load(path)["p"].get_tool_policy()
+    assert policy.allow == ["mcp__home__do_thing"] and policy.ask == ["create_ticket"]
+    assert policy.unmigrated == ["mcp__home__do_thing"]
+    stored = _json.loads(path.read_text(encoding="utf-8"))["personas"][0]["tool_policy"]
+    assert stored["unmigrated"] == ["mcp__home__do_thing"] and stored["policy_version"] == 2
+
+    # A second load (server still down) keeps it as stored and writes nothing.
+    before = path.read_bytes()
+    again = _load(path)["p"].get_tool_policy()
+    assert again.unmigrated == ["mcp__home__do_thing"] and path.read_bytes() == before
+
+
+def test_an_unclassified_name_is_gated_by_what_it_did_before():
+    """Belt and braces: the gate never trusts a stale allow on an unclassified
+    name. A registered write still asks; a read runs; unregistered asks (and
+    is not offered anyway)."""
+    from src.tool_policy import ToolPolicy
+    write = {"is_write": True, "function": {"name": "mcp__s__w"}, "capabilities": {}}
+    read = {"is_write": False, "function": {"name": "mcp__s__r"}, "capabilities": {}}
+    policy = ToolPolicy(allow=["mcp__s__w", "mcp__s__r"], unmigrated=["mcp__s__w", "mcp__s__r"])
+    assert policy.requires_approval("mcp__s__w", write)
+    assert not policy.requires_approval("mcp__s__r", read)
+    assert policy.requires_approval("mcp__s__w", None)
+    assert [t[0] for t in policy.classify_unmigrated([write, read])] == ["mcp__s__w", "mcp__s__r"]
+    assert (policy.allow, policy.ask, policy.unmigrated) == (["mcp__s__r"], ["mcp__s__w"], [])
+
+
+def test_system_personas_migrate_in_memory_only(tmp_path, monkeypatch):
+    """The system file ships in the image and is never saved."""
+    from src.personas.store import load_system_personas_from_file
+    data = {"personas": [{"name": "sys", "model_name": "m", "prompt": "p",
+                          "enabled_tools": ["web_search", "create_ticket"]}]}
+    path = _write_old(tmp_path, data)
+    before = path.read_bytes()
+    monkeypatch.setattr(global_config, "SYSTEM_PERSONA_FILE", str(path))
+    policy = load_system_personas_from_file()["sys"].get_tool_policy()
+    assert (policy.allow, policy.ask) == (["web_search"], ["create_ticket"])
+    assert path.read_bytes() == before
+
+
+def test_the_shipped_persona_configs_are_current():
+    """config/ carries the corrected states (DP-497): every tool_policy is
+    stamped, nothing uses '*', and loading changes nothing."""
+    from pathlib import Path
+    from src.personas.policy_migration import resolve_stored_policy
+    root = Path(__file__).resolve().parents[1] / "config"
+    files = [root / "default_personas.json", root / "system_personas.json",
+             *sorted((root / "optional_personas").glob("*.json"))]
+    for f in files:
+        data = _json.loads(f.read_text(encoding="utf-8"))
+        for entry in (data if isinstance(data, list) else data["personas"]):
+            assert "*" not in (entry.get("enabled_tools") or []), (f.name, entry["name"])
+            policy = entry.get("tool_policy")
+            if policy is None:
+                continue
+            assert policy.get("policy_version") == 2, (f.name, entry["name"])
+            _, changes, needs_save = resolve_stored_policy(entry, get_all_tool_definitions())
+            assert changes == [] and not needs_save, (f.name, entry["name"], changes)
+
+
+def test_a_shipped_template_is_migrated_in_memory_only(tmp_path, monkeypatch):
+    """A file under CONFIG_DIR seeds the save file and is loaded directly by
+    tests: migrating it must never rewrite the repo's own config."""
+    monkeypatch.setattr(global_config, "CONFIG_DIR", str(tmp_path))
+    path = _write_old(tmp_path)
+    before = path.read_bytes()
+    policy = _load(path)["hypr"].get_tool_policy()
+    assert policy.ask == ["reboot_node", "set_active_model"]
+    assert path.read_bytes() == before
+
+
+def test_loading_the_real_default_personas_leaves_it_untouched():
+    import os
+    path = os.path.join(global_config.CONFIG_DIR, "default_personas.json")
+    with open(path, "rb") as f:
+        before = f.read()
+    _load(path)
+    with open(path, "rb") as f:
+        assert f.read() == before

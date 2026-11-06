@@ -267,7 +267,7 @@ def test_the_shipped_persona_validates_clean_and_ships_unrestricted():
     them: stagr asks for a switch, it never flips one. The file is public, so
     the operator sets origin_allowlist on their own instance (as for hypr)."""
     persona = json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]
-    policy = ToolPolicy(**persona["tool_policy"])
+    policy = ToolPolicy.from_dict(persona["tool_policy"])
     exposed = policy.filter_tools([t for t in ALL_TOOL_DEFINITIONS
                                    if t.get("service_binding") in (None, *persona["service_bindings"])])
     names = {t["function"]["name"] for t in exposed}

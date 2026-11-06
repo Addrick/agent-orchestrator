@@ -20,7 +20,8 @@
         "default": "deny",
         "allow": [],
         "ask": [],
-        "capabilities_required": []
+        "capabilities_required": [],
+        "policy_version": 2
       },
       "meta_visible": false,
       "origin_allowlist": []

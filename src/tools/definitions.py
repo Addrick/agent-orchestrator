@@ -104,17 +104,18 @@ def validate_tool_capabilities(tool: Dict[str, Any]) -> None:
 
     _validate_irreversible_if(name, caps.get("irreversible_if"))
     _validate_is_write(name, tool)
-    _validate_auto_approvable(name, tool)
+    _refuse_removed_keys(name, tool)
 
 
 def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
     """Assert a callable tool declares top-level `is_write` (DP-306).
 
-    `is_write` feeds two of the three approval predicates: `is_write_tool()`
-    (the tool loop's universal write audit) and `mcp_bridge._is_gated` (the
-    autonomous-agent boundary). Both read it as `.get("is_write")`, so a
-    definition that merely OMITS the flag registers cleanly and is then
-    silently ungated -- the happy path and the ungated path look identical.
+    `is_write` feeds `tool_policy.default_tool_state` (DP-497): the state a
+    tool gets when a persona enables it without one, and the state every tool
+    exposed over the MCP bridge sits at (`mcp_bridge._is_gated`). Both read it
+    as `.get("is_write")`, so a definition that merely OMITS the flag
+    registers cleanly and then defaults to allow -- the happy path and the
+    ungated path look identical.
     Every definition carried it before this check existed, but by convention
     only; requiring it is what makes the classification unskippable.
 
@@ -140,26 +141,17 @@ def _validate_is_write(name: str, tool: Dict[str, Any]) -> None:
         )
 
 
-def _validate_auto_approvable(name: str, tool: Dict[str, Any]) -> None:
-    """Assert an optional top-level `auto_approvable` (DP-493) is bool, and
-    only on a reversible write: it lets the persona's tool policy run this
-    write without the approval prompt when it lists the tool under `allow`
-    (DP-496), which must never reach a tool whose effect cannot be taken
-    back."""
-    if "auto_approvable" not in tool:
-        return
-    flag = tool["auto_approvable"]
-    if not isinstance(flag, bool):
+def _refuse_removed_keys(name: str, tool: Dict[str, Any]) -> None:
+    """Refuse `auto_approvable` (DP-493/DP-496, removed by DP-497).
+
+    It used to let a write skip the approval prompt when the persona listed it
+    under allow. Since DP-497 the persona's allow/ask is the only gate for
+    every tool, so the key would do nothing — and a definition that still
+    carried it would read as a gate that is not there."""
+    if "auto_approvable" in tool:
         raise ValueError(
-            f"Tool '{name}' 'auto_approvable' must be bool, got {type(flag).__name__}"
-        )
-    if flag and not tool.get("is_write"):
-        raise ValueError(f"Tool '{name}' is auto_approvable but not is_write")
-    caps = tool.get("capabilities") or {}
-    if flag and (caps.get("irreversible") or caps.get("irreversible_if")
-                 or name in ALWAYS_CONFIRM_TOOLS):
-        raise ValueError(
-            f"Tool '{name}' is irreversible or always-confirm and cannot be auto_approvable"
+            f"Tool '{name}' carries 'auto_approvable', removed by DP-497: "
+            "whether a call prompts is the persona's allow/ask, nothing else"
         )
 
 
@@ -194,10 +186,6 @@ GROUNDING_INCOMPATIBLE_PREFIXES = {'gpt', 'claude', 'gemma', 'local', 'unknown'}
 MODEL_INCOMPATIBLE_TOOLS = {
     'google_grounding_search': GROUNDING_INCOMPATIBLE_PREFIXES,
 }
-
-# Tools that ALWAYS require confirmation, even in AUTONOMOUS mode.
-# These are typically high-impact or destructive operations.
-ALWAYS_CONFIRM_TOOLS = {"merge_tickets", "delete_user"}
 
 _DEFAULT_CAPABILITIES: Dict[str, Any] = {
     "produces_untrusted": False,
@@ -314,19 +302,11 @@ def unregister_tool_definition(tool_name: str) -> bool:
 
 
 def is_write_tool(tool_name: str) -> bool:
-    """Whether a tool is flagged `is_write` (parks for audit). Replaces the
-    former import-time `WRITE_TOOLS` set so runtime-registered tools are
-    covered."""
+    """Whether a tool is flagged `is_write`. Since DP-497 that decides only a
+    tool's default state (`tool_policy.default_tool_state`), not whether a
+    call parks. Replaces the former import-time `WRITE_TOOLS` set so
+    runtime-registered tools are covered."""
     return _REGISTRY.is_write(tool_name)
-
-
-def is_auto_approvable(tool_name: str) -> bool:
-    """Whether a write may run without the approval prompt when the persona's
-    tool policy lists it under `allow` (DP-493, DP-496; the check is
-    `tool_loop._runs_unprompted`). Every other write always prompts. Only
-    reversible writes can carry the flag (`_validate_auto_approvable`)."""
-    tool = _REGISTRY.get(tool_name)
-    return bool(tool and tool.get("auto_approvable") is True and tool.get("is_write"))
 
 
 def get_tool_capabilities(tool_name: str) -> Dict[str, Any]:

@@ -18,11 +18,13 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Iterable, Optional, List
+from typing import Dict, Any, Iterable, Optional, List, Tuple
 
 from config import global_config
+from src.personas.policy_migration import resolve_stored_policy
 from src.tool_policy import ToolPolicy
 from src.tools.composition import validate_policy_composition
+from src.tools.definitions import get_all_tool_definitions
 from src.utils.atomic_json import write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -193,6 +195,50 @@ def _resolve_explicit_overrides(entry: Dict[str, Any]) -> List[str]:
     return list(overrides) if overrides else []
 
 
+def _load_tool_policy(entry: Dict[str, Any], label: str) -> Tuple[ToolPolicy, bool]:
+    """The entry's tool policy in DP-497 terms (`policy_migration`), with
+    each migrated tool logged against the persona. Returns `(policy,
+    needs_save)`; the caller persists the entries that need it."""
+    policy, changes, needs_save = resolve_stored_policy(entry, get_all_tool_definitions())
+    for change in changes:
+        logger.warning(f"{label} tool policy migrated (DP-497): {change}")
+    return policy, needs_save
+
+
+def _persist_migrated_policies(
+    file_path: Any, persona_data: Dict[str, Any],
+    migrated: List[Tuple[Dict[str, Any], ToolPolicy, List[str]]],
+) -> None:
+    """Write each migrated persona's policy back into the save file, in
+    place: only `tool_policy` / `enabled_tools` (and an `explicit_overrides`
+    the old file kept inside `tool_policy`) change, so an entry the loader
+    skipped, or a key it does not know, survives. A failed write is logged
+    and the migration simply runs again on the next load -- it is
+    idempotent over the same stored data (DP-497).
+
+    A file under `CONFIG_DIR` is a shipped template (it seeds the save file,
+    and tests load it directly), never a save file: it is migrated in memory
+    only, so loading it can never rewrite the repo's own config."""
+    try:
+        Path(file_path).resolve().relative_to(Path(global_config.CONFIG_DIR).resolve())
+        logger.info(f"Not saving migrated tool policies to shipped template '{file_path}'.")
+        return
+    except ValueError:
+        pass
+    for entry, policy, overrides in migrated:
+        entry["tool_policy"] = policy.to_dict()
+        entry["enabled_tools"] = sorted(set(policy.allow + policy.ask))
+        if overrides and "explicit_overrides" not in entry:
+            entry["explicit_overrides"] = overrides
+    try:
+        write_json_atomic(file_path, persona_data)
+        logger.warning(
+            f"Saved {len(migrated)} migrated tool policy(ies) to '{file_path}' (DP-497)."
+        )
+    except Exception as e:
+        logger.error(f"Could not save migrated tool policies to '{file_path}': {e}")
+
+
 def _resolve_params_kwargs(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Map a persona JSON entry's nested `params` block to Persona() kwargs.
 
@@ -241,6 +287,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
             persona_data: Dict[str, Any] = json.loads(content)
 
         personas: Dict[str, Persona] = {}
+        migrated: List[Tuple[Dict[str, Any], ToolPolicy, List[str]]] = []
         for new_persona in persona_data.get('personas', []):
             name: Optional[str] = new_persona.get("name")
             if not name:
@@ -248,10 +295,11 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 continue
 
             # --- Composition Validation ---
-            policy_data = new_persona.get("tool_policy")
-            temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            temp_policy, needs_save = _load_tool_policy(new_persona, f"Persona '{name}'")
             explicit_overrides = _resolve_explicit_overrides(new_persona)
             temp_policy.explicit_overrides = explicit_overrides
+            if needs_save:
+                migrated.append((new_persona, temp_policy, explicit_overrides))
 
             # DP-128: a persona that fails composition validation is no longer
             # dropped — it loads *quarantined* (security_block_reasons set) so it
@@ -282,7 +330,7 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 ltm_max_items=new_persona.get("ltm_max_items"),
                 ltm_max_tokens=new_persona.get("ltm_max_tokens"),
                 ltm_budget=new_persona.get("ltm_budget"),
-                tool_policy=new_persona.get("tool_policy"),
+                tool_policy=temp_policy,
                 explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),
@@ -297,6 +345,8 @@ def load_personas_from_file(file_path_override: Optional[str] = None) -> Optiona
                 **_resolve_params_kwargs(new_persona),
             )
 
+        if migrated:
+            _persist_migrated_policies(file_path, persona_data, migrated)
         return personas
 
     except json.JSONDecodeError as e:
@@ -336,8 +386,10 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 continue
 
             # --- Composition Validation ---
-            policy_data = new_persona.get("tool_policy")
-            temp_policy = ToolPolicy.from_dict(policy_data) if policy_data else ToolPolicy.from_legacy_list(new_persona.get("enabled_tools", []))
+            # System personas ship in the image and are never saved, so a
+            # migration here (DP-497) is in memory only; the shipped file
+            # carries current policies, so it is a no-op there.
+            temp_policy, _ = _load_tool_policy(new_persona, f"System persona '{name}'")
             explicit_overrides = _resolve_explicit_overrides(new_persona)
             temp_policy.explicit_overrides = explicit_overrides
 
@@ -367,7 +419,7 @@ def load_system_personas_from_file() -> Dict[str, Any]:
                 ltm_max_items=new_persona.get("ltm_max_items"),
                 ltm_max_tokens=new_persona.get("ltm_max_tokens"),
                 ltm_budget=new_persona.get("ltm_budget"),
-                tool_policy=new_persona.get("tool_policy"),
+                tool_policy=temp_policy,
                 explicit_overrides=explicit_overrides,
                 meta_visible=new_persona.get("meta_visible", False),
                 ingest_bank=new_persona.get("ingest_bank"),

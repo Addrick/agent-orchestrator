@@ -20,6 +20,7 @@ from src.engine import TextEngine
 from src.bootstrap import create_chat_system
 from tests.helpers import make_chat_system
 from src.persona import Persona, MemoryMode
+from src.tools.definitions import get_all_tool_definitions
 from config.global_config import (
     TEST_MEMORY_DATABASE_FILE,
     ZAMMAD_BOT_EMAIL,
@@ -220,7 +221,7 @@ def live_chat_system():
     test_personas = {
         "test_persona": Persona(
             persona_name="test_persona", model_name="mock_model", prompt="You are a test persona.",
-            enabled_tools=['*'], memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10
+            enabled_tools=['*'], tool_definitions=get_all_tool_definitions(), memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10
         ),
         "capped_persona": Persona(
             persona_name='capped_persona', model_name='mock', prompt='talk', history_messages=100

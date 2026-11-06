@@ -3,7 +3,7 @@
 # so personas can hold a ToolPolicy without depending on the tools layer.
 
 import logging
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +16,79 @@ KNOWN_OVERRIDES = frozenset({
 })
 
 
+# DP-497: the serialized policy's semantics version. Absent (1) = before
+# DP-497, when allow/ask on most tools was ignored; 2 = allow/ask is the only
+# approval gate. The persona store migrates a v1 policy once, on load
+# (src/personas/policy_migration.py); every policy written carries 2.
+POLICY_VERSION = 2
+
+WILDCARD_RETIRED = (
+    "The '*' wildcard is retired (DP-497): list each tool by name under "
+    "allow or ask (`set tools all` does that at each tool's default)."
+)
+
+
+def declares_irreversible(definition: Optional[Dict[str, Any]]) -> bool:
+    """Whether a tool definition says its effect may not be undoable:
+    ``capabilities.irreversible``, or an ``irreversible_if`` classifier (it is
+    for some arguments). The static label behind an irreversible tool's
+    default of ask and the warning on setting it to allow (DP-497); the
+    per-call answer is ``definitions.is_irreversible(name, args)``."""
+    caps = (definition or {}).get("capabilities") or {}
+    return bool(caps.get("irreversible") or caps.get("irreversible_if"))
+
+
+def default_tool_state(definition: Optional[Dict[str, Any]]) -> str:
+    """The state a tool gets when it is enabled without one (DP-497): a
+    write or an irreversible tool -> ``ask``, anything else -> ``allow``. No
+    definition -> ``ask``: what it does cannot be read, so it fails closed."""
+    if definition is None:
+        return "ask"
+    if definition.get("is_write") or declares_irreversible(definition):
+        return "ask"
+    return "allow"
+
+
+# The only writes DP-496 let run without a prompt (listed by name under allow,
+# not under ask). The `auto_approvable` key that marked them is gone; the
+# pre-DP-497 rule below must still know what they did.
+DP496_UNPROMPTED_WRITES = frozenset({"queue_codr_task", "copy_from_codr"})
+
+
+def pre_dp497_state(name: str, definition: Dict[str, Any], allow: List[str],
+                    ask: List[str]) -> str:
+    """What a call to a listed tool did before DP-497: ``allow`` (it ran) or
+    ``ask`` (it parked). Reads ran whatever they were listed under; writes
+    parked, except DP-496's two stagr tools listed under allow alone. Needs
+    the tool's definition -- a name whose definition is not registered yet
+    (an MCP tool before its server connects) cannot be classified, and
+    callers leave it as stored (``ToolPolicy.unmigrated``)."""
+    if not definition.get("is_write"):
+        return "allow"
+    if name in DP496_UNPROMPTED_WRITES and name in allow and name not in ask:
+        return "allow"
+    return "ask"
+
+
+def definition_index(definitions: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Name -> definition for every entry with a callable name."""
+    index: Dict[str, Dict[str, Any]] = {}
+    for d in definitions:
+        name = (d.get("function") or {}).get("name")
+        if isinstance(name, str) and name:
+            index[name] = d
+    return index
+
+
 class ToolPolicy:
     """
-    Manages tool permissions and security invariants for a persona or agent.
+    A persona's (or agent's) tools and how each one runs.
+
+    Each tool is in one of three states (DP-497): listed nowhere (off — never
+    offered), under ``allow`` (runs with no prompt), or under ``ask`` (parks
+    for approval). The state is the only approval gate, for reads and writes
+    alike (``requires_approval``). A name under both lists is ask (fails
+    closed).
     """
 
     def __init__(
@@ -27,23 +97,46 @@ class ToolPolicy:
             allow: Optional[List[str]] = None,
             ask: Optional[List[str]] = None,
             capabilities_required: Optional[List[str]] = None,
-            explicit_overrides: Optional[List[str]] = None
+            explicit_overrides: Optional[List[str]] = None,
+            unmigrated: Optional[List[str]] = None,
     ) -> None:
         self.default = default
         self.allow = allow or []
         self.ask = ask or []
         self.capabilities_required = capabilities_required or []
         self.explicit_overrides = explicit_overrides or []
+        # DP-497: names still listed in their pre-DP-497 state because their
+        # definition was not registered when the policy was migrated (an MCP
+        # tool registers after personas load). Set by the persona store only;
+        # emptied by `classify_unmigrated` once the definitions arrive.
+        self.unmigrated: List[str] = list(unmigrated or [])
 
     @classmethod
-    def from_legacy_list(cls, enabled_tools: List[str]) -> "ToolPolicy":
-        """
-        Creates a ToolPolicy from a legacy flat list of tool names.
-        """
-        if "*" in enabled_tools:
-            # The dangerous wildcard case from internal_tool_schema_cleanup.md
-            return cls(default="allow", allow=["*"])
-        return cls(default="deny", allow=enabled_tools)
+    def from_legacy_list(
+            cls, enabled_tools: List[str], definitions: Iterable[Dict[str, Any]],
+    ) -> "ToolPolicy":
+        """A policy enabling ``enabled_tools``, each at its default state
+        (``default_tool_state``: reads allow; writes, irreversible and unknown
+        tools ask).
+
+        ``"*"`` expands to every tool in ``definitions`` by name, at its
+        default (DP-497 retired the wildcard: it would have let a tool added
+        later run unprompted, irreversible ones included, with nobody choosing
+        that). Definitions carrying the ``dynamic`` marker (runtime-registered,
+        e.g. MCP-discovered, DP-268) are never part of the expansion.
+        ``definitions`` is the live catalog — the leaf cannot import it."""
+        index = definition_index(definitions)
+        names: List[str] = []
+        for name in enabled_tools:
+            if name == "*":
+                names.extend(n for n, d in index.items() if not d.get("dynamic"))
+            else:
+                names.append(name)
+        allow: List[str] = []
+        ask: List[str] = []
+        for name in dict.fromkeys(names):
+            (ask if default_tool_state(index.get(name)) == "ask" else allow).append(name)
+        return cls(default="deny", allow=allow, ask=ask)
 
     def to_dict(self) -> Dict[str, Any]:
         # explicit_overrides deliberately absent: it is a privileged persona
@@ -54,34 +147,90 @@ class ToolPolicy:
             "allow": self.allow,
             "ask": self.ask,
             "capabilities_required": self.capabilities_required,
+            "policy_version": POLICY_VERSION,
+            **({"unmigrated": list(self.unmigrated)} if self.unmigrated else {}),
         }
 
-    def allows_unprompted(self, tool_name: str) -> bool:
-        """Whether ``tool_name`` is listed by name under ``allow`` and not
-        under ``ask`` (DP-496). The tool loop runs a write without the
-        approval prompt only when this holds AND the tool's definition is
-        marked ``auto_approvable`` (today: stagr's ``queue_codr_task`` and ``copy_from_codr``).
+    def state_of(self, tool_name: str) -> str:
+        """``off``, ``allow`` or ``ask``; under both lists -> ``ask``."""
+        if tool_name in self.ask:
+            return "ask"
+        if tool_name in self.allow:
+            return "allow"
+        return "off"
 
-        Explicit listing only: the ``["*"]`` wildcard does not count, so a
-        wildcard persona never loses a prompt it had. A name under both lists
-        stays under ``ask`` (fails closed)."""
-        return tool_name in self.allow and tool_name not in self.ask
+    def requires_approval(self, tool_name: str, definition: Optional[Dict[str, Any]]) -> bool:
+        """Whether a call to ``tool_name`` parks for approval (DP-497): its
+        state and nothing else — ask parks, allow runs, read or write.
+
+        A tool listed nowhere is never offered from this policy, so a call to
+        it is refused before it gets here; should one arrive anyway, its
+        default state decides (a write still asks)."""
+        if tool_name in self.unmigrated:
+            # Stored before DP-497 and not classified yet: what it did then
+            # (for any tool that can be unclassified -- never DP-496's two --
+            # that is its default). Unregistered, it is not offered at all.
+            return default_tool_state(definition) == "ask"
+        state = self.state_of(tool_name)
+        if state == "off":
+            return default_tool_state(definition) == "ask"
+        return state == "ask"
+
+    def classify_unmigrated(
+            self, definitions: Iterable[Dict[str, Any]],
+    ) -> List[Tuple[str, str, str]]:
+        """Finish the DP-497 migration for each `unmigrated` name whose
+        definition is now in ``definitions``: move it to what it did before
+        DP-497 (``pre_dp497_state``) and drop it from `unmigrated`. Names
+        still unregistered stay exactly as stored. Returns ``(name, was,
+        now)`` for every name classified, moved or not -- a non-empty result
+        means the stored form changed and should be saved."""
+        if not self.unmigrated:
+            return []
+        index = definition_index(definitions)
+        done: List[Tuple[str, str, str]] = []
+        for name in list(self.unmigrated):
+            definition = index.get(name)
+            if definition is None:
+                continue
+            was = self.state_of(name)
+            now = pre_dp497_state(name, definition, self.allow, self.ask)
+            if name in self.allow and name in self.ask or was != now:
+                self.allow = [n for n in self.allow if n != name]
+                self.ask = [n for n in self.ask if n != name]
+                (self.allow if now == "allow" else self.ask).append(name)
+            self.unmigrated.remove(name)
+            done.append((name, was, now))
+        return done
+
+    def irreversible_allowed(self, definitions: Iterable[Dict[str, Any]]) -> List[str]:
+        """Names under allow (not ask) whose definition declares them
+        irreversible — what an edit warns about (DP-497)."""
+        index = definition_index(definitions)
+        return [n for n in self.allow
+                if n not in self.ask and declares_irreversible(index.get(n))]
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolPolicy":
         # explicit_overrides in a generic policy dict is IGNORED (DP-277): it
         # is the kill switch for the composition invariants, so it must not be
         # settable via any caller-supplied dict (PATCH body, `set tool_policy`).
-        # Legacy saved values are migrated by the persona store, not here.
+        # Legacy saved values are migrated by the persona store, not here —
+        # as are a saved "*" and a pre-DP-497 policy (no `policy_version`):
+        # the dict given here already means what it says (DP-497).
         if "explicit_overrides" in data:
             logger.warning(
                 "Ignoring 'explicit_overrides' in generic tool_policy dict — "
                 "overrides require the dedicated operator setter (DP-277)."
             )
+        allow = data.get("allow")
+        ask = data.get("ask")
+        if "*" in (allow or []) or "*" in (ask or []):
+            raise ValueError(WILDCARD_RETIRED)
         return cls(
-            default=data.get("default", "deny"),
-            allow=data.get("allow"),
-            ask=data.get("ask"),
+            default="deny",
+            allow=allow,
+            ask=ask,
             capabilities_required=data.get("capabilities_required"),
         )
 
@@ -206,37 +355,18 @@ class ToolPolicy:
 
     def filter_tools(self, all_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Returns the subset of tools allowed by this policy.
+        Returns the subset of tools this policy lists (allow + ask).
 
-        The ``['*']`` wildcard NEVER auto-includes definitions carrying the
-        ``dynamic`` marker (runtime-registered, e.g. MCP-discovered tools,
-        DP-268): a third-party server registering one untrusted+write tool
-        must not silently widen — and quarantine-cascade — every wildcard
-        persona. Dynamic tools require explicit allow/ask listing, which works
-        under a wildcard policy too.
+        Naming a tool is the only way in (DP-497 retired the ``['*']``
+        wildcard), so a runtime-registered tool (``dynamic``, e.g. MCP,
+        DP-268) reaches a persona only when that persona names it.
 
         ``composition.resolve_policy_tools`` delegates here, so exposure
-        filtering and composition validation see the same expansion by
+        filtering and composition validation see the same set by
         construction.
         """
-        allowed_names = set(self.allow)
-        ask_names = set(self.ask)
-
-        if self.default == "allow" and "*" in self.allow:
-            return [
-                t for t in all_tools
-                if not t.get("dynamic")
-                or t.get("function", {}).get("name") in allowed_names
-                or t.get("function", {}).get("name") in ask_names
-            ]
-
-        filtered = []
-        for tool in all_tools:
-            name = tool.get("function", {}).get("name")
-            if name in allowed_names or name in ask_names:
-                filtered.append(tool)
-
-        return filtered
+        listed = set(self.allow) | set(self.ask)
+        return [t for t in all_tools if t.get("function", {}).get("name") in listed]
 
 
 def callable_tool_names(tools: Optional[Iterable[Dict[str, Any]]]) -> FrozenSet[str]:

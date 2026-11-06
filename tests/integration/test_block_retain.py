@@ -23,6 +23,7 @@ from config.global_config import RETAIN_IDLE_FINAL_SECONDS, RETAIN_IDLE_TRIM_SEC
 from src.memory.context_budget import estimate_tokens
 from src.memory.retain_blocks import CONTEXT_PREAMBLE
 from src.persona import MemoryMode
+from src.tools.definitions import get_all_tool_definitions
 
 pytestmark = pytest.mark.integration
 
@@ -61,7 +62,7 @@ def setup(mocked_chat_system):
     persona = chat_system.personas["test_persona"]
     persona.set_history_messages(1000)
     persona.set_inject_timestamp(False)
-    persona.set_enabled_tools([])
+    persona.set_enabled_tools([], get_all_tool_definitions())
     persona.set_max_context_tokens(2000)
     persona.set_response_token_limit(100)
     hs = FakeHindsight()

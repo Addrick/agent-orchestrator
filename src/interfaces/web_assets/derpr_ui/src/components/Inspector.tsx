@@ -535,9 +535,54 @@ function Pair({ children }: { children: React.ReactNode }) {
 // JSON setter. Persona refetch re-derives the baseline so dirtiness clears.
 
 type ToolState = 'off' | 'allow' | 'ask'
+// A bulk button: a state, or 'on' = each tool at its own default (DP-497).
+type BulkState = ToolState | 'on'
+
+// DP-497: allow/ask is the only approval gate, for every tool — allow runs
+// with no prompt, ask parks, reads and writes alike. A tool enabled without an
+// explicit state gets its default: reads allow, writes and irreversible tools
+// ask. The catalog sends it (`default_state`); derive it for an older engine.
+function defaultState(t: ToolDef): ToolState {
+  if (t.default_state) return t.default_state
+  return t.is_write || t.irreversible ? 'ask' : 'allow'
+}
+
+// A saved tool name with no registered definition (its MCP server is down or
+// not yet connected) is still a tool: same states, same bulk buttons. What its
+// definition would decide falls back the way the engine does with none
+// (`tool_policy.default_tool_state(None)`): default ask, and allow is
+// confirmed because it may be irreversible.
+const UNREGISTERED_DEFAULT: ToolState = 'ask'
+
+// Setting an irreversible tool to allow means it runs with no prompt; the
+// operator confirms that, naming each one (DP-497). `unregistered` names
+// cannot be read, so they are named too. True = go ahead.
+function confirmIrreversibleAllow(ts: ToolDef[], unregistered: string[] = []): boolean {
+  const names = ts.filter((t) => t.irreversible).map((t) => t.name)
+  const parts: string[] = []
+  if (names.length) parts.push(`${names.join(', ')} ${names.length === 1 ? 'is' : 'are'} irreversible.`)
+  if (unregistered.length) {
+    parts.push(
+      `${unregistered.join(', ')} ${unregistered.length === 1 ? 'is' : 'are'} not registered, ` +
+        `so ${unregistered.length === 1 ? 'it' : 'they'} may be irreversible.`,
+    )
+  }
+  if (parts.length === 0) return true
+  return window.confirm(`${parts.join(' ')} Set to allow, they run without asking you first. Continue?`)
+}
+
+const BULK_STATES: BulkState[] = ['off', 'on', 'allow', 'ask']
+
+function bulkTitle(what: string, s: BulkState): string {
+  return s === 'on'
+    ? `enable ${what} at their defaults: reads allow, writes ask`
+    : `set ${what} to ${s}`
+}
 
 // catalog group key for tools with no owning service (built-in / local)
 const BUILTIN_GROUP = 'built-in'
+// Collapse key for stored names with no catalog entry (not a service binding).
+const UNAVAILABLE_GROUP = '\u0000unavailable'
 
 // The three security-invariant escape hatches in policy.py:validate_composition.
 const OVERRIDE_FLAGS: { key: string; label: string }[] = [
@@ -547,56 +592,47 @@ const OVERRIDE_FLAGS: { key: string; label: string }[] = [
 ]
 
 interface PolicyDraft {
-  default: string // 'deny' | 'allow'
   states: Record<string, ToolState>
   overrides: Set<string>
   // service bindings the persona is granted (gate 2). A service group's tools
   // are inert until its binding is listed here, regardless of allow/ask.
   bindings: Set<string>
-  // wildcard allow=['*'] is preserved verbatim until the user edits the toolset,
-  // so an "allow everything (incl. future tools)" policy isn't silently frozen
-  // into the current catalog.
-  wildcard: boolean
 }
 
 function deriveDraft(persona: Persona | null, tools: ToolDef[]): PolicyDraft {
   const tp = persona?.tool_policy || {}
-  const def = (tp.default as string) || 'deny'
   const allow = new Set(tp.allow || [])
   const ask = new Set(tp.ask || [])
-  const wildcard = def === 'allow' && allow.has('*')
   const states: Record<string, ToolState> = {}
   for (const t of tools) {
     if (ask.has(t.name)) states[t.name] = 'ask'
-    else if (wildcard || allow.has(t.name)) states[t.name] = 'allow'
+    else if (allow.has(t.name)) states[t.name] = 'allow'
     else states[t.name] = 'off'
   }
+  // A stored name the catalog lacks (its MCP server is down or not yet
+  // registered) keeps its state, so a save while the server is away writes it
+  // back instead of dropping it. `set tool_policy` replaces the whole policy.
+  const known = new Set(tools.map((t) => t.name))
+  for (const n of [...allow, ...ask]) {
+    if (!known.has(n)) states[n] = ask.has(n) ? 'ask' : 'allow'
+  }
   return {
-    default: def,
     states,
     overrides: new Set(tp.explicit_overrides || []),
     bindings: new Set(persona?.service_bindings || []),
-    wildcard,
   }
 }
 
 // Build the tool_policy dict the engine expects. `capabilities_required` is
 // passed through untouched (not editable here).
-function draftToPolicy(
-  draft: PolicyDraft,
-  tools: ToolDef[],
-  persona: Persona | null,
-): Record<string, unknown> {
-  const allTouchedAllowed =
-    draft.default === 'allow' &&
-    draft.wildcard &&
-    tools.every((t) => draft.states[t.name] === 'allow')
-  const allow = allTouchedAllowed
-    ? ['*']
-    : tools.filter((t) => draft.states[t.name] === 'allow').map((t) => t.name)
-  const ask = tools.filter((t) => draft.states[t.name] === 'ask').map((t) => t.name)
+function draftToPolicy(draft: PolicyDraft, persona: Persona | null): Record<string, unknown> {
+  // Every tool by name: the '*' wildcard is retired (DP-497). Built from the
+  // draft, not the catalog, so names of an unregistered server survive.
+  const names = Object.keys(draft.states)
+  const allow = names.filter((n) => draft.states[n] === 'allow')
+  const ask = names.filter((n) => draft.states[n] === 'ask')
   return {
-    default: draft.default,
+    default: 'deny',
     allow,
     ask,
     // explicit_overrides deliberately absent: the engine ignores it in a
@@ -613,9 +649,9 @@ function sameSet(a: Set<string>, b: Set<string>): boolean {
 }
 
 function policyChanged(a: PolicyDraft, b: PolicyDraft): boolean {
-  if (a.default !== b.default) return true
   const keys = new Set([...Object.keys(a.states), ...Object.keys(b.states)])
-  for (const k of keys) if (a.states[k] !== b.states[k]) return true
+  // absent = off: a removed unavailable name is 'off' in the draft, absent once saved
+  for (const k of keys) if ((a.states[k] ?? 'off') !== (b.states[k] ?? 'off')) return true
   return false
 }
 
@@ -689,19 +725,35 @@ function ToolsPane({
   )
   const dirty = policyDirty || bindingsDirty || overridesDirty
 
-  const setToolState = (name: string, s: ToolState) =>
-    setDraft((d) => ({ ...d, states: { ...d.states, [name]: s } }))
+  const setToolState = (t: ToolDef, s: ToolState) => {
+    if (s === 'allow' && draft.states[t.name] !== 'allow' && !confirmIrreversibleAllow([t])) return
+    setDraft((d) => ({ ...d, states: { ...d.states, [t.name]: s } }))
+  }
   // Bulk setters (DP-231): flip every tool, or every tool in one service
-  // group, to the same state in a single click — the "check all" affordance for
-  // a fresh persona that wants most tools on (or off).
-  const setManyStates = (names: string[], s: ToolState) =>
+  // group, in a single click — the "check all" affordance for a fresh persona
+  // that wants most tools on (or off). 'on' puts each at its default (DP-497).
+  // `unregistered` = names with no catalog entry, covered by the same click.
+  const setManyStates = (ts: ToolDef[], s: BulkState, unregistered: string[] = []) => {
+    const next = (t: ToolDef): ToolState => (s === 'on' ? defaultState(t) : s)
+    const nextU: ToolState = s === 'on' ? UNREGISTERED_DEFAULT : s
+    const newlyAllowed = ts.filter((t) => next(t) === 'allow' && draft.states[t.name] !== 'allow')
+    const newlyAllowedU =
+      nextU === 'allow' ? unregistered.filter((n) => draft.states[n] !== 'allow') : []
+    if (!confirmIrreversibleAllow(newlyAllowed, newlyAllowedU)) return
     setDraft((d) => {
       const states = { ...d.states }
-      for (const n of names) states[n] = s
+      for (const t of ts) states[t.name] = next(t)
+      for (const n of unregistered) states[n] = nextU
       return { ...d, states }
     })
-  const setAllState = (s: ToolState) => setManyStates(tools.map((t) => t.name), s)
-  const setDefault = (def: string) => setDraft((d) => ({ ...d, default: def }))
+  }
+  // Saved names with no catalog entry (server down / not yet registered). They
+  // stay in the draft, so a save writes them back; "off" drops one.
+  const catalogNames = useMemo(() => new Set(tools.map((t) => t.name)), [tools])
+  const unavailable = Object.keys(draft.states)
+    .filter((n) => !catalogNames.has(n))
+    .sort()
+  const setAllState = (s: BulkState) => setManyStates(tools, s, unavailable)
   const toggleBinding = (b: string) =>
     setDraft((d) => {
       const next = new Set(d.bindings)
@@ -728,33 +780,56 @@ function ToolsPane({
     setNote(null)
   }
 
+  // the off · allow · ask buttons for one tool; `confirmsAllow` = allow will
+  // ask to confirm (irreversible, or unregistered so it may be)
+  const triState = (name: string, confirmsAllow: boolean, pick: (s: ToolState) => void) => {
+    const st = draft.states[name] ?? 'off'
+    return (
+      <div className="tristate" role="group" aria-label={`${name} policy`}>
+        {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
+          <button
+            key={s}
+            className={'tri' + (st === s ? ' on ' + s : '')}
+            disabled={busy}
+            title={
+              s === 'off'
+                ? 'tool hidden from the model'
+                : s === 'allow'
+                  ? confirmsAllow
+                    ? 'runs with no prompt — may be irreversible, you will be asked to confirm'
+                    : 'runs with no prompt when the model calls it'
+                  : 'parks for your approval before running'
+            }
+            onClick={() => pick(s)}
+          >
+            {s}
+          </button>
+        ))}
+      </div>
+    )
+  }
+
+  // a saved name with no registered definition: tri-state, no badges to show
+  const unregisteredRow = (n: string) => (
+    <div className="toolrow" key={n}>
+      <div className="tt">
+        <span className="nm">{n}</span>
+        {triState(n, true, (s) => setManyStates([], s, [n]))}
+      </div>
+      <div className="ds">
+        not registered (its server is down or not connected yet) — kept as set here; off drops it
+      </div>
+    </div>
+  )
+
   // one tool's row (tri-state + capability badges)
   const toolRow = (t: ToolDef) => {
     const caps = t.capabilities
-    const st = draft.states[t.name] ?? 'off'
     return (
       <div className="toolrow" key={t.name}>
         <div className="tt">
           <span className="nm">{t.name}</span>
-          <div className="tristate" role="group" aria-label={`${t.name} policy`}>
-            {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
-              <button
-                key={s}
-                className={'tri' + (st === s ? ' on ' + s : '')}
-                disabled={busy}
-                title={
-                  s === 'off'
-                    ? 'tool hidden from the model'
-                    : s === 'allow'
-                      ? 'auto-runs when the model calls it'
-                      : 'parks for CONFIRM approval before running'
-                }
-                onClick={() => setToolState(t.name, s)}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
+          {triState(t.name, !!t.irreversible, (s) => setToolState(t, s))}
         </div>
         <div className="ds">{t.description}</div>
         <div className="tags">
@@ -776,6 +851,7 @@ function ToolsPane({
             {caps.sensitivity}
           </span>
           <span className={'badge ' + caps.locality}>{caps.locality}</span>
+          {t.irreversible && <span className="badge high">irreversible</span>}
           {caps.produces_untrusted && <span className="badge low">untrusted</span>}
         </div>
       </div>
@@ -796,7 +872,7 @@ function ToolsPane({
         last = await store.runToolsCommand(`set service_bindings ${list}`)
       }
       if (policyDirty) {
-        const policy = draftToPolicy(draft, tools, persona)
+        const policy = draftToPolicy(draft, persona)
         // compact JSON (no spaces) survives the dev-command whitespace tokenizer
         last = await store.runToolsCommand(`set tool_policy ${JSON.stringify(policy)}`)
       }
@@ -832,23 +908,15 @@ function ToolsPane({
       )}
       {note && <div className={'toolnote ' + note.kind}>{note.text}</div>}
 
-      <div className="polhead">
-        <span className="lbl">default</span>
-        <select value={draft.default} onChange={(e) => setDefault(e.target.value)}>
-          <option value="deny">deny — only listed tools</option>
-          <option value="allow">allow — all tools (incl. wildcard)</option>
-        </select>
-      </div>
-
       <div className="bulkrow">
         <span className="lbl">set all tools</span>
         <div className="tristate" role="group" aria-label="set all tools">
-          {(['off', 'allow', 'ask'] as ToolState[]).map((s) => (
+          {BULK_STATES.map((s) => (
             <button
               key={s}
               className="tri"
               disabled={busy}
-              title={`set every tool to ${s}`}
+              title={bulkTitle('every tool', s)}
               onClick={() => setAllState(s)}
             >
               {s}
@@ -882,21 +950,41 @@ function ToolsPane({
         </>
       )}
 
-      {groups.map(([key, groupTools]) => {
-        const bindingOff = key !== BUILTIN_GROUP && !draft.bindings.has(key)
-        const isCollapsed = !expanded.has(key)
-        const nAllow = groupTools.filter((t) => draft.states[t.name] === 'allow').length
-        const nAsk = groupTools.filter((t) => draft.states[t.name] === 'ask').length
-        const label = key === BUILTIN_GROUP ? 'built-in · local' : key
+      {[
+        ...groups.map(([key, groupTools]) => ({
+          key,
+          label: key === BUILTIN_GROUP ? 'built-in · local' : key,
+          names: groupTools.map((t) => t.name),
+          warn: key !== BUILTIN_GROUP && !draft.bindings.has(key) ? 'binding off' : '',
+          bulk: (s: BulkState) => setManyStates(groupTools, s),
+          rows: () => groupTools.map((t) => toolRow(t)),
+        })),
+        // saved names with no registered definition: an ordinary group, last
+        ...(unavailable.length
+          ? [
+              {
+                key: UNAVAILABLE_GROUP,
+                label: 'unavailable',
+                names: unavailable,
+                warn: 'not registered',
+                bulk: (s: BulkState) => setManyStates([], s, unavailable),
+                rows: () => unavailable.map((n) => unregisteredRow(n)),
+              },
+            ]
+          : []),
+      ].map((g) => {
+        const isCollapsed = !expanded.has(g.key)
+        const nAllow = g.names.filter((n) => draft.states[n] === 'allow').length
+        const nAsk = g.names.filter((n) => draft.states[n] === 'ask').length
         return (
-          <div key={key}>
+          <div key={g.key}>
             <div
               className={'section toolgrp' + (isCollapsed ? ' collapsed' : '')}
-              onClick={() => toggleGroup(key)}
+              onClick={() => toggleGroup(g.key)}
             >
-              {label}
-              <span className="pill">{groupTools.length}</span>
-              {bindingOff && <span className="pill bindwarn">binding off</span>}
+              {g.label}
+              <span className="pill">{g.names.length}</span>
+              {g.warn && <span className="pill bindwarn">{g.warn}</span>}
               <span className="desc">
                 {nAllow ? `${nAllow} allow` : ''}
                 {nAllow && nAsk ? ' · ' : ''}
@@ -906,16 +994,16 @@ function ToolsPane({
               <span
                 className="grpbulk tristate"
                 role="group"
-                aria-label={`set all ${label} tools`}
+                aria-label={`set all ${g.label} tools`}
                 onClick={(e) => e.stopPropagation()}
               >
-                {(['off', 'allow'] as ToolState[]).map((s) => (
+                {BULK_STATES.map((s) => (
                   <button
                     key={s}
                     className="tri"
                     disabled={busy}
-                    title={`set all ${label} tools to ${s}`}
-                    onClick={() => setManyStates(groupTools.map((t) => t.name), s)}
+                    title={bulkTitle(`all ${g.label} tools`, s)}
+                    onClick={() => g.bulk(s)}
                   >
                     {s}
                   </button>
@@ -923,7 +1011,7 @@ function ToolsPane({
               </span>
               <span className="car">▾</span>
             </div>
-            {!isCollapsed && groupTools.map((t) => toolRow(t))}
+            {!isCollapsed && g.rows()}
           </div>
         )
       })}

@@ -19,6 +19,7 @@ import pytest
 from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.persona import ExecutionMode, MemoryMode, Persona
+from src.tools.definitions import get_all_tool_definitions
 from tests.helpers import make_chat_system, offer_tools
 from tests.live.test_repropose_live import _Probe, PERSONA
 
@@ -39,7 +40,7 @@ def probe_harness():
     mm.create_schema()
     persona = Persona(
         persona_name=PERSONA, model_name="local", prompt="p",
-        enabled_tools=["create_ticket"],
+        enabled_tools=["create_ticket"], tool_definitions=get_all_tool_definitions(),
         memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=20,
     )
     persona.set_execution_mode(ExecutionMode.CONFIRM)

@@ -1,12 +1,13 @@
 # tests/test_stagr_codr_handoff.py
 """DP-493: stagr hears when codr finishes a ticket it queued, and may queue
 the next without a prompt when its tool policy lists `queue_codr_task` under
-`allow` (DP-496; the same holds for its other three gated tools).
+`allow` (DP-497: allow/ask decides for every tool, so the same holds for its
+other three gated tools).
 
 The resume itself is the DP-345 deferral mechanism, pinned end to end in
 tests/integration/test_unprompted_write_deferral.py. Here: the pieces around
-it — which tickets wake stagr, what the wake carries, the allow/ask gate, the
-flag's guard and the deferral's longer lifetime."""
+it — which tickets wake stagr, what the wake carries, the allow/ask gate and
+the deferral's longer lifetime."""
 
 import asyncio
 import json
@@ -25,8 +26,8 @@ from src.persona import Persona
 from src.persona_fields import PERSONA_FIELDS
 from src.stagr.codr_ticket import ATTEMPT_ACTION, attempt_context
 from src.tool_policy import ToolPolicy
-from src.tools.definitions import ALL_TOOL_DEFINITIONS, is_auto_approvable, validate_tool_capabilities
-from src.tools.tool_loop import _runs_unprompted
+from src.tools.definitions import ALL_TOOL_DEFINITIONS
+from src.tools.tool_loop import _needs_approval
 from tests.test_codr_agent import _agent, _task
 
 
@@ -187,12 +188,11 @@ def test_wake_result_tolerates_an_unreadable_payload():
     assert result["ticket"] == "CD-009" and result["last_outcome"] == "pass"
 
 
-# --- the allow/ask gate (DP-496) --------------------------------------------
+# --- the allow/ask gate (DP-496, DP-497) -------------------------------------
 
-# Every gated stagr tool ships under ask; only the first two may be set to allow.
-UNPROMPTABLE = ("queue_codr_task", "copy_from_codr")
-ALWAYS_ASK = ("request_network", "request_web_access")
-GATED = UNPROMPTABLE + ALWAYS_ASK
+# Every gated stagr tool ships under ask; since DP-497 any of them may be set
+# to allow, like every other tool.
+GATED = ("queue_codr_task", "copy_from_codr", "request_network", "request_web_access")
 _STAGR_JSON = Path(__file__).resolve().parents[1] / "config" / "optional_personas" / "stagr.json"
 
 
@@ -202,15 +202,13 @@ def _persona(**policy):
     return persona
 
 
-@pytest.mark.parametrize("name", UNPROMPTABLE)
+def _runs_unprompted(persona, name):
+    return not _needs_approval(persona, name)
+
+
+@pytest.mark.parametrize("name", GATED)
 def test_a_gated_stagr_tool_under_allow_runs_unprompted(name):
     assert _runs_unprompted(_persona(allow=[name]), name)
-
-
-@pytest.mark.parametrize("name", ALWAYS_ASK)
-def test_a_network_request_under_allow_still_parks(name):
-    """Adam, DP-496: a switch or a new host always waits for him."""
-    assert not _runs_unprompted(_persona(allow=[name]), name)
 
 
 @pytest.mark.parametrize("name", GATED)
@@ -222,27 +220,30 @@ def test_listed_under_both_ask_wins():
     assert not _runs_unprompted(_persona(allow=["queue_codr_task"], ask=["queue_codr_task"]), "queue_codr_task")
 
 
-def test_the_wildcard_is_not_an_explicit_allow():
-    persona = _persona(allow=["*"])
-    persona.set_tool_policy({"default": "allow", "allow": ["*"]})
-    assert not any(_runs_unprompted(persona, name) for name in GATED)
-
-
 @pytest.mark.parametrize("name", ["create_ticket", "set_sandbox_net", "merge_tickets"])
-def test_any_other_write_under_allow_still_parks(name):
-    """Scope: only the marked tools follow allow/ask."""
-    assert not _runs_unprompted(_persona(allow=[name]), name)
+def test_any_other_write_follows_allow_too(name):
+    """DP-497: no tool is outside the rule -- an irreversible one included
+    (setting it to allow is warned about, not refused)."""
+    assert _runs_unprompted(_persona(allow=[name]), name)
+    assert not _runs_unprompted(_persona(ask=[name]), name)
 
 
-def test_a_stand_in_persona_never_runs_a_write_unprompted():
+def test_a_read_under_ask_parks():
+    assert not _runs_unprompted(_persona(ask=["stagr_shell"]), "stagr_shell")
+    assert _runs_unprompted(_persona(allow=["stagr_shell"]), "stagr_shell")
+
+
+def test_a_stand_in_persona_gets_each_tools_default():
+    """No ToolPolicy (a test double): a write asks, a read runs."""
     assert not _runs_unprompted(SimpleNamespace(), "queue_codr_task")
     assert not _runs_unprompted(SimpleNamespace(get_tool_policy=lambda: {"allow": list(GATED)}), "queue_codr_task")
+    assert _runs_unprompted(SimpleNamespace(), "stagr_shell")
 
 
 def test_the_shipped_stagr_lists_its_gated_tools_under_ask():
     """Default behaviour is DP-493's: every gated tool parks until Adam sets
     it to allow."""
-    policy = ToolPolicy(**json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]["tool_policy"])
+    policy = ToolPolicy.from_dict(json.loads(_STAGR_JSON.read_text(encoding="utf-8"))["personas"][0]["tool_policy"])
     assert set(policy.ask) == set(GATED) and not set(policy.allow) & set(GATED)
     persona = _persona(**policy.to_dict())
     assert not any(_runs_unprompted(persona, name) for name in GATED)
@@ -253,31 +254,8 @@ def test_there_is_no_auto_approve_field_any_more():
     assert not hasattr(Persona, "set_auto_approve")
 
 
-# --- the flag ---------------------------------------------------------------
-
-def _tool(**extra):
-    return {"type": "function", "is_write": True, "function": {"name": "x"},
-            "capabilities": {"produces_untrusted": False, "irreversible": False,
-                             "locality": "network", "sensitivity": "internal"}, **extra}
-
-
-def test_exactly_stagrs_gated_tools_are_auto_approvable():
-    marked = {t["function"]["name"] for t in ALL_TOOL_DEFINITIONS if t.get("auto_approvable")}
-    assert marked == set(UNPROMPTABLE)
-    assert all(is_auto_approvable(name) for name in UNPROMPTABLE)
-    assert not any(is_auto_approvable(name) for name in ALWAYS_ASK)
-    assert not is_auto_approvable("create_ticket")
-
-
-@pytest.mark.parametrize("tool", [
-    _tool(auto_approvable="yes"),
-    _tool(auto_approvable=True, is_write=False),
-    {**_tool(auto_approvable=True),
-     "capabilities": {**_tool()["capabilities"], "irreversible": True}},
-])
-def test_auto_approvable_is_refused_where_it_could_skip_a_real_gate(tool):
-    with pytest.raises(ValueError):
-        validate_tool_capabilities(tool)
+def test_no_definition_carries_the_removed_auto_approvable_key():
+    assert not [t for t in ALL_TOOL_DEFINITIONS if "auto_approvable" in t]
 
 
 # --- the deferral -----------------------------------------------------------
