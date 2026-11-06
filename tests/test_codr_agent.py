@@ -5,6 +5,7 @@
 # turn by adding messages, the way opencode records them.
 
 import json
+import shutil
 import subprocess
 import time
 from types import SimpleNamespace
@@ -523,6 +524,45 @@ async def test_a_long_notify_adam_message_is_posted_and_stored_whole(fake, tmp_p
     assert [b for _, _, b in router.sent] == [f"codr: {text}"]
     (row,) = agent.chat_system.turn_persistence.committed
     assert row["final_text"] == text
+
+
+@pytest.mark.parametrize("bad_input", [{}, {"message": "  "}, {"CD-007 delivered, the text as a key": " rest"}])
+async def test_a_notify_adam_call_without_a_message_is_never_posted(fake, tmp_path, bad_input):
+    """DP-508: malformed tool args (seen live: `{}`, and the whole message as a
+    JSON key) posted a bare `codr [CD-007]:` to Discord."""
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake)
+    fake.add(sid, "assistant", [{"type": "tool", "tool": "notify_adam",
+                                 "state": {"status": "completed", "input": bad_input}}],
+             time={"created": 1, "completed": 2}, finish="tool-calls")
+    await agent.deploy()
+    await agent.deploy()
+    assert router.sent == []
+    assert agent.chat_system.turn_persistence.committed == []
+    (relay,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.RELAY_ACTION]
+    assert relay["outcome"] == "empty"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to run the generated tool")
+@pytest.mark.parametrize("args, ok", [({"message": "hi"}, True), ({}, False), ({"message": " "}, False),
+                                      ({"the text as a key": ""}, False), (None, False)])
+def test_the_notify_adam_tool_rejects_a_call_without_a_message(tmp_path, args, ok):
+    """DP-508: the tool must fail a malformed call so codr resends it, instead
+    of answering "Queued for Adam" for a message nobody will see."""
+    js = workspace_files({**codr_agent.DEFAULTS})[".opencode/tool/notify_adam.js"]
+    (tmp_path / "notify_adam.mjs").write_text(js, encoding="utf-8")
+    runner = tmp_path / "run.mjs"
+    runner.write_text(
+        "import tool from './notify_adam.mjs';\n"
+        f"tool.execute({json.dumps(args)}).then(r => console.log('OK ' + r), e => console.log('ERR ' + e.message));\n",
+        encoding="utf-8")
+    out = subprocess.run(["node", str(runner)], capture_output=True, text=True, timeout=30).stdout
+    if ok:
+        assert out.startswith("OK Queued for Adam")
+    else:
+        assert out.startswith("ERR Not sent") and '"message"' in out
 
 
 async def test_a_relay_to_a_target_with_no_conversation_is_posted_but_not_stored(fake, tmp_path):

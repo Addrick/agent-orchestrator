@@ -836,7 +836,8 @@ post with its size and how it began instead, and the next task result counts it 
 The same cap applies to every agent notification sent to Discord. It is meant for progress worth knowing and for problems you can help
 with, and the task prompt tells codr to use it to report when it finishes a task:
 its final reply is not posted. DERPR posts at most `notify_per_hour` of these an hour. Extra calls are
-dropped and logged, and the next task result says how many were dropped.
+dropped and logged, and the next task result says how many were dropped. A call with no message text is never posted (it used to arrive as a blank
+`codr [CD-NNN]:` line); the tool tells codr the call failed so it sends it again.
 
 **One ticket, one session (DP-484).** codr works on one ticket at a time with only
 that ticket in its context. Each ticket gets its own opencode session, titled
