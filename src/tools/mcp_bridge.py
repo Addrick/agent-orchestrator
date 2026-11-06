@@ -17,7 +17,7 @@ Trust model — the part that must not be refactored away:
 - A gated call is never executed here. It becomes a ``call_derpr_tool`` proposal
   row and the subagent is told to stop and wait. Execution happens later, from
   the approved row, via ``AgentCallRunner`` — which re-checks the policy at that
-  point. See ``memory/project/decisions/2026-07-23-mcp-gate-is-the-proposal-queue.md``.
+  point. See ``memory/project/decisions/security/2026-07-23-mcp-gate-is-the-proposal-queue.md``.
 
 Per-dispatch tokens: each capable dispatch mints one, the subagent gets it in its
 environment, and it is revoked when the agent reaches a terminal state. A token

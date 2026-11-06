@@ -11,8 +11,8 @@ the canonical input for `recall_many` when invoked by the future meta-agent. No
 production caller wires this in yet — Sprint 5 introduces the metabank dual-write
 path; until then this is a callable seam that tests + ad-hoc tooling can use.
 
-See plans/memory_backend_abc.md (Sprint 4) and
-memory/project/tasks/DP-111.md.
+See memory/project-history/plans/memory_backend_abc.md (Sprint 4) and
+memory/project-history/tasks/DP-111.md.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class MemoryRouter:
         """Fan-out recall across N persona banks in parallel.
 
         `personas` is a list of bank ids (== persona names per the bank scheme
-        in plans/memory_backend_abc.md). `**kwargs` is forwarded verbatim to
+        in memory/project-history/plans/memory_backend_abc.md). `**kwargs` is forwarded verbatim to
         `MemoryBackend.recall` (k, types, tag_filter, max_tokens, budget).
 
         Per-bank failures are logged and dropped; the surviving banks still

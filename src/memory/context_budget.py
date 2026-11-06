@@ -7,7 +7,7 @@ semantic. Effective prompt-prune budget
 is therefore `max_context_tokens - response_token_limit`.
 
 Today this module only does char/4 estimation + drop-oldest pruning;
-future work documented in `memory/project/plans/web_ui_roadmap.md`
+future work documented in `memory/project-history/plans/web_ui_roadmap.md`
 (dynamic LTM-depth modulation, real tokenizer swap, retrieval-score-weighted
 budget allocation) lands here.
 """

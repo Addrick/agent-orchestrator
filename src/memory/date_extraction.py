@@ -4,7 +4,7 @@
 Hindsight derives every extracted memory's ``mentioned_at`` / ``event_date``
 solely from the ``timestamp`` sent on the retain request — the extraction LLM
 does NOT read dates out of prose (measured: see
-``memory/project/decisions/2026-05-14-hindsight-backfill-timestamp-finding``).
+``memory/project/decisions/memory-eval/2026-05-14-hindsight-backfill-timestamp-finding.md``).
 So to anchor a document's facts to *when its content is about* rather than its
 upload time, the engine must find that date itself and pass it as ``timestamp``.
 

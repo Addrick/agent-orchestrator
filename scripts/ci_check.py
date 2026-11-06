@@ -8,7 +8,7 @@ Exits non-zero if any stage fails, so PyCharm/CI surface red on failure.
 Usage:
     python scripts/ci_check.py            # full gate (pytest -m "not integration")
     python scripts/ci_check.py --fast     # unit-only, parallel, skip live/integration
-    python scripts/ci_check.py --no-tests # lint + mypy only (quick structural check)
+    python scripts/ci_check.py --no-tests # structural checks (flake8 errors, missing-deps, mypy, import-linter)
 
 Run it from the repo root. Uses the interpreter it was launched with
 (sys.executable), so point your PyCharm run config at the project venv.
@@ -41,7 +41,7 @@ def main() -> int:
     parser.add_argument("--fast", action="store_true",
                         help="unit-only pytest, parallel; skip integration + live tiers")
     parser.add_argument("--no-tests", action="store_true",
-                        help="lint + mypy only, no pytest")
+                        help="structural checks only (flake8 errors, missing-deps, mypy, import-linter), no pytest")
     args = parser.parse_args()
 
     stages: list[tuple[str, list[str]]] = [
@@ -66,10 +66,8 @@ def main() -> int:
                           "-m", "not integration and not zammad_live "
                                 "and not llm_live and not discord_live"]
         else:
-            # CI's selection (-m "not integration"; live tiers auto-skip without
-            # credentials), plus -n auto for pytest-xdist parallelism. xdist is a
-            # CI dependency (requirements-dev.txt), so this matches what CI *could*
-            # run; -n changes worker count only, not which tests pass.
+            # Matches CI (deploy.yml:90: pytest -n auto -m "not integration");
+            # live tiers auto-skip without credentials.
             pytest_cmd = [PY, "-m", "pytest", "-n", "auto", "-m", "not integration"]
         stages.append(("pytest", pytest_cmd))
 

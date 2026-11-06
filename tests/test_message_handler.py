@@ -808,7 +808,7 @@ _SETTER_TO_COMMAND = {
 _SETTER_EXCEPTIONS = {
     # provider_extras is reached via the dotted-path fallback in _handle_set,
     # not a dedicated set_<name> command. See Phase E in
-    # plans/portal_engine_reintegration.md.
+    # memory/project-history/plans/portal_engine_reintegration.md.
     'set_provider_extra',
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller flips
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.
@@ -874,7 +874,7 @@ _GETTER_EXCEPTIONS = {
     'get_generation_params',
     # provider_extras is reached via the dotted-path fallback in _handle_what,
     # not a dedicated what_<name> command. See Phase E in
-    # plans/portal_engine_reintegration.md.
+    # memory/project-history/plans/portal_engine_reintegration.md.
     'get_provider_extra',
     # meta_visible is Sprint-4 groundwork (DP-111); no production caller reads
     # it yet. Sprint 5 (metabank) will wire a command if/when it ships.

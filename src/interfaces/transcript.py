@@ -7,7 +7,7 @@ chunks, each addressed by a server-authored `interaction_id` (or flagged
 `ephemeral` for a not-yet-persisted parked confirmation). The `/derpr` portal
 renders from it — no consumer ever shadows the story positionally.
 
-See memory/project/decisions/2026-06-02-portal-history-contract.md (C1–C5).
+See memory/project/decisions/portal-ui/2026-06-02-portal-history-contract.md (C1–C5).
 """
 
 import json

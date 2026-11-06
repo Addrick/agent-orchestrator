@@ -1,7 +1,7 @@
 # tests/test_engine_edge_cases.py
 #
 # DP-199 Batch 4 — Engine per-provider parity matrix.
-# Tier 1, 2, 3 tests from memory/project/plans/DP-199-edge-cases.md.
+# Tier 1, 2, 3 tests from memory/project-history/plans/DP-199-edge-cases.md.
 
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock

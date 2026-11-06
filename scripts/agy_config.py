@@ -2,7 +2,7 @@
 
 Loads an optional JSON config that controls the three external knobs the agy
 CLI actually exposes, as established by the 2026-05-29 doc review (see
-``memory/project/decisions/2026-05-29-agy-sdk-oauth-finding.md``):
+``memory/project/decisions/agents-engine/2026-05-29-agy-sdk-oauth-finding.md``):
 
 - ``model`` — the agy CLI model, written to ``antigravity-cli/settings.json``'s
   ``model`` key (its **human-readable display name**, e.g. ``Gemini 3.5 Flash

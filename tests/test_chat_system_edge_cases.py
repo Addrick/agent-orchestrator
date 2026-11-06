@@ -5,7 +5,7 @@ CONFIRM-mode resume edges, concurrent-turn ContextVar isolation, and
 timeout-boundary checks. Uses the shared `chat_system_with_mocks` fixture
 from tests/test_chat_system.py.
 
-No production-code changes — bugs noted in DP-199-edge-cases.md
+No production-code changes — bugs noted in memory/project-history/plans/DP-199-edge-cases.md
 "Latent-bug fix list" are skipped, not patched.
 """
 

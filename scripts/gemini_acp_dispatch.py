@@ -6,7 +6,7 @@ single ACP session over JSON-RPC on stdio, streams every event to
 message, and writes ``summary.json`` (≤1KB) as the only thing Claude reads.
 
 Spec: ``memory/project/specs/2026-05-19-gemini-acp-transport-design.md``
-Plan: ``memory/project/plans/DP-119-acp-dispatcher.md``
+Plan: ``memory/project-history/plans/DP-119-acp-dispatcher.md``
 
 Wire-format details (initialize shape, ``mcpServers:[]`` on session/new,
 array-wrapped prompt content) are sourced from the working
@@ -479,7 +479,7 @@ def spawn_gemini(worktree: Path, model: str | None = None) -> subprocess.Popen[s
     """Spawn ``gemini --acp`` in the worktree.
 
     Windows: ``shutil.which`` resolves the ``.CMD`` shim correctly. See
-    ``memory/gemini_cli_subprocess_recipe.md``.
+    ``memory/external/gemini_cli_subprocess_recipe.md``.
     """
     binary = shutil.which("gemini")
     if not binary:

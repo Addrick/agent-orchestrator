@@ -576,7 +576,7 @@ class Persona:
     def get_meta_visible(self) -> bool:
         """Whether this persona's bank is included in cross-persona fan-out
         recall (`MemoryRouter.list_visible_personas`). Default False — opt-in
-        groundwork for the future Meta-Agent. See plans/memory_backend_abc.md."""
+        groundwork for the future Meta-Agent. See memory/project-history/plans/memory_backend_abc.md."""
         return self._meta_visible
 
     def get_inject_timestamp(self) -> bool:
@@ -630,7 +630,7 @@ class Persona:
 
     def set_provider_extra(self, provider: str, key: str, value: Any) -> None:
         """Write a single provider-specific knob into `provider_extras[provider][key]`.
-        Phase E dotted-path setter (see plans/portal_engine_reintegration.md)."""
+        Phase E dotted-path setter (see memory/project-history/plans/portal_engine_reintegration.md)."""
         block = self._params.provider_extras.setdefault(provider, {})
         block[key] = value
         logger.info(f"Persona '{self._name}' provider_extras[{provider}][{key}] set to {value!r}.")

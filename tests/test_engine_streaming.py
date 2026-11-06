@@ -1,7 +1,7 @@
 # tests/test_engine_streaming.py
 #
 # Phase B coverage — provider streaming surface on TextEngine + collect-stream
-# wrapper. See memory/project/plans/portal_engine_reintegration.md.
+# wrapper. See memory/project-history/plans/portal_engine_reintegration.md.
 
 from typing import AsyncIterator, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
