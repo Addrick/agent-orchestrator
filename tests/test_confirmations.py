@@ -19,7 +19,7 @@ from config.global_config import PARK_ROW_RETENTION, PENDING_ACTION_TTL
 from src.confirmations import (
     DENIAL_INSTRUCTION, ConfirmationManager, Decision, ParkedWrite,
 )
-from src.memory.memory_manager import MemoryManager, PARK_DB_UNKNOWN
+from src.memory.memory_manager import MemoryManager
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_QUARANTINED,
 )
@@ -1662,3 +1662,198 @@ def test_a_legacy_row_with_no_kind_column_rebuilds_as_an_approval(manager):
     }
     park = ParkedWrite.from_row(row)
     assert park.kind == "approval"
+
+
+# ---- DP-226: park preserves taint_sources --------------------------------
+
+
+def test_parked_write_taint_sources_normalization_and_audit_sync():
+    """ParkedWrite normalizes taint_sources, deduplicates order-preserving,
+    and keeps audit_info['taint_sources'] in sync."""
+    # 1. Normal list with duplicates and non-string types
+    pw = ParkedWrite(
+        token="tok-t1",
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": []},
+        confirmation_text="Run?",
+        user_identifier="u",
+        persona_name="p",
+        turn_tainted=True,
+        taint_sources=["memory_recall", "web_search", "memory_recall", 123, None, "hf_search"],
+    )
+    assert pw.taint_sources == ["memory_recall", "web_search", "hf_search"]
+    assert pw.audit_info["taint_sources"] == ["memory_recall", "web_search", "hf_search"]
+
+    # 2. When taint_sources is empty, extract from audit_info
+    pw2 = ParkedWrite(
+        token="tok-t2",
+        write_call={"id": "c1", "name": "update_ticket", "arguments": {}},
+        audit_info={"actions": [], "taint_sources": ["memory_recall", "web_search", "web_search"]},
+        confirmation_text="Run?",
+        user_identifier="u",
+        persona_name="p",
+        turn_tainted=True,
+    )
+    assert pw2.taint_sources == ["memory_recall", "web_search"]
+
+
+def test_parked_write_durable_store_round_trip_preserves_taint_sources(manager, mem_manager):
+    """A parked write with taint_sources preserves the full list across restart."""
+    park = _park(token="t-taint", tool="update_ticket")
+    park.turn_tainted = True
+    park.taint_sources = ["memory_recall", "web_search"]
+    park.audit_info = {**park.audit_info, "taint_sources": list(park.taint_sources)}
+    manager.park(park)
+
+    revived = _fresh_manager(mem_manager)
+    revived.rebuild_from_store()
+
+    back = revived.pending["t-taint"]
+    assert back.turn_tainted is True
+    assert back.taint_sources == ["memory_recall", "web_search"]
+    assert back.audit_info.get("taint_sources") == ["memory_recall", "web_search"]
+
+
+def test_from_row_tolerates_malformed_audit_info_taint_sources_without_quarantining():
+    """Malformed audit_info['taint_sources'] is handled defensively and does not quarantine."""
+    # Non-list taint_sources
+    row_string = {
+        "token": "tok-str", "created_at": 1000.0,
+        "write_call": {"id": "c1", "name": "update_ticket", "arguments": {}},
+        "user_identifier": "u", "persona_name": "p", "channel": "c",
+        "audit_info": {"taint_sources": "not-a-list"}, "confirmation_text": "Run it?",
+    }
+    park1 = ParkedWrite.from_row(row_string)
+    assert park1.taint_sources == []
+
+    # Mixed list with non-strings
+    row_mixed = {
+        "token": "tok-mix", "created_at": 1000.0,
+        "write_call": {"id": "c1", "name": "update_ticket", "arguments": {}},
+        "user_identifier": "u", "persona_name": "p", "channel": "c",
+        "audit_info": {"taint_sources": [None, 42, "memory_recall", {"bad": 1}, "web_search"]},
+        "confirmation_text": "Run it?",
+    }
+    park2 = ParkedWrite.from_row(row_mixed)
+    assert park2.taint_sources == ["memory_recall", "web_search"]
+
+
+@pytest.mark.asyncio
+async def test_apply_approved_produces_untrusted_adds_tool_name_to_taint_sources(
+    manager, mem_manager, monkeypatch,
+):
+    """An approved write tool with produces_untrusted=True adds its name to taint_sources,
+    syncs audit_info, and logs the sources in audit_decision metadata."""
+    monkeypatch.setattr(
+        "src.confirmations.get_tool_capabilities",
+        lambda name: {"produces_untrusted": True} if name == "untrusted_write" else {},
+    )
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-u1", tool="untrusted_write", call_id="c1", row_id=row_id)
+    parked.turn_tainted = True
+    parked.taint_sources = ["memory_recall"]
+    parked.audit_info = {**parked.audit_info, "taint_sources": ["memory_recall"]}
+    manager.park(parked)
+
+    decision = Decision(park=parked, approved=True)
+    await manager.apply(decision)
+
+    assert parked.turn_tainted is True
+    assert parked.taint_sources == ["memory_recall", "untrusted_write"]
+    assert parked.audit_info["taint_sources"] == ["memory_recall", "untrusted_write"]
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision' ORDER BY rowid DESC"
+    ).fetchone()
+    assert row is not None
+    meta = json.loads(row["metadata"])
+    assert meta["taint_sources"] == ["memory_recall", "untrusted_write"]
+
+
+@pytest.mark.asyncio
+async def test_apply_denial_does_not_add_tool_name_while_preserving_prior_taint_sources(
+    manager, mem_manager, monkeypatch,
+):
+    """Denying a produces_untrusted write tool does NOT add its name, preserving prior taint_sources."""
+    monkeypatch.setattr(
+        "src.confirmations.get_tool_capabilities",
+        lambda name: {"produces_untrusted": True} if name == "untrusted_write" else {},
+    )
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-u2", tool="untrusted_write", call_id="c1", row_id=row_id)
+    parked.turn_tainted = True
+    parked.taint_sources = ["memory_recall", "web_search"]
+    parked.audit_info = {**parked.audit_info, "taint_sources": ["memory_recall", "web_search"]}
+    manager.park(parked)
+
+    decision = Decision(park=parked, approved=False, note="denied by operator")
+    await manager.apply(decision)
+
+    assert parked.taint_sources == ["memory_recall", "web_search"]
+    assert "untrusted_write" not in parked.taint_sources
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision' ORDER BY rowid DESC"
+    ).fetchone()
+    assert row is not None
+    meta = json.loads(row["metadata"])
+    assert meta["taint_sources"] == ["memory_recall", "web_search"]
+
+
+@pytest.mark.asyncio
+async def test_apply_untainted_turn_keeps_taint_sources_empty(manager, mem_manager, monkeypatch):
+    """An approved write on an untainted turn keeps turn_tainted=False and taint_sources empty."""
+    monkeypatch.setattr(
+        "src.confirmations.get_tool_capabilities",
+        lambda name: {"produces_untrusted": False},
+    )
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _park(token="tok-clean", tool="clean_write", call_id="c1", row_id=row_id)
+    assert parked.turn_tainted is False
+    assert parked.taint_sources == []
+    manager.park(parked)
+
+    decision = Decision(park=parked, approved=True)
+    await manager.apply(decision)
+
+    assert parked.turn_tainted is False
+    assert parked.taint_sources == []
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision' ORDER BY rowid DESC"
+    ).fetchone()
+    assert row is not None
+    meta = json.loads(row["metadata"])
+    assert meta["taint_sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_apply_non_approval_produces_untrusted_adds_tool_name_and_taints(
+    manager, mem_manager, monkeypatch,
+):
+    """A non-approval deferral (e.g. node_job) for a tool with produces_untrusted=True
+    sets turn_tainted=True, adds tool_name to taint_sources, and syncs audit_info."""
+    monkeypatch.setattr(
+        "src.confirmations.get_tool_capabilities",
+        lambda name: {"produces_untrusted": True} if name == "node_tool" else {},
+    )
+    row_id = _row_with_awaiting_entries(mem_manager, ["c1"])
+    parked = _deferral(token="tok-node1", kind="node_job", tool="node_tool", call_id="c1")
+    parked.parked_assistant_id = row_id
+    manager.park(parked)
+
+    decision = Decision(park=parked, approved=False, outcome_status="done", result={"job_status": "completed"})
+    await manager.apply(decision)
+
+    assert parked.turn_tainted is True
+    assert "node_tool" in parked.taint_sources
+    assert parked.audit_info["tainted"] is True
+    assert "node_tool" in parked.audit_info["taint_sources"]
+
+    row = mem_manager._get_connection().execute(
+        "SELECT metadata FROM Audit_Log WHERE event_type = 'audit_decision' ORDER BY rowid DESC"
+    ).fetchone()
+    assert row is not None
+    meta = json.loads(row["metadata"])
+    assert meta["turn_tainted"] is True
+    assert "node_tool" in meta["taint_sources"]

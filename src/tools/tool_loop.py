@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     AbstractSet, Any, AsyncIterator, Callable, Dict, List, Optional, Sequence,
     Tuple,
@@ -89,6 +89,7 @@ def _needs_approval(persona: Any, tool_name: str) -> bool:
 
 def _deferred_result(
     r: Dict[str, Any], tool_result: Any, turn_tainted: bool,
+    taint_sources: Optional[List[str]] = None,
 ) -> Optional[Tuple[Dict[str, Any], "ToolDeferredEvent"]]:
     """An executed call whose result declares a deferral (DP-493): the
     history entry (an `awaiting:<kind>` placeholder holding the handler's own
@@ -105,17 +106,21 @@ def _deferred_result(
     content = _scrubbed_result({"status": awaiting_status(kind), "token": token,
                                 "result": without_declaration(tool_result)})
     call = {"id": r["call_id"], "name": r["name"], "arguments": r["args"]}
+    sources = list(dict.fromkeys(taint_sources)) if taint_sources else []
     event = ToolDeferredEvent(
         token=token, write_call=call,
         audit_info={"actions": [{"tool": r["name"], "arguments": r["args"], "auto_approved": True}],
-                    "tainted": turn_tainted},
+                    "tainted": turn_tainted,
+                    "taint_sources": list(sources)},
         confirmation_text="", turn_tainted=turn_tainted, kind=kind,
+        taint_sources=list(sources),
     )
     return _tool_result_message(r, content), event
 
 
 def _settled_call(
     r: Dict[str, Any], tool_result: Any, group_id: Optional[str], turn_tainted: bool,
+    taint_sources: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], List[LoopEvent]]:
     """One executed call's history entry and the events it emits, in order:
     a `ToolDeferredEvent` if its result declares a deferral, then its
@@ -136,7 +141,7 @@ def _settled_call(
         # scrubbed is not enough on its own.
         err_str = cast(str, get_scrubber().scrub(failure))
     events: List[LoopEvent] = []
-    deferred = _deferred_result(r, tool_result, turn_tainted)
+    deferred = _deferred_result(r, tool_result, turn_tainted, taint_sources=taint_sources)
     if deferred is not None:
         message, deferral = deferred
         events.append(deferral)
@@ -240,6 +245,7 @@ class ToolDeferredEvent:
     confirmation_text: str
     turn_tainted: bool = False
     kind: str = DEFERRAL_KIND_APPROVAL
+    taint_sources: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -584,7 +590,7 @@ def _render_confirmation_text(
     if turn_tainted:
         lines.append(
             f"\n⚠️ Context contains untrusted content from: "
-            f"{', '.join(taint_sources)}"
+            f"{', '.join(taint_sources) if taint_sources else 'prior conversation'}"
         )
     return "\n".join(lines)
 
@@ -981,7 +987,7 @@ class ToolLoop:
             history_start_override if history_start_override is not None
             else len(conversation_history)
         )
-        taint_sources: List[str] = list(initial_taint_sources or [])
+        taint_sources: List[str] = list(dict.fromkeys(initial_taint_sources or []))
         # turn_tainted is passed in to support conversation-level stickiness
 
         # DP-335: two counters, two limits. `calls_used` is the budget the
@@ -1192,6 +1198,7 @@ class ToolLoop:
                  if not any(c is w for w in write_calls)],
                 conversation_history, group_id=group_id, offered=offered,
                 turn_tainted=turn_tainted,
+                taint_sources=taint_sources,
             ):
                 yield tool_ev
 
@@ -1203,7 +1210,8 @@ class ToolLoop:
                 caps = get_tool_capabilities(tool_name)
                 if caps.get("produces_untrusted"):
                     turn_tainted = True
-                    taint_sources.append(tool_name)
+                    if tool_name not in taint_sources:
+                        taint_sources.append(tool_name)
 
             # --- Every call under ask parks for approval (DP-497) ---
             # (`write_calls` keeps its name: the park, its events and its
@@ -1251,7 +1259,7 @@ class ToolLoop:
                 audit_info: Dict[str, Any] = {
                     "actions": audit_actions,
                     "tainted": turn_tainted,
-                    "taint_sources": taint_sources,
+                    "taint_sources": list(taint_sources),
                     "model_reasoning": model_reasoning or None,
                     "execution_mode": persona.get_execution_mode().name,
                 }
@@ -1398,6 +1406,7 @@ class ToolLoop:
                             action, turn_tainted, taint_sources,
                         ),
                         turn_tainted=turn_tainted,
+                        taint_sources=list(taint_sources),
                     )
 
                 # THE DP-297 CHANGE: fall through to the next iteration instead
@@ -1616,6 +1625,7 @@ class ToolLoop:
         *,
         offered: AbstractSet[str],
         turn_tainted: bool = False,
+        taint_sources: Optional[List[str]] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Calls in
@@ -1667,7 +1677,7 @@ class ToolLoop:
         # Append/emit in original order — concurrency must not reorder the
         # transcript the model reads next iteration.
         for r, tool_result in zip(resolved, results):
-            message, events = _settled_call(r, tool_result, group_id, turn_tainted)
+            message, events = _settled_call(r, tool_result, group_id, turn_tainted, taint_sources=taint_sources)
             conversation_history.append(message)
             for event in events:
                 yield event
