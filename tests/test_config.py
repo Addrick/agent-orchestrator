@@ -1,8 +1,9 @@
 # tests/test_config.py
 
-import os
-import sys
+
+
 import importlib
+from pathlib import Path
 import pytest
 from config import global_config
 
@@ -92,3 +93,65 @@ def test_data_dir_from_env_moves_every_store_and_workspace(load_config_outside_t
         value = Path(getattr(global_config, setting))
         assert data_dir in value.parents, f"{setting} = {value} did not follow DATA_DIR"
         assert global_config.PROJECT_ROOT not in value.parents
+
+
+def test_rate_limit_gemma_4_tpr_defaults_to_256000(monkeypatch):
+    """RATE_LIMIT_GEMMA_4_TPR defaults to 256000 when the env var is absent."""
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.delenv("RATE_LIMIT_GEMMA_4_TPR", raising=False)
+    monkeypatch.delenv("RATE_LIMIT_GEMMA_4_RPD", raising=False)
+    try:
+        importlib.reload(global_config)
+        assert global_config.RATE_LIMIT_GEMMA_4_TPR == 256000
+    finally:
+        importlib.reload(global_config)
+
+
+def test_rate_limit_gemma_4_tpr_from_env(monkeypatch):
+    """RATE_LIMIT_GEMMA_4_TPR reads its value from the environment."""
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("RATE_LIMIT_GEMMA_4_TPR", "500000")
+    try:
+        importlib.reload(global_config)
+        assert global_config.RATE_LIMIT_GEMMA_4_TPR == 500000
+    finally:
+        importlib.reload(global_config)
+
+
+def test_rate_limit_gemma_4_rpd_does_not_bleed_into_tpr(monkeypatch):
+    """DP-411: RATE_LIMIT_GEMMA_4_RPD must not bleed into RATE_LIMIT_GEMMA_4_TPR."""
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.delenv("RATE_LIMIT_GEMMA_4_TPR", raising=False)
+    monkeypatch.setenv("RATE_LIMIT_GEMMA_4_RPD", "9999")
+    try:
+        importlib.reload(global_config)
+        assert global_config.RATE_LIMIT_GEMMA_4_RPD == 9999
+        assert global_config.RATE_LIMIT_GEMMA_4_TPR == 256000
+    finally:
+        importlib.reload(global_config)
+
+
+def test_scripts_default_db_paths_follow_data_dir(load_config_outside_tests, tmp_path):
+    """DP-411: DB maintenance scripts resolve their default DB from
+    config.global_config.MEMORY_DATABASE_FILE when DATA_DIR is customized."""
+    from scripts import repair_mangled_kobold_history, cleanup_vertex_links, reset_memory_summaries
+    custom_data = (tmp_path / "custom_data").resolve()
+    load_config_outside_tests(custom_data)
+    expected_db_path = str(custom_data / "user_memory.db")
+
+    importlib.reload(repair_mangled_kobold_history)
+    importlib.reload(cleanup_vertex_links)
+    importlib.reload(reset_memory_summaries)
+    try:
+        assert repair_mangled_kobold_history.build_parser().get_default("db") == expected_db_path
+        assert cleanup_vertex_links.build_parser().get_default("db") == expected_db_path
+        assert reset_memory_summaries.build_parser().get_default("db") == Path(expected_db_path)
+        assert reset_memory_summaries.DEFAULT_DB == Path(expected_db_path)
+    finally:
+        load_config_outside_tests(None)
+        importlib.reload(repair_mangled_kobold_history)
+        importlib.reload(cleanup_vertex_links)
+        importlib.reload(reset_memory_summaries)

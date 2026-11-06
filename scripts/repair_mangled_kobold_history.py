@@ -40,7 +40,15 @@ import os
 import shutil
 import sqlite3
 import sys
+from pathlib import Path
 from datetime import datetime
+
+# Add project root to sys.path so config is importable when run directly as a script
+repo_root = str(Path(__file__).resolve().parent.parent)
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from config.global_config import MEMORY_DATABASE_FILE  # noqa: E402
 
 # Tags whose presence inside a stored message indicates a rendered instruct
 # prompt was logged instead of the raw user message. (Copied from the adapter's
@@ -125,17 +133,22 @@ def _snippet(text: str, n: int = 100) -> str:
     return one_line[:n] + ("…" if len(one_line) > n else "")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--db", default=os.environ.get("MEMORY_DATABASE_FILE", "data/user_memory.db"),
-                        help="Path to the SQLite DB (default: $MEMORY_DATABASE_FILE or data/user_memory.db)")
+    parser.add_argument("--db", default=MEMORY_DATABASE_FILE,
+                        help="Path to the SQLite DB (default: $MEMORY_DATABASE_FILE or <DATA_DIR>/user_memory.db)")
     parser.add_argument("--persona", default=None, help="Restrict to a single persona_name")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--repair", action="store_true",
                        help="Rewrite corrupted user rows to the extracted clean last turn")
     group.add_argument("--delete", action="store_true",
                        help="Delete corrupted rows entirely")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     if not os.path.exists(args.db):

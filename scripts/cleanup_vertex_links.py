@@ -1,14 +1,16 @@
 import sqlite3
 import os
-import re
 import argparse
 import sys
 import sqlite_vec
 
 # Add src to path so we can import utilities
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
 
-from src.utils.message_utils import strip_vertex_links
+from src.utils.message_utils import strip_vertex_links  # noqa: E402
+from config.global_config import MEMORY_DATABASE_FILE  # noqa: E402
 
 def cleanup_db(db_path, dry_run=True, invalidate_embeddings=True):
     if not os.path.exists(db_path):
@@ -84,20 +86,25 @@ def cleanup_db(db_path, dry_run=True, invalidate_embeddings=True):
 
     conn.close()
 
-if __name__ == "__main__":
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cleanup Vertex AI links from the database.")
-    parser.add_argument("--db", default="data/user_memory.db", help="Path to the database file (defaults to data/user_memory.db).")
+    parser.add_argument(
+        "--db",
+        default=MEMORY_DATABASE_FILE,
+        help="Path to the database file (defaults to config.global_config.MEMORY_DATABASE_FILE).",
+    )
     parser.add_argument("--no-dry-run", action="store_true", help="Perform actual updates instead of dry run.")
     parser.add_argument("--skip-embeddings", action="store_true", help="Do not invalidate embeddings for modified rows.")
+    return parser
 
+
+if __name__ == "__main__":
+    parser = build_parser()
     args = parser.parse_args()
-    
-    db_path = os.path.abspath(args.db)
-    if not os.path.exists(db_path) and args.db == "data/user_memory.db":
-        # Fallback to src/database for older setups
-        alt_path = os.path.abspath("src/database/user_memory.db")
-        if os.path.exists(alt_path):
-            db_path = alt_path
-            print(f"data/user_memory.db not found, falling back to {db_path}")
 
+    db_path = os.path.abspath(args.db)
+    if not os.path.exists(db_path):
+        print(f"Error: Database not found at {db_path}")
+        sys.exit(1)
     cleanup_db(db_path, dry_run=not args.no_dry_run, invalidate_embeddings=not args.skip_embeddings)

@@ -137,14 +137,14 @@ MAX_TOOL_CALLS = 15
 # is "how many times may we talk to the provider before declaring the loop
 # stuck".
 #
-# ⚠️ It is UNREACHABLE at these defaults, and that is the intended state. Every
-# iteration that continues past the tool-call check charges at least one call,
-# so `iterations_used <= calls_used` always holds and the call budget is always
-# the limit that trips first while MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS. This
-# is a backstop against a future loop shape that can iterate without spending,
-# not a live limit. (The original justification here — "a model that emits an
-# empty tool-call list forever reaches this one" — was simply wrong: an empty
-# tool-call list is the loop's natural-exit branch and ends the turn at once.)
+# ⚠️ MAX_TOOL_ITERATIONS is a live limit since DP-404. A call naming a tool the
+# persona was not offered is refused with an error result and not charged to
+# MAX_TOOL_CALLS (charging it would let injected calls end a turn without
+# running anything), so an iteration whose calls are all refused spends no calls
+# and `iterations_used <= calls_used` no longer holds. MAX_TOOL_ITERATIONS is
+# what bounds a model that keeps emitting un-offered calls. For turns with
+# admitted calls, every continuing iteration charges at least one call, so
+# MAX_TOOL_CALLS trips first while MAX_TOOL_ITERATIONS > MAX_TOOL_CALLS.
 #
 # `tests/tools/test_tool_loop.py` pins the ordering invariant, because the day
 # MAX_TOOL_CALLS rises past this number the guard silently starts truncating
@@ -505,7 +505,7 @@ RATE_LIMIT_GEMMA_3_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_3_RPM",   "30"))
 # Gemma 4 free tier (confirmed 2026-04): 15 RPM
 RATE_LIMIT_GEMMA_4_RPM   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPM",   "15"))
 RATE_LIMIT_GEMMA_4_RPD   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPD",   "1500"))
-RATE_LIMIT_GEMMA_4_TPR   = int(os.environ.get("RATE_LIMIT_GEMMA_4_RPD",   "256000"))
+RATE_LIMIT_GEMMA_4_TPR   = int(os.environ.get("RATE_LIMIT_GEMMA_4_TPR",   "256000"))
 
 # OpenAI and Anthropic — set generously; adjust if you hit 429s on those providers.
 RATE_LIMIT_OPENAI_RPM    = int(os.environ.get("RATE_LIMIT_OPENAI_RPM",    "60"))
