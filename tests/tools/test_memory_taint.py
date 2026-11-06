@@ -22,7 +22,7 @@ from src.engine import TextEngine
 from src.memory.memory_manager import MemoryManager
 from src.persona import MemoryMode, Persona
 from src.tools.tool_loop import _deferred_result
-from tests.helpers import make_chat_system, offer_tools, route_stream_through_generate_response
+from tests.helpers import enable_all_tools, make_chat_system, offer_tools, route_stream_through_generate_response
 
 # DP-404: the loop refuses a call whose name was not offered, so these
 # tests offer every tool name they script.
@@ -281,8 +281,9 @@ async def test_park_preserves_taint_sources_across_resume_end_to_end():
 
         persona = Persona(
             persona_name="test_persona", model_name="mock_model", prompt="Test",
-            enabled_tools=["*"], memory_mode=MemoryMode.CHANNEL_ISOLATED,
+            memory_mode=MemoryMode.CHANNEL_ISOLATED,
         )
+        enable_all_tools(persona)
         persona.set_execution_mode(ExecutionMode.CONFIRM)
 
         chat_system = make_chat_system(
