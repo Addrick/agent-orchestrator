@@ -950,25 +950,63 @@ def test_the_engines_requester_header_survives_the_routers_cleaning_unchanged(na
 
 @pytest.mark.asyncio
 async def test_a_down_box_does_not_delay_another_boxs_poll(monkeypatch):
-    # DP-499: polled in turn, dt21's connect timeout aged r9700's sample to ~8 s every cycle.
+    # DP-499: polled in turn, dt21's connect timeout aged r9700's sample to ~8 s every cycle. Polled in
+    # lockstep rounds it still did: r9700's first poll was prompt, its second waited for dt21. So the
+    # test needs r9700 polled *repeatedly* while dt21 is still stuck in its first poll.
     router = ir.Router([box("dt21"), box("r9700")], MOVE, QUIET)
     dt21_released = asyncio.Event()
-    r9700_polled = asyncio.Event()
+    r9700_polled_again = asyncio.Event()
+    r9700_polls = 0
 
     async def get_json(backend, path):
+        nonlocal r9700_polls
         if backend.name == "dt21":
             await dt21_released.wait()  # stands in for a connect timeout
             return None
         if path == "/v1/models":
-            r9700_polled.set()
+            r9700_polls += 1
+            if r9700_polls >= 3:
+                r9700_polled_again.set()
         return None
 
     monkeypatch.setattr(ir, "_get_json", get_json)
+    monkeypatch.setattr(ir, "POLL_INTERVAL_S", 0.01)
     poller = asyncio.ensure_future(ir.poll_forever(router))
     try:
-        await asyncio.wait_for(r9700_polled.wait(), 1.0)
+        await asyncio.wait_for(r9700_polled_again.wait(), 1.0)
     finally:
         dt21_released.set()
+        poller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await poller
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_poll_answer_does_not_end_that_boxs_polling(monkeypatch):
+    # One loop per box: an exception in one box's poll used to end only its loop, leaving it
+    # "healthy" with frozen flags while the other box kept polling. It now counts as a failed poll.
+    router = ir.Router([box("r9700")], MOVE, QUIET)
+    polls = 0
+    polled_again = asyncio.Event()
+
+    async def get_json(backend, path):
+        nonlocal polls
+        if path != "/v1/models":
+            return None
+        polls += 1
+        if polls >= 3:
+            polled_again.set()
+        return {"data": [{"id": "m", "status": "loaded"}]}  # a string status: note_poll raises on it
+
+    monkeypatch.setattr(ir, "_get_json", get_json)
+    monkeypatch.setattr(ir, "POLL_INTERVAL_S", 0.01)
+    poller = asyncio.ensure_future(ir.poll_forever(router))
+    try:
+        await asyncio.wait_for(polled_again.wait(), 1.0)
+        await asyncio.sleep(0)  # let the third poll's handler run
+        assert router.backends[0].poll_failures >= ir.POLL_FAILURES_DOWN
+        assert not router.backends[0].healthy
+    finally:
         poller.cancel()
         with pytest.raises(asyncio.CancelledError):
             await poller
