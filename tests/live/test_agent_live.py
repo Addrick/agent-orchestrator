@@ -136,6 +136,20 @@ class _DiscordClientHolder:
         return future.result(timeout=30)
 
 
+def delete_tickets_titled(zammad_client, title):
+    """Delete every ticket with this exact title left by earlier runs.
+
+    Uses the DB-direct paginated list: ES search lags and caps its hits,
+    which let one copy per run leak (DP-507).
+    """
+    for t in zammad_client.list_tickets():
+        if t.get("title") == title:
+            try:
+                zammad_client.delete_ticket(t["id"])
+            except Exception:
+                pass
+
+
 @pytest.fixture(scope="module")
 def discord_holder():
     """Module-scoped fixture: boots a Discord client, yields it, then shuts down.
@@ -258,14 +272,7 @@ class TestZammadNotifierLive:
 
         Cleans up previous runs, leaves new ticket for inspection.
         """
-        old = zammad_client.search_tickets(
-            query=f'title:"{NOTIFIER_TICKET_TITLE}"'
-        )
-        for t in old:
-            try:
-                zammad_client.delete_ticket(t["id"])
-            except Exception:
-                pass
+        delete_tickets_titled(zammad_client, NOTIFIER_TICKET_TITLE)
 
         ticket_data = zammad_client.create_ticket(
             title=NOTIFIER_TICKET_TITLE,
@@ -326,14 +333,7 @@ class TestMultiChannelRouterLive:
     @pytest.fixture
     def test_ticket(self, zammad_client):
         """Clean up previous runs, leave new ticket for inspection."""
-        old = zammad_client.search_tickets(
-            query=f'title:"{MULTICHANNEL_TICKET_TITLE}"'
-        )
-        for t in old:
-            try:
-                zammad_client.delete_ticket(t["id"])
-            except Exception:
-                pass
+        delete_tickets_titled(zammad_client, MULTICHANNEL_TICKET_TITLE)
 
         ticket_data = zammad_client.create_ticket(
             title=MULTICHANNEL_TICKET_TITLE,
@@ -472,14 +472,7 @@ class TestTriageDispatchMockedLLM:
     @pytest.fixture
     def test_ticket(self, zammad_client):
         """Create a realistic support ticket. Cleans up previous runs."""
-        old_tickets = zammad_client.search_tickets(
-            query=f'title:"{MOCKED_PIPELINE_TICKET_TITLE}"'
-        )
-        for t in old_tickets:
-            try:
-                zammad_client.delete_ticket(t["id"])
-            except Exception:
-                pass
+        delete_tickets_titled(zammad_client, MOCKED_PIPELINE_TICKET_TITLE)
 
         ticket_data = zammad_client.create_ticket(
             title=MOCKED_PIPELINE_TICKET_TITLE,

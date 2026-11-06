@@ -180,10 +180,25 @@ class ZammadClient:
 
     def list_tickets(self, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
-        Lists tickets directly from the database (non-search).
-        Useful for immediate verification after creation.
+        Lists every ticket directly from the database (non-search), following
+        pagination. Useful for immediate verification after creation.
+
+        ``GET /tickets`` returns one page (oldest first) and ignores sort
+        params, so returning only page 1 silently hides every ticket past the
+        first ``per_page`` once the instance grows (DP-507).
         """
-        return self._make_request('get', 'tickets', params=params)
+        per_page = 100
+        base = dict(params or {})
+        base.pop('page', None)
+        base['per_page'] = per_page
+        tickets: List[Dict[str, Any]] = []
+        page = 1
+        while True:
+            batch = self._make_request('get', 'tickets', params={**base, 'page': page}) or []
+            tickets.extend(batch)
+            if len(batch) < per_page:
+                return tickets
+            page += 1
 
     # --- User Methods ---
 
