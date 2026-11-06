@@ -173,3 +173,49 @@ async def test_rebuild_refuses_a_persona_without_long_term_memory(setup):
         await chat_system.rebuild_persona_memory("test_persona")
     assert hs.deleted_banks == []
     assert "test_persona" not in chat_system.memory_persona_names()
+
+
+@pytest.mark.asyncio
+async def test_in_window_dp423_row_keeps_its_taint_and_retain_text(setup):
+    chat_system, mm, persona, hs = setup
+    t0 = datetime.now(timezone.utc) - timedelta(days=30)
+    row = mm.log_message("u1", "test_persona", "chan", "assistant", "test_persona",
+                         "reply\n\n[tools: x]", t0)
+    mm.queue_retain(row, "test_persona", "chan", untrusted=False,
+                    retain_text="reply", source_content="reply\n\n[tools: x]")
+    # DP-423 sent it with no block.
+    mm._get_connection().execute(
+        "UPDATE Pending_Retain SET sent_generation = generation WHERE interaction_id = ?",
+        (row,))
+
+    counts = await chat_system.rebuild_persona_memory("test_persona")
+
+    assert counts["pending"] == 1 and mm.is_retain_pending(row)
+    got = mm._get_connection().execute(
+        "SELECT untrusted, retain_text FROM Pending_Retain WHERE interaction_id = ?",
+        (row,)).fetchone()
+    assert (got["untrusted"], got["retain_text"]) == (0, "reply")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_stops_when_the_bank_cannot_be_created_again(setup):
+    chat_system, mm, persona, hs = setup
+    await _cut_one_block(chat_system, hs)
+    sends = len(hs.sends)
+    chat_system.provision_persona_memory = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="could not be created"):
+        await chat_system.rebuild_persona_memory("test_persona")
+    assert len(hs.sends) == sends
+
+
+@pytest.mark.asyncio
+async def test_rebuild_drops_the_banks_ingest_cache(setup, tmp_path, monkeypatch):
+    chat_system, mm, persona, hs = setup
+    import src.chat_system as cs
+    monkeypatch.setattr(cs, "INGEST_CACHE_DIR", tmp_path)
+    cache = tmp_path / "test_persona.json"
+    cache.write_text('{"a.md": {"sha256": "x"}}', encoding="utf-8")
+    other = tmp_path / "other.json"
+    other.write_text("{}", encoding="utf-8")
+    await chat_system.rebuild_persona_memory("test_persona")
+    assert not cache.exists() and other.exists()

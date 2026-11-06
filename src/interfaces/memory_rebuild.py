@@ -77,9 +77,15 @@ class MemoryRebuildJob:
                 try:
                     entry["counts"] = await rebuild(entry["name"], progress=progress)
                     entry["state"] = "done"
-                except Exception as e:  # noqa: BLE001 — one persona never stops the job
+                except Exception as e:  # noqa: BLE001
+                    # Stop here: the usual cause is Hindsight going away, and
+                    # carrying on would delete the next persona's bank too.
                     logger.warning(f"Memory rebuild of {entry['name']} failed: {e}")
                     entry["state"], entry["error"] = "error", str(e)
+                    for rest in self.personas:
+                        if rest["state"] == "waiting":
+                            rest["state"] = "skipped"
+                    break
         finally:
             self.finished_at = _now()
             logger.info(f"Memory rebuild finished: {self.personas}")

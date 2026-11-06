@@ -117,7 +117,7 @@ def test_confirmed_start_rebuilds_every_target_and_audits():
     assert len(rows) == 1
 
 
-def test_one_failing_persona_does_not_stop_the_rest():
+def test_a_failing_persona_stops_the_run_before_the_next_bank_is_deleted():
     adapter, calls, _ = _make_adapter()
 
     async def rebuild(name: str, progress=None) -> Dict[str, int]:
@@ -130,10 +130,10 @@ def test_one_failing_persona_does_not_stop_the_rest():
     with TestClient(adapter.app) as client:
         client.post("/api/v1/memory/rebuild", json=GO, headers=AUTH)
         body = _wait_finished(client)
-    assert calls == ["p", "q"]
+    assert calls == ["p"]
     assert body["personas"][0]["state"] == "error"
     assert "stopped answering" in body["personas"][0]["error"]
-    assert body["personas"][1]["state"] == "done"
+    assert body["personas"][1]["state"] == "skipped"
 
 
 @pytest.mark.asyncio

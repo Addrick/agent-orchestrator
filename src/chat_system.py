@@ -11,7 +11,8 @@ from typing import (
 )
 
 from config.global_config import (
-    HINDSIGHT_RETAIN_CHUNK_SIZE, RETAIN_IDLE_FINAL_SECONDS, RETAIN_IDLE_SWEEP_SECONDS,
+    HINDSIGHT_RETAIN_CHUNK_SIZE, INGEST_CACHE_DIR, RETAIN_IDLE_FINAL_SECONDS,
+    RETAIN_IDLE_SWEEP_SECONDS,
     RETAIN_IDLE_TRIM_SECONDS, RETAIN_LEGACY_WINDOW, RETAIN_MAINTENANCE_INTERVAL_SECONDS,
 )
 from src.embedding_service import EmbeddingService
@@ -51,6 +52,7 @@ from src.tools.tool_loop import (
 )
 from src.turn_persistence import TurnPersistence
 from src.tool_policy import callable_tool_names
+from src.tools.ingest_path import IngestPathHandler
 from src.tools.tool_manager import ToolManager
 from src.tools.turn_context import TurnContext, turn_scope
 from src.personas.store import save_personas_to_file
@@ -1438,17 +1440,19 @@ class ChatSystem:
                     assistant_id = None
         return final_text, response_type, assistant_id, None
 
-    async def provision_persona_memory(self, name: str) -> None:
-        """Provision the Hindsight memory bank for a specific persona."""
+    async def provision_persona_memory(self, name: str) -> bool:
+        """Provision the Hindsight memory bank for a specific persona.
+        Returns whether the bank exists (ensured); a failed patch afterwards
+        only logs, as before."""
         from src.memory.backend import HindsightBackend
         if not isinstance(self.memory_backend, HindsightBackend):
-            return
+            return False
         backend: HindsightBackend = self.memory_backend
         if name not in self.personas:
-            return
+            return False
         persona = self.personas[name]
         if not persona.get_long_term_memory():
-            return
+            return False
 
         try:
             # retain_mission / reflect_mission are honoured only at bank
@@ -1464,7 +1468,7 @@ class ChatSystem:
             )
         except Exception as e:
             logger.warning(f"Could not ensure Hindsight bank for {name}: {e}")
-            return
+            return False
 
         await self._patch_retain_chunk_size(backend, name)
 
@@ -1472,12 +1476,13 @@ class ChatSystem:
         # existing banks without a rebuild, unlike the retain mission. DP-255.
         disposition = persona.get_disposition()
         if not disposition:
-            return
+            return True
         patch = {f"disposition_{k}": v for k, v in disposition.items()}
         try:
             await backend._get_client().apatch_bank_config(name, patch)
         except Exception as e:
             logger.warning(f"Could not patch disposition for Hindsight bank {name}: {e}")
+        return True
 
     def memory_persona_names(self) -> List[str]:
         """Personas that own a Hindsight bank: long-term memory on. Startup
@@ -1520,7 +1525,15 @@ class ChatSystem:
         except HindsightAPIError as e:
             if e.status_code != 404:  # a bank never created is already empty
                 raise
-        await self.provision_persona_memory(name)
+        # The bank is gone: so is what the ingest_path cache says it holds.
+        IngestPathHandler.forget_bank(INGEST_CACHE_DIR, name)
+        if not await self.provision_persona_memory(name):
+            # Sending now would land in a bank Hindsight creates on the fly
+            # with its defaults (no missions, default chunk size).
+            raise RuntimeError(
+                f"Hindsight bank {name!r} could not be created again; nothing was "
+                "resent — run the rebuild again once Hindsight accepts it"
+            )
 
         counts["adopted"], counts["pending"] = await self._adopt_unretained(persona)
 
@@ -1561,10 +1574,9 @@ class ChatSystem:
         for sc, rows in by_scope.values():
             start, _ = mm.retain_window(sc)
             below = [r["interaction_id"] for r in rows if r["interaction_id"] < start]
-            for r in rows:
-                if r["interaction_id"] >= start:
-                    mm.queue_retain(r["interaction_id"], name, r["channel"], untrusted=True)
-                    queued += 1
+            inside = [r["interaction_id"] for r in rows if r["interaction_id"] >= start]
+            mm.queue_unretained(inside)
+            queued += len(inside)
             for i in range(0, len(below), REBUILD_BLOCK_TURNS):
                 if mm.adopt_retain_block(sc, below[i:i + REBUILD_BLOCK_TURNS]) is not None:
                     adopted += 1

@@ -2122,11 +2122,13 @@ class KoboldEngineAdapter:
             if not names:
                 return JSONResponse(status_code=400,
                                     content={"error": "no persona has long-term memory on"})
+            # Start before the first await: the `running` check above and the
+            # start must not be split by a yield, or two POSTs both pass it.
+            started = self._memory_rebuild.start(self._rebuild_persona_memory, names)
             logger.warning("Memory rebuild started from the portal: %s", names)
             await self._audit_control_change("memory_rebuild", ",".join(names),
                                              {"personas": names})
-            return JSONResponse(status_code=202,
-                                content=self._memory_rebuild.start(self._rebuild_persona_memory, names))
+            return JSONResponse(status_code=202, content={**started, "targets": names})
 
         @self.app.post("/api/v1/memory/banks/{bank_id}/upload")
         async def memory_upload(

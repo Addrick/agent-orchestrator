@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getMemoryRebuild, startMemoryRebuild } from '../api/client'
 import { hasControlToken } from '../api/control_token'
 import type { MemoryRebuildPersona, MemoryRebuildState } from '../types/contracts'
@@ -15,6 +15,7 @@ function describe(p: MemoryRebuildPersona): string {
   const c = p.counts
   if (p.state === 'error') return p.error ?? 'failed'
   if (p.state === 'waiting') return 'waiting'
+  if (p.state === 'skipped') return 'not touched: the run stopped at an earlier error'
   const sent = (c.blocks ?? 0) + (c.queued ?? 0)
   const parts = [`${sent}/${c.total ?? '?'} blocks`]
   if (c.adopted) parts.push(`${c.adopted} from old history`)
@@ -46,11 +47,16 @@ export function MemoryRebuild({ onFinished }: { onFinished: () => void }) {
   useEffect(() => {
     if (!running) return
     const t = window.setInterval(() => void load(), POLL_MS)
-    return () => {
-      window.clearInterval(t)
-      onFinished()
-    }
-  }, [running, load, onFinished])
+    return () => window.clearInterval(t)
+  }, [running, load])
+
+  // Refresh the panel once, on the running -> finished transition only — not
+  // on unmount or whenever the parent hands in a new callback.
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !running) onFinished()
+    wasRunning.current = running
+  }, [running, onFinished])
 
   const close = () => {
     setOpen(false)

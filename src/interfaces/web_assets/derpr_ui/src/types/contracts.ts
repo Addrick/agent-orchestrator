@@ -310,7 +310,7 @@ export interface MemoryOperation {
 // DP-506 purge-and-rebuild job (GET/POST /api/v1/memory/rebuild).
 export interface MemoryRebuildPersona {
   name: string
-  state: 'waiting' | 'running' | 'done' | 'error'
+  state: 'waiting' | 'running' | 'done' | 'error' | 'skipped'
   counts: { blocks?: number; queued?: number; adopted?: number; pending?: number; total?: number }
   error: string | null
 }

@@ -1934,6 +1934,24 @@ class MemoryManager:
             )
         return block_id
 
+    def queue_unretained(self, interaction_ids: Sequence[int]) -> None:
+        """Queue a memory rebuild's in-window turns no block ever held
+        (DP-506) for the next cut. A row with no Pending_Retain entry joins
+        it as untrusted, as `adopt_retain_block` does; a DP-423 row already
+        there is only made unsent again (generation bump), so the taint and
+        DP-335 `retain_text` it recorded are kept — `queue_retain` would
+        overwrite both."""
+        if not interaction_ids:
+            return
+        with self.transaction() as conn:
+            conn.executemany(
+                "INSERT INTO Pending_Retain (interaction_id, persona_name, channel, untrusted)"
+                " SELECT interaction_id, persona_name, channel, 1 FROM User_Interactions"
+                " WHERE interaction_id = ?"
+                " ON CONFLICT(interaction_id) DO UPDATE SET generation = generation + 1",
+                [(int(i),) for i in interaction_ids],
+            )
+
     def unretained_turns(self, persona_name: str) -> List[Dict[str, Any]]:
         """A persona's user/assistant turns no block holds and none will
         (DP-506): never queued (before DP-423, or retained by DP-423 and
