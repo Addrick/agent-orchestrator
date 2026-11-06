@@ -810,19 +810,24 @@ async def _get_json(backend: Backend, path: str) -> Optional[dict[str, Any]]:
             writer.close()
 
 
+async def poll_backend(router: Router, backend: Backend) -> None:
+    models = await _get_json(backend, "/v1/models")
+    metrics = await _get_json(backend, "/metrics") if models else None
+    # kcpp has no JSON /metrics; its perf counters stand in for the statusline (DP-499). A
+    # Strata box that missed one /metrics poll is still Strata: it has no perf route to ask.
+    kcpp = models and not (metrics or {}).get("engine") and not (metrics is None and backend.strata)
+    perf = await _get_json(backend, "/api/extra/perf") if kcpp else None
+    was = backend.healthy
+    router.note_poll(backend, models, metrics, perf=perf)
+    if was != backend.healthy:
+        log.info("%s is %s (%s)", backend.name, "up" if backend.healthy else "down", backend.model)
+
+
 async def poll_forever(router: Router) -> None:
+    # Boxes are polled concurrently: polled in turn, a down box's POLL_TIMEOUT_S stretched every other
+    # box's cycle to ~8 s, aging its busy flags and its statusline sample with it (DP-499).
     while True:
-        for backend in router.backends:
-            models = await _get_json(backend, "/v1/models")
-            metrics = await _get_json(backend, "/metrics") if models else None
-            # kcpp has no JSON /metrics; its perf counters stand in for the statusline (DP-499). A
-            # Strata box that missed one /metrics poll is still Strata: it has no perf route to ask.
-            kcpp = models and not (metrics or {}).get("engine") and not (metrics is None and backend.strata)
-            perf = await _get_json(backend, "/api/extra/perf") if kcpp else None
-            was = backend.healthy
-            router.note_poll(backend, models, metrics, perf=perf)
-            if was != backend.healthy:
-                log.info("%s is %s (%s)", backend.name, "up" if backend.healthy else "down", backend.model)
+        await asyncio.gather(*(poll_backend(router, b) for b in router.backends))
         router.wake()  # busy flags and quiet timers change without a request ending
         await asyncio.sleep(POLL_INTERVAL_S)
 
