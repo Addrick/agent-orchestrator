@@ -37,6 +37,7 @@ import type {
   MemoryBank,
   MemoryDocumentList,
   MemoryOperationList,
+  MemoryRebuildState,
   UploadResult,
   InferenceServers,
   KoboldPerf,
@@ -495,6 +496,26 @@ export async function listMemoryOperations(
   )
   if (!r.ok) return memErr(r, 'list operations')
   return (await r.json()) as MemoryOperationList
+}
+
+export async function getMemoryRebuild(): Promise<MemoryRebuildState> {
+  const r = await fetch(`${BASE}/api/v1/memory/rebuild`, {
+    headers: { Accept: 'application/json' },
+  })
+  if (!r.ok) return memErr(r, 'rebuild status')
+  return (await r.json()) as MemoryRebuildState
+}
+
+// DP-506: wipes every memory persona's bank. `confirm` must be the phrase the
+// operator typed ("PURGE"); the server refuses anything else.
+export async function startMemoryRebuild(confirm: string): Promise<MemoryRebuildState> {
+  const r = await fetch(`${BASE}/api/v1/memory/rebuild`, {
+    method: 'POST',
+    headers: withAuth({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ confirm }),
+  })
+  if (!r.ok) return memErr(r, 'start rebuild')
+  return (await r.json()) as MemoryRebuildState
 }
 
 export async function deleteMemoryDocument(

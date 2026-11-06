@@ -53,6 +53,21 @@ class IngestPathHandler:
     def register(self, manager: ToolManager) -> None:
         manager.register("ingest_path", self._ingest_path)
 
+    @staticmethod
+    def cache_path(cache_dir: Path, bank_id: str) -> Path:
+        """The bank's sha256 cache file — the one place its name is decided."""
+        return cache_dir / f"{bank_id}.json"
+
+    @classmethod
+    def forget_bank(cls, cache_dir: Path, bank_id: str) -> None:
+        """Drop a bank's cache once the bank itself is gone (DP-506 rebuild):
+        left behind, it reports every file as unchanged and a re-ingest into
+        the new, empty bank skips them all."""
+        try:
+            cls.cache_path(cache_dir, bank_id).unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("ingest_path: could not drop cache for bank %s: %s", bank_id, e)
+
     # ----- public tool entry point -----
 
     async def _ingest_path(
@@ -101,7 +116,7 @@ class IngestPathHandler:
             }
 
         resolved_bank = bank_id
-        cache_path = self.cache_dir / f"{resolved_bank}.json"
+        cache_path = self.cache_path(self.cache_dir, resolved_bank)
         cache = self._load_cache(cache_path)
 
         # Determine display root for relpath keys: if user passed a file, use

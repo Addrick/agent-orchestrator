@@ -307,6 +307,20 @@ export interface MemoryOperation {
   error_message?: string | null
   retry_count?: number | null
 }
+// DP-506 purge-and-rebuild job (GET/POST /api/v1/memory/rebuild).
+export interface MemoryRebuildPersona {
+  name: string
+  state: 'waiting' | 'running' | 'done' | 'error' | 'skipped'
+  counts: { blocks?: number; queued?: number; adopted?: number; pending?: number; total?: number }
+  error: string | null
+}
+export interface MemoryRebuildState {
+  status: 'idle' | 'running' | 'finished'
+  started_at: string | null
+  finished_at: string | null
+  personas: MemoryRebuildPersona[]
+  targets?: string[]
+}
 export interface MemoryOperationList {
   bank_id: string
   total?: number

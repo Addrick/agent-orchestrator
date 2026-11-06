@@ -2263,6 +2263,8 @@ def test_adapter_engine_surface_is_enumerated():
         "bot_logic": "_bot_logic",
         "confirmations": "_confirmations",
         "provision_persona_memory": "_provision_persona_memory",
+        "memory_persona_names": "_memory_persona_names",
+        "rebuild_persona_memory": "_rebuild_persona_memory",
         "stream_response": "_stream_response",
         "stream_resolve_park": "_stream_resolve_park",
         "assemble_request": "_assemble_request",
