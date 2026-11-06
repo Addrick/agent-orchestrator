@@ -126,7 +126,7 @@ class ReminderAgent(Agent):
         channel = target.get("channel", "discord_dm")
         recipient_key = target.get("recipient", "adrich")
 
-        recipient = self._resolve_recipient(channel, recipient_key, ticket_id)
+        recipient = self._resolve_recipient(channel, recipient_key)
 
         ticket_count = body.count("\n• ") + (1 if body.lstrip().startswith("• ") else 0)
         action_id = self._log_task_root(
@@ -166,22 +166,9 @@ class ReminderAgent(Agent):
             await self._retain_action_series(action_id)
             return False
 
-    def _resolve_recipient(self, channel: str, recipient_key: str, ticket_id: int) -> str:
-        """Resolve a recipient key to an ID, or return the key if it's already an ID."""
-        if recipient_key.isdigit():
-            return recipient_key
-
-        recipients = self.agent_config.get("_recipients", {})
-        if recipient_key in recipients:
-            recipient_info = recipients[recipient_key]
-            if channel == "discord_channel" and recipient_info.get("discord_channel_id"):
-                return str(recipient_info["discord_channel_id"])
-            if channel == "discord_dm" and recipient_info.get("discord_user_id"):
-                return str(recipient_info["discord_user_id"])
-            if "email" in channel and recipient_info.get("email"):
-                return str(recipient_info["email"])
-
-        return str(recipient_key)
+    def _resolve_recipient(self, channel: str, recipient_key: str, ticket_id: Optional[int] = None) -> str:
+        """Resolve a recipient key via agent_config['_recipients'], or pass through."""
+        return super()._resolve_recipient(channel, recipient_key)
 
     async def _get_user_info(self, customer_id: Optional[int]) -> Tuple[str, str]:
         """Fetch human-readable name and profile link for a user."""

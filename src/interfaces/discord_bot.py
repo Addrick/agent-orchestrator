@@ -480,7 +480,16 @@ async def _post_pending_proposals(
             )
 
 
-def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
+def create_discord_bot(
+    chat_system: 'ChatSystem',
+    *,
+    debug_channel_id: Optional[int] = None,
+) -> CustomDiscordBot:
+    effective_debug_channel = (
+        DISCORD_DEBUG_CHANNEL
+        if (debug_channel_id is None or debug_channel_id == 0)
+        else debug_channel_id
+    )
     intents = discord.Intents.default()
     intents.message_content = True
     intents.messages = True  # Required for on_message_delete
@@ -633,7 +642,9 @@ def create_discord_bot(chat_system: 'ChatSystem') -> CustomDiscordBot:
     @client.event
     async def on_message(message: discord.Message) -> None:
         if message.author == client.user or (
-                isinstance(message.channel, discord.abc.GuildChannel) and message.channel.id == DISCORD_DEBUG_CHANNEL):
+                effective_debug_channel
+                and isinstance(message.channel, discord.abc.GuildChannel)
+                and message.channel.id == effective_debug_channel):
             return
 
         # DP-230: a message in a dispatched agent's thread goes straight to that

@@ -11,7 +11,7 @@ from config.global_config import (
     DISPATCH_PERSONA_NAME,
     QUARANTINE_TAGS,
 )
-from src.agents.base import Agent
+from src.agents.base import Agent, resolve_recipient
 from src.chat_system import ChatSystem
 from src.clients.notification import NotificationRouter
 from src.clients.zammad_client import ZammadClient
@@ -247,20 +247,17 @@ class DispatchAgent(Agent):
             self._finalize_action(action_id, "error", {"error": str(e)})
             await self._retain_action_series(action_id)
 
-    def _resolve_recipient(self, channel: str, ticket_id: int) -> str:
-        """Resolve the notification recipient from agent_config or fall back to zammad."""
+    def _resolve_recipient(self, channel: str, ticket_id: int) -> str:  # type: ignore[override]
+        """Resolve the notification recipient from agent_config or fall back to ticket ID."""
         defaults = self.agent_config.get("notification_defaults", {})
         recipient_name = defaults.get("recipient")
-        recipients = self.agent_config.get("_recipients", {})
-
-        if recipient_name and recipient_name in recipients:
-            recipient_info = recipients[recipient_name]
-            if channel == "discord_channel" and recipient_info.get("discord_channel_id"):
-                return str(recipient_info["discord_channel_id"])
-            if channel == "discord_dm" and recipient_info.get("discord_user_id"):
-                return str(recipient_info["discord_user_id"])
-            if "email" in channel and recipient_info.get("email"):
-                return str(recipient_info["email"])
+        resolved = resolve_recipient(
+            self.agent_config.get("_recipients"),
+            channel,
+            recipient_name,
+        )
+        if resolved is not None:
+            return resolved
 
         # No mapping found — fall back to the ticket ID (works for zammad notifier)
         logger.warning(

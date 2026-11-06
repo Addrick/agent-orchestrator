@@ -48,6 +48,8 @@ onto this path as their tickets land.
 
 **Ambient logging:** Messages in configured channels (default: "general", "random", "development") are logged to the database under persona "ambient" without triggering any response. Useful for building conversational context.
 
+**Debug channel exclusion:** Messages in the resolved Discord debug channel (`DISCORD_DEBUG_CHANNEL` when set, else `config/agents.json` `recipients.debug`) are ignored by Discord response handling (`on_message`), ensuring automated diagnostic and startup reports do not trigger bot replies.
+
 **Message deletion:** Deleting a message in Discord automatically suppresses it from future LLM context (the DB row is flagged, not deleted).
 
 **Character limits:** Messages over 2000 characters are automatically split across multiple messages.
@@ -1827,7 +1829,7 @@ before, check `list_models` rather than assuming.
 
 Half of every Proxmox and HuggingFace tool runs on the node itself: the scripts in
 `services/pve/` (the SSH wrapper, the model installer, the tier script, the unit
-template and the gguf header reader). Those are copied to the node **by hand**, so
+template, the gguf header reader, and the egress script). Those are copied to the node **by hand**, so
 CI cannot tell when the node is running older copies than the container. From
 2026-08-21 to 2026-10-08 it was, and `install_model` failed on every call without
 anyone noticing.
@@ -1841,6 +1843,8 @@ matches, nothing is posted.
 - It only runs when the Discord interface is running, `PVE_TOOLS_ENABLED` is on and a debug channel is known: the
   `debug` entry under `recipients` in `config/agents.json` (the same one managr's
   boot report posts to), or `DISCORD_DEBUG_CHANNEL` if set, which takes priority.
+  Messages in this resolved debug channel are ignored by Discord response handling
+  (`on_message`).
   With PVE tools on and neither set, derpr logs a warning that the check is off.
 - "Can't be checked" includes the node refusing the hash request. That happens
   when the node's wrapper is older than DP-418, so it reads as stale too.
