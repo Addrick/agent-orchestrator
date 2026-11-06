@@ -824,12 +824,16 @@ async def poll_backend(router: Router, backend: Backend) -> None:
 
 
 async def poll_forever(router: Router) -> None:
-    # Boxes are polled concurrently: polled in turn, a down box's POLL_TIMEOUT_S stretched every other
-    # box's cycle to ~8 s, aging its busy flags and its statusline sample with it (DP-499).
-    while True:
-        await asyncio.gather(*(poll_backend(router, b) for b in router.backends))
-        router.wake()  # busy flags and quiet timers change without a request ending
-        await asyncio.sleep(POLL_INTERVAL_S)
+    # One loop per box. Polling in turn, or in lockstep rounds (one gather per cycle), still makes every
+    # box wait for a down box's POLL_TIMEOUT_S, so the cycle stretches to ~8 s and ages each box's
+    # busy flags and statusline sample with it (DP-499).
+    async def poll_box(backend: Backend) -> None:
+        while True:
+            await poll_backend(router, backend)
+            router.wake()  # busy flags and quiet timers change without a request ending
+            await asyncio.sleep(POLL_INTERVAL_S)
+
+    await asyncio.gather(*(poll_box(b) for b in router.backends))
 
 
 async def main() -> None:

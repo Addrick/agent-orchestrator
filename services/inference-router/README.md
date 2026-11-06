@@ -74,7 +74,7 @@ VM200's `~/.config/opencode/opencode.json`; DP-490). Once a box answers, Strata 
 every ~3 s during prefill, so opencode's 5 min `chunkTimeout` is not at risk. Only generation paths (`GENERATION_PATHS`) are held
 or counted; other calls go straight to the first healthy box.
 
-Each box is polled every 3 s, all at once (one down box does not delay the others): `/v1/models` (up, model, context, loaded) and `/metrics` (busy with work
+Each box is polled on its own loop, 3 s after its last poll finished (a down box's 5 s timeout does not delay the others): `/v1/models` (up, model, context, loaded) and `/metrics` (busy with work
 that did not come through the router, which is how Adam's direct use of dt21 counts). A box is used
 only if it is **loaded and serves the primary's model**, so a kcpp swap on the R9700 takes dt21 out of
 rotation by itself, and a lazy Strata is never made to load.
