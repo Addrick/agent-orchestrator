@@ -320,8 +320,13 @@ RETAIN_REFUSED_PROMPT_SECONDS = 3600
 # scope first seen after DP-495 starts its prompt where that window did.
 RETAIN_LEGACY_WINDOW = 15
 # How much of the conversation before a block (or block part) rides along in
-# the Hindsight item `context` as labelled background.
-RETAIN_CONTEXT_TAIL_CHARS = 4000
+# the Hindsight item `context` as labelled background. Keep it small: Hindsight
+# stores `context` on every fact extracted from the item and prepends it to
+# each rerank candidate at recall, so this sets the per-candidate cost and
+# drowns the fact itself when large. 4000 made a 300-candidate rerank ~17x
+# slower (2.4s -> 42s on dt21) (DP-505). The block already holds its own turns;
+# this only has to resolve the first reply's references.
+RETAIN_CONTEXT_TAIL_CHARS = 500
 
 # Total per-persona context budget (prompt + reserved response). Same semantic
 # as KoboldCPP's `max_context_length`. Old persona configs without the field
