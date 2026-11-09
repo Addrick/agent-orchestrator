@@ -345,6 +345,13 @@ export default {
     "At most %(per_hour)d an hour are delivered. His reply, if any, arrives later as a new message.",
   args: { message: { type: "string", description: "The message. Keep it short; long ones are split into several Discord posts." } },
   async execute(args) {
+    // DP-508: a malformed call (no `message`, or the text as a JSON key) used
+    // to "succeed" and post a blank line. Fail it so the model resends.
+    const message = args && typeof args.message === "string" ? args.message.trim() : "";
+    if (!message) {
+      throw new Error('Not sent: notify_adam needs a non-empty "message" string argument, ' +
+        'e.g. {"message": "..."}. Your call had none. Send it again.');
+    }
     return "Queued for Adam. Keep working.";
   },
 }
@@ -970,6 +977,14 @@ class CodrAgent(Agent):
                     continue
                 done.add(key)
                 text = str((state.get("input") or {}).get("message") or "").strip()
+                if not text:
+                    # DP-508: never post a bare prefix. The tool itself now
+                    # rejects such a call; this guards any that still complete.
+                    self._log_task_root(RELAY_ACTION, trigger_context=key,
+                                        action_payload={"input": str(state.get("input"))[:1500]},
+                                        outcome="empty")
+                    logger.warning("codr agent: notify_adam call %s has no message; not posted", key)
+                    continue
                 allowed = self._rate_ok()
                 # Record first: a crash after the post must not post it twice.
                 row = self._log_task_root(RELAY_ACTION, trigger_context=key,
