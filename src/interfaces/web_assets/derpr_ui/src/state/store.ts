@@ -500,7 +500,17 @@ export function usePortalStore() {
         // re-fetch rather than stranding the user on an empty phantom channel.
         let resolvedChan = wantChan
         let resolvedChunks = cs
+        // DP-509: a channel clicked while this batch was in flight owns the
+        // view, so `cs` is the wrong channel's rows. Re-fetch for the clicked
+        // one: its own switchChannel may have run against the previous (or no)
+        // persona and fetched nothing usable.
+        const moved = activeChannelRef.current !== wantChan
+        if (moved) {
+          resolvedChan = activeChannelRef.current
+          resolvedChunks = await api.getTranscript(p, undefined, resolvedChan)
+        }
         if (
+          !moved &&
           wantChan !== 'web_ui' &&
           !chanList.some((g) => g.items.some((it) => it.channel === wantChan))
         ) {
@@ -513,7 +523,11 @@ export function usePortalStore() {
         const isLtmOn = persObj.long_term_memory ?? true
         setPersona(persObj)
         setChannels(chanList)
-        setChunks(resolvedChunks)
+        // A click during the re-fetch above owns the view; its own fetch wins.
+        if (resolvedChan === activeChannelRef.current) {
+          chunksRef.current = resolvedChunks
+          setChunks(resolvedChunks)
+        }
         setLtmOn(isLtmOn)
         // DP-498: the LTM block is a full Hindsight recall (2-7 s on a big
         // bank) and only feeds the preview row / budget bar, so it must not
@@ -724,19 +738,26 @@ export function usePortalStore() {
       cancelLtmPreview()
       setActiveChannel(channel)
       activeChannelRef.current = channel
+      // DP-509: blank the old channel's rows now. A long channel's fetch takes
+      // seconds, and until it lands the rail showed the new channel over the
+      // old channel's messages, which looked like the switch had failed.
+      chunksRef.current = []
+      setChunks([])
       if (persona) {
+        const p = persona.name
         // Remember this persona's channel choice for next reload (DP-273).
-        writePref(channelPrefKey(persona.name), channel)
-        await refreshTranscript(persona.name, channel)
-        void resumeRef.current(persona.name, channel, 'check')
-        try {
-          if (ltmOn) setLtmBlock(await api.getLtmBlock(persona.name, '', channel))
-        } catch {
-          setBanner(UNREACHABLE)
-        }
+        writePref(channelPrefKey(p), channel)
+        // DP-509: drop the fetch if the user moved on before it landed, so a
+        // slow (long-context) channel's transcript cannot overwrite the
+        // channel clicked after it.
+        await refreshTranscript(p, channel, () =>
+          p === activePersonaRef.current && channel === activeChannelRef.current)
+        if (channel !== activeChannelRef.current) return
+        void resumeRef.current(p, channel, 'check')
+        if (ltmOn) loadLtmBlock(p, channel)
       }
     },
-    [persona, ltmOn, refreshTranscript, cancelLtmPreview],
+    [persona, ltmOn, refreshTranscript, cancelLtmPreview, loadLtmBlock],
   )
 
   // "+ new channel" — just point the active channel at a fresh tag. No row
@@ -865,7 +886,10 @@ export function usePortalStore() {
             g.items.some((it) => it.channel === channel),
           )
           await Promise.all([
-            refreshTranscript(personaName, channel),
+            // DP-509: the switch can also land during this await.
+            refreshTranscript(personaName, channel, () =>
+              personaName === activePersonaRef.current
+              && channel === activeChannelRef.current),
             known ? Promise.resolve() : refreshChannels(personaName),
           ])
         }
@@ -893,7 +917,8 @@ export function usePortalStore() {
         setResolvingConfirm(false)
         setBanner(STALE_BANNER)
         if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
-        void refreshTranscript(personaName, channel)
+        void refreshTranscript(personaName, channel, () =>
+          personaName === activePersonaRef.current && channel === activeChannelRef.current)
       },
     }),
     [refreshTranscript, refreshChannels, flushTokens, scheduleFlush, resetTokenBuf],
@@ -957,7 +982,7 @@ export function usePortalStore() {
       idFrameRef.current = null
       resetTokenBuf()
       setBanner(null)
-      const cs = (await refreshTranscript(p, ch)) ?? chunksRef.current
+      const cs = (await refreshTranscript(p, ch, current)) ?? chunksRef.current
       // Stopped, or superseded by a newer resume, while the transcript loaded.
       if (seq !== resumeSeqRef.current || runIdRef.current !== run.run_id) return
       if (!current()) {
