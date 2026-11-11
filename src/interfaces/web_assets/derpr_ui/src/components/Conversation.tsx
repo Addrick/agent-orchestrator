@@ -43,20 +43,35 @@ export function Conversation({ store }: { store: PortalStore }) {
     if (personaName) void refreshTranscript(personaName)
   }, [personaName, refreshTranscript])
 
-  // Auto-scroll: follow new content (chunks, stream frames, dev rows) but only
-  // while the user is pinned near the bottom — scrolling up to read history
-  // releases the follow, returning to the bottom re-arms it.
+  // Auto-scroll: follow new content (chunks, stream frames, dev rows, the LTM
+  // preview) but only while the user is pinned to the bottom. DP-510: the
+  // follow is released by any upward scroll — not by distance from the bottom,
+  // which kept it armed through the first frames of an animated wheel notch so
+  // the next token yanked the view back — and re-armed only near the bottom.
+  // Programmatic follow scrolls only ever move down; a content shrink that
+  // clamps scrollTop lands exactly on the bottom.
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  const lastTopRef = useRef(0)
   const onScroll = () => {
     const el = scrollRef.current
     if (!el) return
-    followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (gap < 2) followRef.current = true
+    else if (el.scrollTop < lastTopRef.current) followRef.current = false
+    else if (gap < 80) followRef.current = true
+    lastTopRef.current = el.scrollTop
+  }
+  const onWheel = (e: React.WheelEvent) => {
+    if (e.deltaY < 0) followRef.current = false
   }
   useEffect(() => {
     const el = scrollRef.current
-    if (el && followRef.current) el.scrollTop = el.scrollHeight
-  }, [chunks, stream, devRow, loading, viewMode, alarms])
+    if (el && followRef.current) {
+      el.scrollTop = el.scrollHeight
+      lastTopRef.current = el.scrollTop
+    }
+  }, [chunks, stream, devRow, loading, viewMode, alarms, ltmBlock, ltmOn])
 
   // Feeds only the BudgetBar; the filter + join over the whole
   // transcript is too heavy to redo on every per-frame stream re-render.
@@ -70,8 +85,8 @@ export function Conversation({ store }: { store: PortalStore }) {
   )
 
   // Identity-based row positions (DP-132 #9); memoized so streaming re-renders
-  // skip the three full-transcript scans.
-  const { lastUserChunkIndex, lastAssistantChunkIndex, firstUserChunkIndex } =
+  // skip the full-transcript scans.
+  const { lastUserChunkIndex, lastAssistantChunkIndex } =
     useMemo(() => {
       const lastUser = chunks.reduce(
         (acc, c, i) => (c.role === 'user' && !c.ephemeral ? i : acc),
@@ -81,14 +96,9 @@ export function Conversation({ store }: { store: PortalStore }) {
         (acc, c, i) => (c.role === 'assistant' && !c.ephemeral ? i : acc),
         -1,
       )
-      // LTM author's-note row renders after the FIRST real user turn, located
-      // by identity (not positional index===1, which vanished on a single-chunk
-      // transcript and mispositioned when chunk[0] was an assistant turn).
-      const firstUser = chunks.findIndex((c) => c.role === 'user' && !c.ephemeral)
       return {
         lastUserChunkIndex: lastUser,
         lastAssistantChunkIndex: lastAssistant,
-        firstUserChunkIndex: firstUser,
       }
     }, [chunks])
 
@@ -162,7 +172,7 @@ export function Conversation({ store }: { store: PortalStore }) {
         />
       )}
 
-      <div className="scroll" ref={scrollRef} onScroll={onScroll}>
+      <div className="scroll" ref={scrollRef} onScroll={onScroll} onWheel={onWheel}>
         <div className="transcript" id="transcript">
           {loading && <div className="dimrow">loading transcript…</div>}
 
@@ -180,14 +190,8 @@ export function Conversation({ store }: { store: PortalStore }) {
               </div>
 
               {chunks.map((c, i) => c.interaction_id != null && c.interaction_id === hiddenId ? null : (
-                <RenderedSlot
-                  key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
-                  showLtm={i === firstUserChunkIndex}
-                  ltmOn={ltmOn}
-                  ltmBlock={ltmBlock}
-                  persona={persona}
-                >
                   <MessageRow
+                    key={c.interaction_id ?? c.ephemeral_chunk_id ?? `slot-${i}`}
                     chunk={c}
                     tools={tools}
                     isLastUser={
@@ -206,7 +210,6 @@ export function Conversation({ store }: { store: PortalStore }) {
                     onResolveConfirm={resolveConfirm}
                     resolvingConfirm={resolvingConfirm}
                   />
-                </RenderedSlot>
               ))}
 
               {/* optimistic echo of the just-sent user turn — replaced by the
@@ -250,6 +253,22 @@ export function Conversation({ store }: { store: PortalStore }) {
                     {devRow.command}
                   </div>
                   <div className="text">{devRow.response}</div>
+                </div>
+              )}
+
+              {/* DP-431/DP-510: the recalled block rides at the head of the
+                  NEXT user message, so it previews last — matching CONTEXT ↦
+                  LLM. Above the transcript it misplaced the block, and every
+                  as-you-type re-fetch resized a row above the viewport. */}
+              {ltmOn && ltmBlock && (
+                <div className="ltmrow">
+                  <div className="lh">
+                    <span className="lbl">◈ LTM recalled · prepended to your next message</span>
+                    <span className="lbl" style={{ marginLeft: 'auto' }}>
+                      /session/{persona.name}/ltm_block
+                    </span>
+                  </div>
+                  <div className="text">{ltmBlock}</div>
                 </div>
               )}
             </>
@@ -303,40 +322,5 @@ export function Conversation({ store }: { store: PortalStore }) {
         onDraftChange={previewLtm}
       />
     </div>
-  )
-}
-
-// Injects the LTM row right after the first user turn (matches the prototype's
-// author's-note placement). The caller locates that turn by identity and passes
-// `showLtm`, so the row no longer depends on a positional index.
-function RenderedSlot({
-  showLtm: showLtmSlot,
-  ltmOn,
-  ltmBlock,
-  persona,
-  children,
-}: {
-  showLtm: boolean
-  ltmOn: boolean
-  ltmBlock: string | null
-  persona: { name: string }
-  children: React.ReactNode
-}) {
-  const showLtm = ltmOn && ltmBlock && showLtmSlot
-  return (
-    <>
-      {showLtm && (
-        <div className="ltmrow">
-          <div className="lh">
-            <span className="lbl">◈ LTM recalled · prepended to your message</span>
-            <span className="lbl" style={{ marginLeft: 'auto' }}>
-              /session/{persona.name}/ltm_block
-            </span>
-          </div>
-          <div className="text">{ltmBlock}</div>
-        </div>
-      )}
-      {children}
-    </>
   )
 }
