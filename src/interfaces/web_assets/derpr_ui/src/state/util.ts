@@ -15,6 +15,32 @@ export function policyLabel(
   return '—'
 }
 
+/** DP-510: a re-fetched transcript arrives as all-new objects, which defeats
+ *  MessageRow's memo and re-parses every row's markdown/KaTeX/tool cards — on
+ *  the 5 s codr poll and every window focus. Keep the previous object for any
+ *  row whose data is unchanged, and the previous array when nothing changed. */
+export function reuseChunks<T extends { interaction_id: number | null; ephemeral_chunk_id?: string }>(
+  prev: T[],
+  next: T[],
+): T[] {
+  const key = (c: T) =>
+    c.interaction_id != null ? `i${c.interaction_id}` : c.ephemeral_chunk_id ? `e${c.ephemeral_chunk_id}` : null
+  const byKey = new Map<string, T>()
+  for (const c of prev) {
+    const k = key(c)
+    if (k) byKey.set(k, c)
+  }
+  let same = prev.length === next.length
+  const out = next.map((c, i) => {
+    const k = key(c)
+    const old = k ? byKey.get(k) : undefined
+    const kept = old && JSON.stringify(old) === JSON.stringify(c) ? old : c
+    if (kept !== prev[i]) same = false
+    return kept
+  })
+  return same ? prev : out
+}
+
 /** Cheap client-side estimate — DEMO/budget-only. Production token counts must
  *  come from POST /api/extra/tokencount or the /assemble payload (S4/S5). */
 export function estimateTokens(s: string): number {

@@ -8,7 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api/client'
 import { attachTurn, streamChat, streamConfirm } from '../api/stream'
 import { readPref, writePref } from './persist'
-import { rawThinkState } from './util'
+import { rawThinkState, reuseChunks } from './util'
 import type {
   Persona,
   ToolDef,
@@ -354,10 +354,11 @@ export function usePortalStore() {
       try {
         const cs = await api.getTranscript(p, undefined, channel ?? activeChannelRef.current)
         if (wanted && !wanted()) return null
-        chunksRef.current = cs
-        setChunks(cs)
+        const kept = reuseChunks(chunksRef.current, cs)
+        chunksRef.current = kept
+        setChunks(kept)
         setOffline(api.usingMock())
-        return cs
+        return kept
       } catch {
         setBanner(UNREACHABLE)
         return null
@@ -390,8 +391,9 @@ export function usePortalStore() {
           // owns the view now — writing this would show the wrong rows.
           if (p !== activePersonaRef.current || ch !== activeChannelRef.current
             || streamingRef.current) return
-          chunksRef.current = cs
-          setChunks(cs)
+          const kept = reuseChunks(chunksRef.current, cs)
+          chunksRef.current = kept
+          setChunks(kept)
           // An errored turn keeps its "sending…" echo until dismissed; the
           // row it persisted is in `cs` now, so drop the echo or it shows twice.
           setStream((s) => (!s.active && s.userText != null ? { ...s, userText: null } : s))
@@ -422,8 +424,9 @@ export function usePortalStore() {
         (cs) => {
           if (p !== activePersonaRef.current || ch !== activeChannelRef.current
             || streamingRef.current) return
-          chunksRef.current = cs
-          setChunks(cs)
+          const kept = reuseChunks(chunksRef.current, cs)
+          chunksRef.current = kept
+          setChunks(kept)
         },
         () => {}, // the next tick tries again
       )
