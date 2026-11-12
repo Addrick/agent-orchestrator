@@ -6,10 +6,10 @@ An async, provider-agnostic LLM orchestration engine for chatbot automation: IT 
 
 ## What it does
 
-- **Chat orchestration.** One `ChatSystem` brokers requests across six providers (OpenAI, Anthropic, Google Gemini/Gemma, a local KoboldCPP or Strata server over OpenAI chat-completions, and the `agy` and Claude Code CLIs). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
+- **Chat orchestration.** One `ChatSystem` brokers requests across seven providers (OpenAI, Anthropic, Google Gemini/Gemma, a local KoboldCPP or Strata server over OpenAI chat-completions, the `agy` and Claude Code CLIs, and an `opencode serve` session — DP-448). Streaming-first: token deltas, tool calls, and tool results all flow through a single event stream.
 - **Multi-interface.** Discord bot (primary), Gmail (PoC), Zammad agents, and a FastAPI web portal (React, at `/derpr`) with persona CRUD, DB-as-source history, version chevrons for regenerations, and engine-side prompt/budget management on the OAI route.
 - **Persona system.** Stateful LLM configs with `ExecutionMode` (AUTONOMOUS / CONFIRM) and `MemoryMode` (CHANNEL_ISOLATED, SERVER_WIDE, PERSONAL, GLOBAL, TICKET_ISOLATED). Runtime-mutable through `set` commands; persisted to `data/personas.json`.
-- **Tool loop.** JSON-schema tools dispatched via `ToolManager`, budgeted at 15 executed tool calls per request by default (plus a 25-round-trip runaway guard; a persona can set its own budget, 1–100, and its guard moves with it — DP-428), with read/write classification, service-binding gating, and every write parked for human approval regardless of execution mode.
+- **Tool loop.** JSON-schema tools dispatched via `ToolManager`, budgeted at 15 executed tool calls per request by default (plus a 25-round-trip runaway guard; a persona can set its own budget, 1–100, and its guard moves with it — DP-428), with read/write classification, service-binding gating, and a per-tool off · allow · ask policy as the only approval gate — `ask` parks the call for a human, `allow` runs it; writes default to `ask`, regardless of execution mode (DP-497).
 - **Autonomous agents.** Background workers on interval schedules: `ZammadBot` (multi-stage triage via system personas), `DispatchAgent` (priority + notification routing), `ReminderAgent` (open-ticket nudges), `ManagrAgent` (triage manager that emits human-approved proposals), `SqliteConsolidator` (segment + summarize + embed, SQLite backend only). Also: the `fixr` self-edit supervisor, Proxmox and HuggingFace model-management tools, an MCP client and bridge, and an optional voice pipeline — see `docs/architecture/overview.md`.
 - **Tiered memory.** Sliding-window history from SQLite plus semantic recall via either `SqliteSemanticBackend` (default, sqlite-vec) or `HindsightBackend` (alpha, REST to a Dockerised hindsight + pgvector). Engine-side recall is routed through the `MemoryBackend` ABC; transcript layer (logging, suppression, edit/version history, audit) stays on `MemoryManager`.
 
@@ -46,7 +46,7 @@ Full component diagram (every class, every edge) → [`docs/architecture.mmd`](d
 |------------|---------------------------------------------------------------------------------------|
 | Runtime    | Python 3.14, `asyncio` throughout                                                     |
 | Storage    | SQLite (`sqlite-vec` for KNN); optional Postgres + pgvector via Hindsight container   |
-| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, local KoboldCPP / Strata (chat-completions), `agy` CLI, Claude Code CLI |
+| LLM APIs   | OpenAI, Anthropic, Google Gemini/Gemma, local KoboldCPP / Strata (chat-completions), `agy` CLI, Claude Code CLI, opencode |
 | Embeddings | `gemini-embedding-001` (3072-d, L2-normalised)                                        |
 | Web        | FastAPI + uvicorn (portal/adapter), discord.py, google-api-python-client              |
 | Packaging  | Docker + Docker Compose; `uv pip compile` (requirements.in → requirements.txt)           |
@@ -67,10 +67,11 @@ src/
   memory/                MemoryManager, backend ABC, SQLite + Hindsight impls,
                          consolidation, context budget, router
   agents/                Agent ABC, AgentManager, ZammadBot, DispatchAgent,
-                         ReminderAgent, ManagrAgent, ContentClassifier, DateTagger,
-                         SqliteConsolidator, AgentServiceIntegration
+                         ReminderAgent, ManagrAgent, CodrAgent, ContentClassifier,
+                         DateTagger, SqliteConsolidator, AgentServiceIntegration
   interfaces/            discord_bot, gmail_bot, kobold_engine_adapter (FastAPI
-                         portal), transcript
+                         portal), transcript, turn_runs, memory_rebuild,
+                         http_protocol, infra_panel
   clients/               ZammadClient + ZammadIntegration, NotificationRouter,
                          Notifier impls, ServiceIntegration ABC
   personas/              store.py — persona/model file persistence
@@ -78,7 +79,7 @@ src/
                          claude_cli_env, notes_workspace, history_shape,
                          google_utils, message_utils, model_utils
   bootstrap/  database/  proposals/  security/  self_edit/  voice/
-  proxmox/  huggingface/  — subsystems; see docs/architecture/architecture.md
+  proxmox/  huggingface/  stagr/  — subsystems; see docs/architecture/architecture.md
   app_manager.py         Top-level lifecycle
   main.py                Startup wiring
 config/                  global_config.py, default_personas.json,
@@ -144,7 +145,7 @@ All variables are read directly via `os.environ` — set them in `.env` or your 
 | `DATA_DIR` | Where all mutable state lives (default `./data`; the container sets `/data`, outside the app tree) |
 | `MEMORY_DATABASE_FILE` | SQLite path (default `<DATA_DIR>/user_memory.db`) |
 | `KOBOLD_DEFAULT_PERSONA` | Persona served when the portal opens with no selection |
-| `DISCORD_DEBUG_CHANNEL` | Channel id excluded from response handling; when set, also overrides agents.json `recipients.debug` as the destination of the node-artifact drift report |
+| `DISCORD_DEBUG_CHANNEL` | Debug channel id, excluded from response handling (unset → agents.json `recipients.debug` is the debug channel and is excluded instead, DP-422); when set, also overrides agents.json `recipients.debug` as the destination of the node-artifact drift report |
 | `SEMANTIC_BACKEND`, `HINDSIGHT_URL` | Switch semantic recall to Hindsight (alpha) |
 | `RATE_LIMIT_*` | Per-family RPM/RPD/TPR overrides — see `config/global_config.py` |
 

@@ -1249,7 +1249,7 @@ What it can do:
 - **koboldcpp** — "switch :5001 to gemma" → `set_active_model`.
 
 It is `AUTONOMOUS` on purpose: the execution mode is not what protects you here —
-the write-audit is, and that fires regardless of mode. Making it `CONFIRM` would
+its tools' ask state is ([Allow vs ask](#allow-vs-ask)), and that applies regardless of mode. Making it `CONFIRM` would
 only add a second prompt in front of the same park.
 
 **It operates the node it runs on.** derpr's own container is a guest on that
@@ -1330,8 +1330,8 @@ write tool calls as plain text. It does **not** cover Claude Code (`cc-*`)
 personas, which run Claude Code's own tools inside its sandbox, not DERPR's (see
 [Claude Code](#claude-code-cc--sandboxed-autonomous-provider)).
 
-### Universal Write-Audit
-Regardless of execution mode, **all write tools** (tools that modify state, like creating tickets or deleting users) are parked for human audit before execution. This ensures that no state-changing action is taken without explicit user consent.
+### Write approval
+Regardless of execution mode, a tool call parks for your approval when the persona has that tool on **ask** — see [Allow vs ask](#allow-vs-ask). Write tools (tools that modify state, like creating tickets or deleting users) **default** to ask, so out of the box no state-changing action runs without your consent; setting a write to **allow** lets it run unprompted (DP-497).
 
 **Proposing an action no longer ends the turn (DP-297).** A gated write is queued
 and the model keeps working, so one reply can propose several actions — each with

@@ -119,6 +119,21 @@ and from `ChatSystem.run_retain_maintenance`, whose first pass is the boot pass)
 nearest shape is the `CodrAgent` tick (poll a remote's durable record on an interval); recorded
 `unreviewed` in `capability_map.md` *Hold local state until a remote service finishes accepted work*.
 
+**Re-checked 2026-11-12 at `3c6d650` (weekly review; a probe of what DP-497–511 changed, not a
+regeneration).** Corrections to the probes above:
+
+- **`scripts/backfill_hindsight.py` is gone** — DP-506 deleted it (`57bbe61`). Its replacement is
+  the portal's purge-and-rebuild job, `interfaces/memory_rebuild.py` → `ChatSystem.rebuild_persona_memory`
+  (one job at a time, `confirm: "PURGE"`, personas serially). Hindsight writers are still four:
+  `retain_turn` / the DP-495 block retain, `replace_session` (DP-409), `retain_document` and the
+  DP-506 rebuild. Still no mechanism row lays them out.
+- **The 2026-10-08 "debug channel resolved two ways" and "recipient resolution is five copies"
+  findings are fixed** — DP-422 unified both (`main._debug_channel_id` feeds `on_message`'s
+  exclusion; `capability_map.md` *Resolve who to notify* is `single`).
+- **Still missing** (listed by the 2026-10-29 review, needs a session with the source open): the
+  codr/stagr mechanisms — codr's queue on `DATA_DIR/codr_tasks` with stagr as second writer,
+  the opencode session per ticket (DP-484), retry-on-failed-check (DP-482), SandboxNet LAN/WAN.
+
 ---
 
 ## A · Work that outlives the turn that started it
