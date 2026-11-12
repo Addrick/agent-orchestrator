@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { Persona, ToolDef } from '../types/contracts'
 import type { PortalStore } from '../state/store'
 import { policyLabel, estimateTokens, fmtTok } from '../state/util'
 import { readPref, writePref } from '../state/persist'
+import { startDragResize } from './dragResize'
 
 type Tab = 'persona' | 'tools' | 'raw'
 const TABS: Tab[] = ['persona', 'tools', 'raw']
@@ -31,34 +32,17 @@ export function Inspector({ store }: Props) {
     writePref('inspector_tab', tab)
   }, [tab])
   const { persona, tools } = store
-  const dragRef = useRef<{ startX: number; startW: number } | null>(null)
-
   const onResizeStart = useCallback((e: React.PointerEvent) => {
-    e.preventDefault()
     const root = document.documentElement
     const cur =
       parseInt(getComputedStyle(root).getPropertyValue('--insp-w'), 10) || INSP_MIN
-    dragRef.current = { startX: e.clientX, startW: cur }
-    document.body.classList.add('resizing')
-
-    const onMove = (ev: PointerEvent) => {
-      const d = dragRef.current
-      if (!d) return
-      // handle is on the inspector's LEFT edge → dragging left widens it
-      const next = Math.min(
-        INSP_MAX,
-        Math.max(INSP_MIN, d.startW + (d.startX - ev.clientX)),
-      )
-      root.style.setProperty('--insp-w', `${next}px`)
-    }
-    const onUp = () => {
-      dragRef.current = null
-      document.body.classList.remove('resizing')
-      window.removeEventListener('pointermove', onMove)
-      window.removeEventListener('pointerup', onUp)
-    }
-    window.addEventListener('pointermove', onMove)
-    window.addEventListener('pointerup', onUp)
+    startDragResize(e, {
+      axis: 'x',
+      start: cur,
+      min: INSP_MIN,
+      max: INSP_MAX,
+      apply: (w) => root.style.setProperty('--insp-w', `${w}px`),
+    })
   }, [])
 
   return (

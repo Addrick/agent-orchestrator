@@ -2,10 +2,16 @@ import { useState, useRef, useEffect } from 'react'
 import { useMicCapture } from './useMicCapture'
 import { useMicStream } from './useMicStream'
 import { transcribeVoice, getVoiceWebEnabled } from '../api/client'
+import { fmtTok } from '../state/util'
 
 interface Props {
   ltmOn: boolean
   onToggleLtm: () => void
+  // DP-511: size of the LTM preview (null = LTM off or no recall yet) and the
+  // fold button that opens/closes its dock above the composer.
+  ltmTokens: number | null
+  ltmOpen: boolean
+  onToggleLtmOpen: () => void
   onSend: (text: string) => void
   // DP-447: set when the conversation ends on a continuable assistant reply —
   // an empty composer then offers CONTINUE instead of SEND.
@@ -35,7 +41,7 @@ function autosize(el: HTMLTextAreaElement) {
 }
 
 export function Composer({
-  ltmOn, onToggleLtm, onSend, onContinue, restoredDraft, onAbort, streaming, onDraftChange,
+  ltmOn, onToggleLtm, ltmTokens, ltmOpen, onToggleLtmOpen, onSend, onContinue, restoredDraft, onAbort, streaming, onDraftChange,
 }: Props) {
   const [text, setText] = useState('')
   // Adjusted during render (not an effect) so the restored text lands in the
@@ -198,6 +204,16 @@ export function Composer({
           <span className="sw" />
           LTM recall
         </button>
+        {ltmOn && (
+          <button
+            className="mini ltmfold"
+            onClick={onToggleLtmOpen}
+            disabled={ltmTokens == null}
+            title={ltmOpen ? 'hide the recalled LTM block' : 'show the recalled LTM block'}
+          >
+            {ltmTokens == null ? 'no recall' : `${ltmOpen ? '▾' : '▸'} ${fmtTok(ltmTokens)} tok`}
+          </button>
+        )}
         {voiceWeb && mic.supported && (
           <button
             className={'toggle-chip' + (autoSend ? ' on' : '')}
