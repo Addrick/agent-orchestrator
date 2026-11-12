@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PortalStore } from '../state/store'
-import { policyLabel } from '../state/util'
+import { estimateTokens, policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
 import { StreamRow } from './StreamRow'
 import { BudgetBar } from './BudgetBar'
 import { ContextView } from './ContextView'
 import { Composer } from './Composer'
+import { LtmDock } from './LtmDock'
 
 export function Conversation({ store }: { store: PortalStore }) {
   const {
@@ -43,8 +44,11 @@ export function Conversation({ store }: { store: PortalStore }) {
     if (personaName) void refreshTranscript(personaName)
   }, [personaName, refreshTranscript])
 
-  // Auto-scroll: follow new content (chunks, stream frames, dev rows, the LTM
-  // preview) but only while the user is pinned to the bottom. DP-510: the
+  // DP-511: the LTM preview is collapsed by default on every load.
+  const [ltmOpen, setLtmOpen] = useState(false)
+  const ltmTokens = ltmOn && ltmBlock ? estimateTokens(ltmBlock) : null
+
+  // Auto-scroll: follow new content (chunks, stream frames, dev rows) but only while the user is pinned to the bottom. DP-510: the
   // follow is released by any upward scroll — not by distance from the bottom,
   // which kept it armed through the first frames of an animated wheel notch so
   // the next token yanked the view back — and re-armed only near the bottom.
@@ -71,7 +75,21 @@ export function Conversation({ store }: { store: PortalStore }) {
       el.scrollTop = el.scrollHeight
       lastTopRef.current = el.scrollTop
     }
-  }, [chunks, stream, devRow, loading, viewMode, alarms, ltmBlock, ltmOn])
+  }, [chunks, stream, devRow, loading, viewMode, alarms])
+  // The scroller shrinks when the LTM dock opens or is dragged taller (and when
+  // the draft textarea grows); keep a pinned view on the bottom through it.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      if (followRef.current) {
+        el.scrollTop = el.scrollHeight
+        lastTopRef.current = el.scrollTop
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
 
   // Feeds only the BudgetBar; the filter + join over the whole
   // transcript is too heavy to redo on every per-frame stream re-render.
@@ -256,21 +274,6 @@ export function Conversation({ store }: { store: PortalStore }) {
                 </div>
               )}
 
-              {/* DP-431/DP-510: the recalled block rides at the head of the
-                  NEXT user message, so it previews last — matching CONTEXT ↦
-                  LLM. Above the transcript it misplaced the block, and every
-                  as-you-type re-fetch resized a row above the viewport. */}
-              {ltmOn && ltmBlock && (
-                <div className="ltmrow">
-                  <div className="lh">
-                    <span className="lbl">◈ LTM recalled · prepended to your next message</span>
-                    <span className="lbl" style={{ marginLeft: 'auto' }}>
-                      /session/{persona.name}/ltm_block
-                    </span>
-                  </div>
-                  <div className="text">{ltmBlock}</div>
-                </div>
-              )}
             </>
           )}
 
@@ -311,9 +314,16 @@ export function Conversation({ store }: { store: PortalStore }) {
         </div>
       </div>
 
+      {/* DP-511: docked outside the scroller — it belongs to the next message,
+          not the history (DP-431), and its height changes only when dragged. */}
+      {ltmOpen && ltmOn && ltmBlock && persona && <LtmDock block={ltmBlock} personaName={persona.name} />}
+
       <Composer
         ltmOn={ltmOn}
         onToggleLtm={toggleLtm}
+        ltmTokens={ltmTokens}
+        ltmOpen={ltmOpen}
+        onToggleLtmOpen={() => setLtmOpen((o) => !o)}
         onSend={(t) => sendTurn(t)}
         onContinue={canContinue ? onContinue : undefined}
         restoredDraft={restoredDraft}

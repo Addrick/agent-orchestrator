@@ -181,6 +181,7 @@ body.no-rail.no-insp .body { grid-template-columns: 0 var(--chan-w) 1fr 0; }
 /* suppress the column-collapse animation while actively dragging */
 body.resizing .body { transition: none; }
 body.resizing { cursor: col-resize; user-select: none; }
+body.resizing.rows { cursor: row-resize; }
 
 /* ============================================================ NAV RAIL */
 .rail { align-items: center; padding: 10px 0; gap: 4px; }
@@ -301,11 +302,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 .mini:hover { color: var(--ink-2); border-color: var(--line-2); }
 
 /* LTM injected row (from /ltm_block, NOT a chunk) */
-.ltmrow { padding: 12px 18px; border-bottom: 1px solid var(--line); border-left: 2px solid var(--mem); background: linear-gradient(90deg, var(--mem-bg), transparent 65%); }
-.ltmrow .lh { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
-.ltmrow .lbl { color: var(--mem); }
-.ltmrow .text { color: var(--ink-2); font-size: 11.5px; line-height: 1.5; font-family: var(--sans); white-space: pre-wrap; }
-.ltmrow .text .m { color: var(--mem); }
+/* DP-511: LTM preview docked above the composer; height is drag-only */
+.ltmdock { flex: none; position: relative; display: flex; flex-direction: column; min-height: 0; padding: 10px 18px; border-top: 1px solid var(--line); border-left: 2px solid var(--mem); background: linear-gradient(90deg, var(--mem-bg), transparent 65%); }
+.ltmdock-resizer { position: absolute; left: 0; right: 0; top: -3px; height: 7px; cursor: row-resize; z-index: 5; }
+.ltmdock-resizer:hover { background: var(--accent-bg); }
+.ltmdock .lh { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; flex: none; }
+.ltmdock .lbl { color: var(--mem); }
+.ltmdock .text { flex: 1; min-height: 0; overflow-y: auto; color: var(--ink-2); font-size: 11.5px; line-height: 1.5; font-family: var(--sans); white-space: pre-wrap; }
+.ltmfold { font-size: 10.5px; padding: 3px 8px; }
+.ltmfold:not(:disabled) { color: var(--mem); border-color: rgba(163,148,242,0.35); }
+.ltmfold:disabled { cursor: default; opacity: 0.6; }
 
 /* message rows */
 .msg { display: grid; grid-template-columns: 30px 1fr; gap: 13px; padding: 15px 18px; border-bottom: 1px solid var(--line); position: relative; }
