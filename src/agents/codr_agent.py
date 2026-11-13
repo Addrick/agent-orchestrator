@@ -759,9 +759,9 @@ def wake_result(task_id: str, state: str, why: str, rows: List[Dict[str, Any]]) 
 #: The tool result a call that found codr busy is patched with (DP-517).
 IDLE_WAKE_RESULT: Dict[str, Any] = {
     "codr": "idle",
-    "instruction": ("codr's box is free now; your call above did not run then. codr starts no ticket "
-                    "while this turn runs, so run what you still need on its box now, then carry on "
-                    "with what you were doing."),
+    "instruction": ("codr's box is free now. The call above did not run when you made it; if you have "
+                    "not run it since, run what you still need on codr's box now (codr starts no ticket "
+                    "while this turn runs), then carry on with what you were doing."),
 }
 
 
@@ -799,6 +799,7 @@ class CodrAgent(Agent):
         # they are not garbage-collected).
         self._waking: Set[str] = set()
         self._wake_runs: Set["asyncio.Task[None]"] = set()
+        self._unsettled: Set[str] = set()       # wakes their resolve left pending (DP-517)
 
     # -- plumbing
 
@@ -883,11 +884,12 @@ class CodrAgent(Agent):
 
             if self._dispose_pending and not busy:
                 await self._dispose(client)
-            # DP-517: no open task turn and nothing busy is codr idle, the
-            # same test stagr's tools refuse on. A call they refused waits
-            # for this; it is woken before the next ticket can start (the
-            # wake is in `_waking`, so `_start_next` waits for it).
-            if not busy:
+            # DP-517: no open task turn, nothing busy and nobody holding the
+            # workspace lock is codr idle, the same test stagr's tools refuse
+            # on. A call they refused waits for this; it is woken before the
+            # next ticket can start (the wake is in `_waking`, so
+            # `_start_next` waits for it).
+            if not busy and not workspace_lock(self.directory).locked():
                 self._wake_idle_waiters()
             # DP-493: while stagr is being told a ticket ended, start nothing,
             # so a ticket queued ahead of time waits for stagr's turn (it may
@@ -1030,7 +1032,7 @@ class CodrAgent(Agent):
         if confirmations is None:
             return
         waiting = [p.token for p in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_TICKET)
-                   if p.token not in self._waking]
+                   if p.token not in self._waking and p.token not in self._unsettled]
         if not waiting:
             return
         tasks, skipped = load_tickets(global_config.CODR_TASKS_DIR, int(self.cfg["max_attempts"]))
@@ -1043,38 +1045,42 @@ class CodrAgent(Agent):
             state, why = states.get(tid) or ((PASSED, "") if "pass" in outcomes.get(tid, []) else (REMOVED, ""))
             if state not in FINAL_STATES:
                 continue
-            self._waking.add(tid)
-            run = asyncio.create_task(self._wake_ticket(tid, state, why, attempts.get(tid, [])))
-            self._wake_runs.add(run)
-            run.add_done_callback(self._wake_runs.discard)
+            self._spawn_wake([tid], DEFERRAL_KIND_CODR_TICKET, state,
+                             wake_result(tid, state, why, attempts.get(tid, [])), f"stagr [{tid}]")
 
     def _wake_idle_waiters(self) -> None:
         """Wake each stagr conversation with a call that found codr busy
-        (DP-517, `codr_idle`). Called only on a tick that saw codr idle. Every
-        pending one is settled: the conversation lock folds several from one
-        turn into one continuation."""
+        (DP-517, `codr_idle`). Called only on a tick that saw codr idle. One
+        wake per conversation, settling all of its waiting calls as one batch
+        (`stream_resolve_deferrals`), so a turn that had several refused gets
+        one continuation, not one per call."""
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return
+        by_conversation: Dict[Any, List[str]] = {}
         for park in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE):
-            if park.token in self._waking:
-                continue
-            self._waking.add(park.token)
-            run = asyncio.create_task(self._wake(
-                park.token, DEFERRAL_KIND_CODR_IDLE, "idle", dict(IDLE_WAKE_RESULT), "stagr"))
-            self._wake_runs.add(run)
-            run.add_done_callback(self._wake_runs.discard)
+            if park.token not in self._waking and park.token not in self._unsettled:
+                by_conversation.setdefault(park.key, []).append(park.token)
+        for tokens in by_conversation.values():
+            self._spawn_wake(tokens, DEFERRAL_KIND_CODR_IDLE, "idle", dict(IDLE_WAKE_RESULT), "stagr")
 
-    async def _wake_ticket(self, task_id: str, state: str, why: str, rows: List[Dict[str, Any]]) -> None:
-        await self._wake(task_id, DEFERRAL_KIND_CODR_TICKET, state, wake_result(task_id, state, why, rows),
-                         f"stagr [{task_id}]")
+    def _spawn_wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
+                    label: str) -> None:
+        """Start one background wake for `tokens` (one conversation). Held in
+        `_waking` while it runs, so no ticket starts and no tick starts it
+        again."""
+        self._waking.update(tokens)
+        run = asyncio.create_task(self._wake(tokens, kind, status, result, label))
+        self._wake_runs.add(run)
+        run.add_done_callback(self._wake_runs.discard)
 
-    async def _wake(self, token: str, kind: str, status: str, result: Dict[str, Any], label: str) -> None:
-        """Settle one of stagr's deferrals and post its reply to codr's channel."""
+    async def _wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
+                    label: str) -> None:
+        """Settle stagr's deferrals `tokens` and post its reply to codr's channel."""
         try:
             reply, parked = "", False
-            async for event in self.chat_system.stream_resolve_deferral(
-                    token, kind=kind, status=status, result=result):
+            async for event in self.chat_system.stream_resolve_deferrals(
+                    tokens, kind=kind, status=status, result=result):
                 if isinstance(event, PendingConfirmationEvent):
                     parked = True
                 elif isinstance(event, DoneEvent):
@@ -1086,9 +1092,26 @@ class CodrAgent(Agent):
                 line += "\n(stagr parked an action for your approval in its channel)"
             await self._post(line)
         except Exception:  # noqa: BLE001 — a failed wake must not stop the agent
-            logger.exception("codr agent: waking stagr for %s failed", token)
+            logger.exception("codr agent: waking stagr for %s failed", ", ".join(tokens))
         finally:
-            self._waking.discard(token)
+            self._waking.difference_update(tokens)
+            self._mark_unsettled(tokens, kind)
+
+    def _mark_unsettled(self, tokens: List[str], kind: str) -> None:
+        """Remember each of `tokens` the wake left pending (DP-517). The
+        resolve restores a park it may not settle (its persona is gone, a
+        kind mismatch) rather than drop it; woken again every tick, it would
+        hold `_waking` and so stop every ticket from starting until it
+        expired. In memory: a restart tries each once more."""
+        confirmations = getattr(self.chat_system, "confirmations", None)
+        if confirmations is None:
+            return
+        pending = {p.token for p in confirmations.pending_of_kind(kind)}
+        for token in tokens:
+            if token in pending and token not in self._unsettled:
+                self._unsettled.add(token)
+                logger.error("codr agent: stagr's %s deferral %s was not settled; not waking it again "
+                             "until DERPR restarts", kind, token)
 
     # -- start
 

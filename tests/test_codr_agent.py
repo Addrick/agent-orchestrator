@@ -1214,6 +1214,24 @@ def test_compaction_messages_are_inside_the_turn():
     assert opencode.open_task_turn(msgs) == 0 and opencode.auto_turn_running(msgs)
 
 
+@pytest.mark.parametrize("finish", ["unknown", None, "stop"])
+def test_a_turn_caught_mid_compaction_is_not_finished_whatever_its_last_step_says(finish):
+    """An overflow can end the step before a compaction on an error or an
+    unknown finish; while the compaction runs, the turn is not over."""
+    msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go",
+                                                  "metadata": {AUTO: {"task": "01-a", "attempt": 1}}}]},
+            {"info": {"role": "assistant", "time": {"completed": 2}, "finish": finish}, "parts": []},
+            {"info": {"role": "user"}, "parts": [{"type": "compaction", "auto": True}]},
+            {"info": {"role": "assistant", "time": {"created": 3}, "summary": True, "mode": "compaction"},
+             "parts": []}]
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "Continue",
+                                                      "metadata": {"compaction_continue": True}}]})
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "assistant", "time": {"completed": 5}, "finish": "stop"}, "parts": []})
+    assert opencode.turn_finished(msgs, 0)                     # codr's own reply after it
+
+
 async def test_a_compaction_mid_turn_does_not_end_the_attempt(fake, tmp_path):
     """DP-517: CD-028's three attempts were each checked and failed minutes
     after a compaction, while codr went on working for up to half an hour."""

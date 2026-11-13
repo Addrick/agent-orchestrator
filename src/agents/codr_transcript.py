@@ -208,7 +208,7 @@ def fold_session(msgs: List[Dict[str, Any]], subagents: Optional[Dict[str, str]]
                 continue            # compaction marker or its "continue" prompt: not a new turn (DP-517)
             skip = False
             rows.append(MirrorRow(key=str(m["info"]["id"]), role="user", created_ms=_created(m), content=text))
-        elif role == "assistant" and started and not (m.get("info") or {}).get("summary"):
+        elif role == "assistant" and started and not is_compaction(m):
             seg.append(m)
     close()
     return rows

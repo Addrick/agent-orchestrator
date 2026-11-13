@@ -320,6 +320,15 @@ class StagrToolHandler:
 
     # -- transfers -------------------------------------------------------------------
 
+    async def _ready_for_copy(self, codr: OpencodeClient, dest: str) -> None:
+        """Refuse a copy to codr before anything is packed: codr busy (DP-517:
+        that is now a wait and a retry, and the archive, up to
+        MAX_TRANSFER_BYTES, would be packed and thrown away each time; checked
+        again under the lock), or `dest` already there."""
+        if not await self._codr_idle(codr):
+            raise _CodrBusy()
+        await self._refuse_existing(codr, dest, "codr")
+
     @staticmethod
     async def _codr_idle(client: OpencodeClient) -> bool:
         """Every session in codr's workspace idle, and no task turn of the codr
@@ -414,7 +423,7 @@ class StagrToolHandler:
             return _codr_busy("the copy")
         try:
             async with aiohttp.ClientSession(headers=auth_headers()) as http:
-                await self._refuse_existing(OpencodeClient(http, codr_dir), dst, "codr")
+                await self._ready_for_copy(OpencodeClient(http, codr_dir), dst)
             async with self._stagr_session() as http:
                 archive = await self._pack(self._stagr(http), src, keep_git=keep)
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:

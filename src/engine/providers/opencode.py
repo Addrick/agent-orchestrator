@@ -327,8 +327,13 @@ def turn_finished(messages: List[Dict[str, Any]], start: int) -> bool:
     Status alone is not enough: a turn just posted with `prompt_async` is
     briefly idle before the server marks it busy."""
     for m in reversed(messages[start + 1:]):
-        if _role(m) != "assistant" or is_compaction(m):
-            continue            # a compaction summary is not the turn's reply (DP-517)
+        if is_compaction(m):
+            # DP-517: a compaction after the newest step means opencode is
+            # mid-compaction and the turn goes on after it, whatever that
+            # step's finish was (an overflow can end it on an error).
+            return False
+        if _role(m) != "assistant":
+            continue
         info = m.get("info") or {}
         return bool((info.get("time") or {}).get("completed")) and info.get("finish") != "tool-calls"
     return False

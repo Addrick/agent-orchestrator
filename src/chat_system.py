@@ -1,6 +1,7 @@
 # src/chat_system.py
 
 import asyncio
+import copy
 import logging
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -1264,6 +1265,56 @@ class ChatSystem:
         authority what happened and passes that in. Nothing here trusts the
         ping's own payload.
         """
+        async with aclosing(self.stream_resolve_deferrals(
+                [token], kind=kind, status=status, result=result, note=note)) as agen:
+            async for ev in agen:
+                yield ev
+
+    async def stream_resolve_deferrals(
+            self, tokens: List[str], *, kind: str, status: str, result: Any,
+            note: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Settle several deferrals of one kind and one conversation as ONE
+        batch: one continuation reports them all (DP-517).
+
+        `_stream_settle`'s lock folds only what is already queued when it
+        drains, and claiming a park never suspends, so separate concurrent
+        resolves of one conversation's parks are folded or not depending on
+        scheduling. A turn whose `codr_shell` and `copy_to_codr` both found
+        codr busy then got two continuations, each told its call had not run.
+        Here every claimed park but the last is queued first, so the drain
+        that settles the last takes them all.
+
+        Each token is claimed and checked exactly as `stream_resolve_deferral`
+        does (`_claim_deferral`). A park from another conversation than the
+        first claimed is restored, not settled: its decision would sit in a
+        queue no drain of this conversation reads."""
+        claimed = [p for p in (self._claim_deferral(t, kind) for t in tokens) if p is not None]
+        if not claimed:
+            return
+        key = claimed[0].key
+        group: List[ParkedWrite] = []
+        for parked in claimed:
+            if parked.key == key:
+                group.append(parked)
+                continue
+            self.confirmations.restore(parked)
+            logger.error("deferral %s (%s): not in the batch's conversation %r; left pending",
+                         parked.token, kind, key)
+
+        def decision(parked: ParkedWrite) -> Decision:
+            return Decision(park=parked, approved=True, note=note,
+                            result=copy.deepcopy(result), outcome_status=status)
+
+        for parked in group[:-1]:
+            self.confirmations.enqueue(decision(parked))
+        async with aclosing(self._stream_settle(decision(group[-1]))) as agen:
+            async for ev in agen:
+                yield ev
+
+    def _claim_deferral(self, token: str, kind: str) -> Optional[ParkedWrite]:
+        """Take the park `token` names if a deferral of `kind` may settle it,
+        else None (restored when it may not; see `stream_resolve_deferral`)."""
         parked = self.confirmations.take(token)
         if parked is None:
             # Already settled (the node retries its ping ~6s apart), expired, or
@@ -1274,7 +1325,7 @@ class ChatSystem:
                 "deferral %s (%s): nothing pending to settle — already "
                 "resolved, expired, or never registered", token, kind,
             )
-            return
+            return None
 
         if parked.kind == DEFERRAL_KIND_APPROVAL:
             # The mirror of `stream_resolve_park`'s non-approval refusal, and
@@ -1287,7 +1338,7 @@ class ChatSystem:
                 "deferral — a gated write is answered by a human, never by an "
                 "authority ping", token, kind,
             )
-            return
+            return None
 
         if parked.kind != kind:
             # The caller is answering a different authority than the one that
@@ -1298,7 +1349,7 @@ class ChatSystem:
                 "leaving it pending rather than settling it with another "
                 "authority's outcome", token, kind, parked.kind,
             )
-            return
+            return None
 
         if parked.persona_name not in self.personas:
             # Restored rather than dropped, exactly as the approval path does:
@@ -1311,14 +1362,9 @@ class ChatSystem:
                 "pending rather than settling into nowhere",
                 token, kind, parked.persona_name,
             )
-            return
+            return None
 
-        async with aclosing(self._stream_settle(Decision(
-            park=parked, approved=True, note=note,
-            result=result, outcome_status=status,
-        ))) as agen:
-            async for ev in agen:
-                yield ev
+        return parked
 
     async def _stream_settle(
             self, decision: Decision,

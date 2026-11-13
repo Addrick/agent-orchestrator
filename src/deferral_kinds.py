@@ -64,8 +64,9 @@ DEFERRAL_KIND_CODR_TICKET = "codr_ticket"
 #: codr busy (DP-517). Answered by the codr agent on the first tick codr is
 #: idle, before it starts another ticket, so stagr can run the call again.
 #: The token is minted by the refusing handler (`codr-idle-<hex>`); every one
-#: pending is settled on that tick, and the per-conversation lock folds a
-#: turn's several refusals into one continuation.
+#: pending is settled on that tick, one batch per conversation
+#: (`ChatSystem.stream_resolve_deferrals`), so a turn's several refusals get
+#: one continuation.
 DEFERRAL_KIND_CODR_IDLE = "codr_idle"
 
 #: Key a tool result uses to say "this is not my final answer".
