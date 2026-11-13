@@ -1117,6 +1117,17 @@ only thing that talks to both:
   in) happens between codr's tickets, when `codr_shell` and `copy_to_codr` are
   allowed. codr may still be generating for a moment after its result is posted,
   so stagr's turn and codr's can share the model server briefly.
+- **Fixtures that are code go to codr** (DP-515). stagr builds data and short
+  scripts itself with `stagr_shell`, where you see each step. A fixture that is
+  real code worth keeping (a mock server, a generator, a harness later tickets
+  run) becomes a codr ticket of its own, with a `check_sh` that tests the
+  fixture. By default it lives in the project that uses it, and the ticket that
+  uses it names it in `depends_on`, so it arrives through the project's branch.
+  A separate `<project>-fixtures` project is for a fixture that must stay out of
+  the product repo, or one that several projects share. stagr then copies it
+  into place with `codr_shell` once it passes. Since a later ticket can edit a
+  fixture in its worktree, stagr records the fixture's hashes when it passes, and
+  any later check that relies on the fixture fails when they change.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
   back to any path on the setup box. Only `copy_from_codr` needs your approval:
