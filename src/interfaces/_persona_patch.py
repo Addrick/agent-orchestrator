@@ -10,7 +10,7 @@ that also consumed these was retired in DP-200 finding A).
 from typing import Any, Callable, Dict, List, Tuple
 
 from src.persona import Persona
-from src.persona_fields import apply_patch_fields, registry_patch_keys
+from src.persona_fields import apply_patch_fields, field_constraints, registry_patch_keys
 
 
 # (key, coercer) pairs. Coercer raises ValueError/TypeError on bad input,
@@ -74,6 +74,23 @@ def apply_persona_patch_body(
     elif "context_length" in data:
         persona.set_history_messages(data["context_length"])
     _apply_kobold_sampler_extras(persona, data, rejected)
+
+
+def rejection_reasons(rejected: List[str]) -> Dict[str, str]:
+    """DP-513: why each rejected key was refused, in words — so the portal
+    can say "max_tool_calls: whole number ≥ 1" instead of a bare key name.
+    Registry fields use their declared constraint; sampler extras their type."""
+    constraints = field_constraints()
+    extras = dict(_KOBOLD_SAMPLER_EXTRAS)
+    out: Dict[str, str] = {}
+    for key in rejected:
+        if key in constraints:
+            out[key] = constraints[key]
+        elif key in extras:
+            out[key] = "whole number" if extras[key] is int else "number"
+        else:
+            out[key] = "invalid value"
+    return out
 
 
 def get_kobold_extras_for_get(persona: Persona) -> Dict[str, Any]:

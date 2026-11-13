@@ -299,7 +299,14 @@ def test_max_tool_calls_explicit(base_persona_args):
     assert p.get_effective_max_tool_calls() == 40
 
 
-@pytest.mark.parametrize("bad", ["lots", 0, -3, 101, True, 2.5j])
+def test_max_tool_calls_has_no_upper_cap(base_persona_args):
+    """DP-513: the old 100 cap is gone; the runaway guard scales with it."""
+    p = Persona(**base_persona_args, max_tool_calls=5000)
+    assert p.get_effective_max_tool_calls() == 5000
+    assert p.set_max_tool_calls(250) == 250
+
+
+@pytest.mark.parametrize("bad", ["lots", 0, -3, True, 2.5j])
 def test_max_tool_calls_invalid_clears_to_default(base_persona_args, bad):
     p = Persona(**base_persona_args, max_tool_calls=40)
     assert p.set_max_tool_calls(bad) is None
@@ -324,9 +331,11 @@ def test_ltm_unset_follows_global_default(base_persona_args, monkeypatch):
 @pytest.mark.parametrize("kwargs, getter, expected", [
     ({"ltm_max_items": 1}, "get_ltm_max_items", 1),
     ({"ltm_max_items": 50}, "get_ltm_max_items", 50),
+    ({"ltm_max_items": 500}, "get_ltm_max_items", 500),  # DP-513: no upper cap
     ({"ltm_max_items": "12"}, "get_ltm_max_items", 12),
     ({"ltm_max_tokens": 100}, "get_ltm_max_tokens", 100),
     ({"ltm_max_tokens": 32000}, "get_ltm_max_tokens", 32000),
+    ({"ltm_max_tokens": 200000}, "get_ltm_max_tokens", 200000),
     ({"ltm_budget": "MID "}, "get_ltm_budget", "mid"),
 ])
 def test_ltm_valid_values_load(base_persona_args, kwargs, getter, expected):
@@ -335,11 +344,9 @@ def test_ltm_valid_values_load(base_persona_args, kwargs, getter, expected):
 
 @pytest.mark.parametrize("kwargs, getter", [
     ({"ltm_max_items": 0}, "get_ltm_max_items"),
-    ({"ltm_max_items": 51}, "get_ltm_max_items"),
     ({"ltm_max_items": True}, "get_ltm_max_items"),
     ({"ltm_max_items": "abc"}, "get_ltm_max_items"),
     ({"ltm_max_tokens": 99}, "get_ltm_max_tokens"),
-    ({"ltm_max_tokens": 32001}, "get_ltm_max_tokens"),
     ({"ltm_budget": "turbo"}, "get_ltm_budget"),
     ({"ltm_budget": 3}, "get_ltm_budget"),
 ])

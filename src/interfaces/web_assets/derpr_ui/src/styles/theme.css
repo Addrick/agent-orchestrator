@@ -456,6 +456,7 @@ body.resizing.rows { cursor: row-resize; }
 
 .field { padding: 12px 14px; border-bottom: 1px solid var(--line); }
 .field .lbl { display: block; margin-bottom: 7px; }
+.field .hint { margin-top: 4px; font-size: 10px; color: var(--ink-faint); font-family: var(--sans); }
 .ctrl {
   border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--ink-2); font-size: 11.5px;
   background: var(--bg); display: flex; align-items: center; justify-content: space-between; gap: 8px;

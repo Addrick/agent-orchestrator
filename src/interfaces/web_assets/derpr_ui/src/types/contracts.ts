@@ -104,11 +104,16 @@ export interface Persona {
   // security
   security_blocked: boolean
   security_block_reasons: string[]
+  // DP-513: PATCH key -> accepted values in words (shown next to the input).
+  // Optional: older engines omit it.
+  field_constraints?: Record<string, string>
 }
 
 export interface PatchPersonaResult {
   result: string
   rejected_fields: string[]
+  // DP-513: rejected key -> the rule its value broke. Optional: older engines.
+  rejected_reasons?: Record<string, string>
   unknown_fields: string[]
   error?: string
   detail?: string
@@ -118,6 +123,7 @@ export interface PatchPersonaResult {
 export interface CreatePersonaResult {
   result: string // 'created'
   rejected_fields: string[]
+  rejected_reasons?: Record<string, string>
   unknown_fields: string[]
   // the created persona, same shape as GET /persona/{name}
   persona: Persona

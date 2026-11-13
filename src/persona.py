@@ -14,11 +14,12 @@ from src.origin import (
 )
 from src.tool_policy import KNOWN_OVERRIDES, ToolPolicy
 
-# DP-491: bounds on the per-persona LTM recall knobs. The caps only stop a
-# typo from flooding the prompt; Hindsight's budget values are its own enum.
-LTM_MAX_ITEMS_CAP = 50
+# DP-491: floors on the per-persona LTM recall knobs. DP-513 dropped the
+# upper caps (50 items / 32000 tokens): they were arbitrary, and the operator
+# setting a knob is the one who pays for a big prompt. Hindsight's budget
+# values are its own enum.
+LTM_MAX_ITEMS_MIN = 1
 LTM_MAX_TOKENS_MIN = 100
-LTM_MAX_TOKENS_CAP = 32000
 LTM_BUDGETS = ('low', 'mid', 'high')
 
 logger = logging.getLogger(__name__)
@@ -1005,27 +1006,28 @@ class Persona:
         return self._max_context_tokens
 
     @staticmethod
-    def _coerce_int_range(value: Any, lo: int, hi: int) -> Optional[int]:
-        """An integer in [lo, hi], else None."""
+    def _coerce_int_min(value: Any, lo: int) -> Optional[int]:
+        """An integer >= lo, else None."""
         if value is None or isinstance(value, bool):
             return None
         try:
             parsed = int(value)
         except (ValueError, TypeError):
             return None
-        return parsed if lo <= parsed <= hi else None
+        return parsed if parsed >= lo else None
 
     @staticmethod
     def _coerce_max_tool_calls(value: Any) -> Optional[int]:
-        """An integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], else None (the
-        global default)."""
-        return Persona._coerce_int_range(
-            value, 1, global_config.MAX_TOOL_CALLS_OVERRIDE_CAP)
+        """An integer >= MAX_TOOL_CALLS_MIN, else None (the global default).
+        No upper cap since DP-513: the runaway guard is derived from the
+        budget (`tool_loop.runaway_guard_for`), so it scales with it."""
+        return Persona._coerce_int_min(value, global_config.MAX_TOOL_CALLS_MIN)
 
     def set_max_tool_calls(self, new_value: Any) -> Optional[int]:
         """Sets the per-persona tool-call budget. None, or anything that does
-        not parse as an integer in [1, MAX_TOOL_CALLS_OVERRIDE_CAP], clears
-        it back to the global default."""
+        not parse as an integer >= MAX_TOOL_CALLS_MIN, clears it back to the
+        global default. (The PATCH route pre-validates instead, so a portal
+        typo is rejected rather than wiping the override.)"""
         self._max_tool_calls = self._coerce_max_tool_calls(new_value)
         if self._max_tool_calls is None and new_value is not None:
             logger.warning(
@@ -1043,11 +1045,11 @@ class Persona:
 
     @staticmethod
     def _coerce_ltm_max_items(value: Any) -> Optional[int]:
-        return Persona._coerce_int_range(value, 1, LTM_MAX_ITEMS_CAP)
+        return Persona._coerce_int_min(value, LTM_MAX_ITEMS_MIN)
 
     @staticmethod
     def _coerce_ltm_max_tokens(value: Any) -> Optional[int]:
-        return Persona._coerce_int_range(value, LTM_MAX_TOKENS_MIN, LTM_MAX_TOKENS_CAP)
+        return Persona._coerce_int_min(value, LTM_MAX_TOKENS_MIN)
 
     def _load_ltm(self, label: str, value: Any, coerce: Any) -> Any:
         """Constructor-side coercion: an invalid saved value falls back to the
@@ -1077,7 +1079,7 @@ class Persona:
         return True
 
     def set_ltm_max_items(self, new_value: Any) -> bool:
-        """How many LTM hits are injected per message, 1..LTM_MAX_ITEMS_CAP;
+        """How many LTM hits are injected per message, >= LTM_MAX_ITEMS_MIN;
         None clears. Returns False (unchanged) on an invalid value."""
         return self._set_ltm('_ltm_max_items', 'ltm_max_items', new_value,
                              self._coerce_ltm_max_items)

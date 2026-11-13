@@ -1541,7 +1541,11 @@ def test_persona_max_tool_calls_get_and_patch():
     out-of-range value is reported as rejected rather than silently kept."""
     adapter, mm, persona = _make_adapter_with_seeded_db()
     with TestClient(adapter.app) as client:
-        assert client.get("/api/v1/persona/test_persona").json()["max_tool_calls"] is None
+        body = client.get("/api/v1/persona/test_persona").json()
+        assert body["max_tool_calls"] is None
+        # DP-513: the accepted values are served, not hidden in the UI.
+        assert set(body["field_constraints"]) >= {
+            "max_tool_calls", "ltm_max_items", "ltm_max_tokens", "ltm_budget"}
 
         r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": 40})
         assert r.status_code == 200
@@ -1550,6 +1554,15 @@ def test_persona_max_tool_calls_get_and_patch():
 
         r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": 0})
         assert r.json()["rejected_fields"] == ["max_tool_calls"]
+        # DP-513: the reason travels with the rejection, and a typo keeps the
+        # saved override instead of wiping it back to the global default.
+        assert "≥ 1" in r.json()["rejected_reasons"]["max_tool_calls"]
+        assert persona.get_max_tool_calls() == 40
+
+        # DP-513: no upper cap.
+        r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": 500})
+        assert r.json()["rejected_fields"] == []
+        assert persona.get_max_tool_calls() == 500
 
         r = client.patch("/api/v1/persona/test_persona", json={"max_tool_calls": None})
         assert r.json()["rejected_fields"] == []
@@ -1580,6 +1593,7 @@ def test_persona_ltm_knobs_get_and_patch():
             "ltm_max_items": 0, "ltm_max_tokens": 5, "ltm_budget": "turbo",
         })
         assert sorted(r.json()["rejected_fields"]) == ["ltm_budget", "ltm_max_items", "ltm_max_tokens"]
+        assert set(r.json()["rejected_reasons"]) == {"ltm_budget", "ltm_max_items", "ltm_max_tokens"}
         # rejected = unchanged: a typo does not wipe the saved override
         assert persona.get_effective_ltm_max_items() == 8
         assert persona.get_ltm_max_tokens() == 3000
