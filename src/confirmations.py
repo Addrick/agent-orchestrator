@@ -24,7 +24,7 @@ from config.global_config import (
     PARK_ROW_RETENTION, PENDING_ACTION_TTL,
 )
 from src.deferral_kinds import (
-    DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_TICKET, declared_deferral,
+    DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, declared_deferral,
     without_declaration,
 )
 from src.memory.memory_manager import (
@@ -1407,9 +1407,10 @@ class ConfirmationManager:
 
 def deferral_ttl(kind: str) -> int:
     """How long a park of this kind may wait. Every kind gets
-    PENDING_ACTION_TTL except a codr ticket (DP-493), which waits on codr's
-    queue rather than on a human."""
-    if kind == DEFERRAL_KIND_CODR_TICKET:
+    PENDING_ACTION_TTL except the two that wait on codr's queue rather than
+    on a human: a codr ticket (DP-493), and a call waiting for codr to be
+    idle (DP-517), which lasts as long as the tickets ahead of it run."""
+    if kind in (DEFERRAL_KIND_CODR_TICKET, DEFERRAL_KIND_CODR_IDLE):
         return CODR_TICKET_DEFERRAL_TTL
     return PENDING_ACTION_TTL
 

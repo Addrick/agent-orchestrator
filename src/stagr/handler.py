@@ -54,9 +54,9 @@ import aiohttp
 
 from config import global_config
 from src.engine.providers.opencode import (
-    OpencodeClient, auth_headers, open_auto, persona_sessions, workspace_directory, workspace_held, workspace_lock,
+    OpencodeClient, auth_headers, open_task_turn, persona_sessions, workspace_directory, workspace_held, workspace_lock,
 )
-from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
+from src.deferral_kinds import DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, declare_deferral
 from src.llm_errors import LLMCommunicationError
 from src.proxmox.ssh import SSHRunner
 from src.stagr.codr_ticket import (
@@ -91,8 +91,34 @@ HIGH_WATER_FILE = ".last-ticket-number"
 _QUEUE_LOCK = threading.Lock()
 
 
+def _codr_busy(what: str) -> Dict[str, Any]:
+    """The answer to a call that needs codr's box while codr is busy (DP-517):
+    not an error but a wait. It declares a `codr_idle` deferral, which the
+    codr agent settles on the first tick codr is idle, before it starts
+    another ticket, so stagr is woken here and can run the call again. Before
+    DP-517 this was an error, and nothing ever woke stagr to retry."""
+    return declare_deferral(
+        {"status": "waiting", "waiting_for": "codr to be idle",
+         "message": f"codr is working, or its last task turn is not checked yet, so {what} did not run. "
+                    "Nothing was changed on codr's box. End your turn: you will be re-invoked here as soon "
+                    "as codr is idle (it starts no ticket before you have had your turn), and can run it "
+                    "again then."},
+        DEFERRAL_KIND_CODR_IDLE, f"codr-idle-{uuid.uuid4().hex}")
+
+
 class _Refused(Exception):
     """A transfer step that stopped for a reason the caller should be told."""
+
+    def answer(self) -> Dict[str, Any]:
+        return _error(str(self))
+
+
+class _CodrBusy(_Refused):
+    """codr turned out to be busy once the workspace lock was held: answered
+    with a wait (`_codr_busy`), not an error."""
+
+    def answer(self) -> Dict[str, Any]:
+        return _codr_busy("the copy")
 
 
 def _error(message: str) -> Dict[str, Any]:
@@ -227,15 +253,14 @@ class StagrToolHandler:
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
         lock = workspace_lock(codr_dir)
         if lock.locked():
-            return _error("codr is starting or running a turn; try again when it is idle.")
+            return _codr_busy("the command")
         try:
             # Held for the whole command, so codr starts nothing while it runs.
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
                 with workspace_held(codr_dir, "stagr's codr_shell", seconds + 60):
                     codr = OpencodeClient(http, codr_dir)
                     if not await self._codr_idle(codr):
-                        return _error("codr is working, or its last task turn is not checked yet; "
-                                      "try again when it is idle.")
+                        return _codr_busy("the command")
                     out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
         except LLMCommunicationError as e:
             return _error(f"codr shell failed: {e}")
@@ -295,6 +320,15 @@ class StagrToolHandler:
 
     # -- transfers -------------------------------------------------------------------
 
+    async def _ready_for_copy(self, codr: OpencodeClient, dest: str) -> None:
+        """Refuse a copy to codr before anything is packed: codr busy (DP-517:
+        that is now a wait and a retry, and the archive, up to
+        MAX_TRANSFER_BYTES, would be packed and thrown away each time; checked
+        again under the lock), or `dest` already there."""
+        if not await self._codr_idle(codr):
+            raise _CodrBusy()
+        await self._refuse_existing(codr, dest, "codr")
+
     @staticmethod
     async def _codr_idle(client: OpencodeClient) -> bool:
         """Every session in codr's workspace idle, and no task turn of the codr
@@ -303,9 +337,11 @@ class StagrToolHandler:
         status = await client.request("GET", "/session/status") or {}
         if not all((v or {}).get("type", "idle") == "idle" for v in status.values()):
             return False
-        # codr's own session and each ticket's (DP-484).
+        # codr's own session and each ticket's (DP-484). The codr agent reads
+        # "open" the same way (`open_task_turn`), so a turn it will never close
+        # cannot hold the box forever (DP-517).
         for s in persona_sessions(await client.request("GET", "/session") or [], CODR_PERSONA):
-            if any(open_auto(m) is not None for m in await client.turn_messages(str(s["id"]))):
+            if open_task_turn(await client.turn_messages(str(s["id"]))) is not None:
                 return False
         return True
 
@@ -384,21 +420,20 @@ class StagrToolHandler:
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
         lock = workspace_lock(codr_dir)
         if lock.locked():
-            return _error("codr is starting or running a turn; try again when it is idle.")
+            return _codr_busy("the copy")
         try:
             async with aiohttp.ClientSession(headers=auth_headers()) as http:
-                await self._refuse_existing(OpencodeClient(http, codr_dir), dst, "codr")
+                await self._ready_for_copy(OpencodeClient(http, codr_dir), dst)
             async with self._stagr_session() as http:
                 archive = await self._pack(self._stagr(http), src, keep_git=keep)
             async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
                 with workspace_held(codr_dir, "stagr's copy_to_codr"):
                     codr = OpencodeClient(http, codr_dir)
                     if not await self._codr_idle(codr):
-                        raise _Refused("codr is working, or its last task turn is not checked yet; "
-                                       "copy when it is idle.")
+                        raise _CodrBusy()
                     await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
-            return _error(str(e))
+            return e.answer()
         except LLMCommunicationError as e:
             return _error(f"copy to codr failed: {e}")
         except TimeoutError:

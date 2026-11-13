@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.engine.providers.opencode import (
-    INJECTED_FIELD, KEY_FIELD, OpencodeClient, message_meta, ticket_channel,
+    INJECTED_FIELD, KEY_FIELD, OpencodeClient, is_compaction, message_meta, ticket_channel,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,11 +204,11 @@ def fold_session(msgs: List[Dict[str, Any]], subagents: Optional[Dict[str, str]]
                     skip = True
                 continue
             text = _text(m.get("parts", []))
-            if not text:
-                continue            # compaction marker: not a new turn
+            if not text or is_compaction(m):
+                continue            # compaction marker or its "continue" prompt: not a new turn (DP-517)
             skip = False
             rows.append(MirrorRow(key=str(m["info"]["id"]), role="user", created_ms=_created(m), content=text))
-        elif role == "assistant" and started and not (m.get("info") or {}).get("summary"):
+        elif role == "assistant" and started and not is_compaction(m):
             seg.append(m)
     close()
     return rows

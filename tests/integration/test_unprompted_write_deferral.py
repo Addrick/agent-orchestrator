@@ -15,7 +15,9 @@ import json
 import pytest
 
 from src.chat_system import DoneEvent, PendingConfirmationEvent
-from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declare_deferral
+from src.agents.codr_agent import IDLE_WAKE_RESULT
+from src.deferral_kinds import DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, declare_deferral
+from src.stagr.handler import _codr_busy
 from tests.integration.test_resume_kernel_convergence import (
     _confirm_persona, _drain, _set_engine, _text, _calls, _tool_entries,
 )
@@ -201,3 +203,61 @@ async def test_an_approved_write_through_the_real_envelope_re_parks_its_deferral
     entry = _tool_entries(mem_manager)["q1"]
     assert entry["status"] == "awaiting:codr_ticket"
     assert "_deferral" not in json.dumps(entry)
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_found_codr_busy_parks_and_resumes_when_codr_is_idle(mocked_chat_system):
+    """DP-517 end to end through the real envelope: the exact result stagr's
+    `codr_shell` returns while codr is busy parks a `codr_idle` deferral in
+    the turn's conversation, and the codr agent's idle wake settles it once."""
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    busy = _codr_busy("the command")
+    token = busy["_deferral"]["token"]
+
+    async def handler(**kwargs):
+        return dict(busy)
+    chat_system.tool_manager._handlers["create_ticket"] = handler
+
+    await _turn(chat_system)
+
+    deferred = chat_system.confirmations.pending.get(token)
+    assert deferred is not None and deferred.kind == DEFERRAL_KIND_CODR_IDLE
+    assert (deferred.user_identifier, deferred.channel) == ("adam", "ops")
+    assert [p.token for p in chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE)] == [token]
+    assert _tool_entries(mem_manager)["q1"]["status"] == "awaiting:codr_idle"
+
+    _set_engine(chat_system, [_text("codr is free; ran it.")])
+    events = await _drain(chat_system.stream_resolve_deferral(
+        token, kind=DEFERRAL_KIND_CODR_IDLE, status="idle", result=dict(IDLE_WAKE_RESULT)))
+    assert [e.text for e in events if isinstance(e, DoneEvent)] == ["codr is free; ran it."]
+    assert chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE) == []
+    assert _tool_entries(mem_manager)["q1"]["status"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_several_waits_from_one_turn_settle_as_one_continuation(mocked_chat_system):
+    """DP-517: a turn whose calls found codr busy twice gets ONE continuation
+    when codr is idle. Two separate resolves fold only if scheduling happens
+    to queue the second before the first drains; the batch does not rely on it."""
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    waits = [_codr_busy("the command"), _codr_busy("the copy")]
+
+    async def handler(**kwargs):
+        return dict(waits.pop(0))
+    chat_system.tool_manager._handlers["create_ticket"] = handler
+    second = {"id": "q2", "name": "create_ticket", "arguments": {"title": "t2", "body": "b"}}
+    _set_engine(chat_system, [_calls(CALL, second), _text("Waiting for codr.")])
+    await _drain(chat_system.stream_response("test_persona", "adam", "ops", "prepare codr"))
+    tokens = [p.token for p in chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE)]
+    assert len(tokens) == 2
+
+    _set_engine(chat_system, [_text("Both ran.")])             # a second continuation would find no reply
+    events = await _drain(chat_system.stream_resolve_deferrals(
+        tokens, kind=DEFERRAL_KIND_CODR_IDLE, status="idle", result=dict(IDLE_WAKE_RESULT)))
+
+    assert [e.text for e in events if isinstance(e, DoneEvent)] == ["Both ran."]
+    assert chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE) == []
+    entries = _tool_entries(mem_manager)
+    assert entries["q1"]["status"] == entries["q2"]["status"] == "idle"

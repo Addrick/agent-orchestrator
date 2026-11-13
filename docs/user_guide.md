@@ -776,7 +776,9 @@ waits, and DERPR posts that once too. A ticket whose project cannot be prepared 
 next ticket starts in its place. codr gets the ticket
 text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below), in the
 ticket's own session (see **One ticket, one session** below). When
-the turn ends, DERPR runs the check in the worktree:
+the turn ends, DERPR runs the check in the worktree. A context compaction inside the
+turn (opencode summarizing the history when it fills up, then telling codr to go on)
+does not end it (DP-517): the check waits for codr's own final reply.
 
 - **pass**: DERPR merges the ticket's branch into the project's main (below), and a
   one-line result (ticket, attempt, PASS/FAIL, run time, where it merged) is posted
@@ -1045,7 +1047,12 @@ only thing that talks to both:
   what a task needs, check the environment, or debug a test that fails offline,
   without a round trip through codr. It is refused while codr is starting or
   running a turn (any session in codr's workspace busy), and after a task turn
-  ends until its check has run (the next tick), and while it runs, codr
+  ends until its check has run (the next tick). A refusal is not a dead end
+  (DP-517): the call (and a `copy_to_codr` refused the same way) waits
+  instead, and the codr agent wakes stagr in the same conversation
+  on the first tick codr is idle, before it starts another ticket, so stagr can
+  run it again then. However many calls a turn had refused, stagr gets one
+  wake. While a `codr_shell` command runs, codr
   starts nothing: the environment changes only between tasks, so a result still
   measures codr. codr's box is offline and can be rebuilt from a backup, so the
   worst a command there can do is cost a restore. A message you send codr while
@@ -1092,7 +1099,13 @@ only thing that talks to both:
   stagr in the conversation it queued the ticket from, on its next tick. stagr
   gets one turn with the result (the outcome, the attempts, where it merged, the
   last check output or reason) and is told what to do with it: after a pass, queue the
-  next ticket if you agreed one; after a failure, report and wait for you. A
+  next ticket if you agreed one; after a failure, find out why (codr's box is
+  free by then) and, when the fix stays inside the work you already agreed (its
+  own check was wrong, or the same scope needs another go), queue the corrected
+  ticket; it reports and waits for you only when the next step needs your
+  decision (changing the scope, dropping the work, something it cannot fix).
+  With `queue_codr_task` under ask, that corrected ticket still parks for your
+  approval. A
   failed check attempt that codr will retry does not wake it. stagr's reply is saved in
   that conversation and also posted to codr's channel, under codr's result line,
   as `stagr [CD-NNN]: <reply>`; if the turn parked an approval (with
@@ -1932,7 +1945,7 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
 | `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
 | `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
-| `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
+| `codr_shell` | no | Run bash in codr's workspace; while codr is working it waits, and stagr is woken when codr is idle (DP-517); codr waits while it runs |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
 | `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts, max_seconds); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |

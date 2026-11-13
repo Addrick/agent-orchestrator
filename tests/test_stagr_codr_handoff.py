@@ -20,7 +20,10 @@ import pytest
 from config import global_config
 from src.agents.codr_agent import wake_result
 from src.confirmations import ParkedWrite, deferral_ttl
-from src.deferral_kinds import DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_TICKET, DEFERRAL_KIND_NODE_JOB
+from src.engine.providers.opencode import workspace_lock
+from src.deferral_kinds import (
+    DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, DEFERRAL_KIND_NODE_JOB,
+)
 from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
 from src.persona import Persona
 from src.persona_fields import PERSONA_FIELDS
@@ -28,7 +31,10 @@ from src.stagr.codr_ticket import ATTEMPT_ACTION, attempt_context
 from src.tool_policy import ToolPolicy
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from src.tools.tool_loop import _needs_approval
-from tests.test_codr_agent import _agent, _task
+from tests import test_opencode_provider as provider_tests
+from tests.test_codr_agent import _agent, _session, _shell, _task
+
+fake = provider_tests.fake  # the fake `opencode serve` fixture
 
 
 # --- the codr agent wakes stagr ---------------------------------------------
@@ -40,8 +46,8 @@ def _queue(monkeypatch, tmp_path):
 
 
 class FakeConfirmations:
-    def __init__(self, *tokens, kind=DEFERRAL_KIND_CODR_TICKET):
-        self.parks = [SimpleNamespace(token=t, kind=kind) for t in tokens]
+    def __init__(self, *tokens, kind=DEFERRAL_KIND_CODR_TICKET, key=("adam", "stagr")):
+        self.parks = [SimpleNamespace(token=t, kind=kind, key=key) for t in tokens]
 
     def pending_of_kind(self, kind):
         return [p for p in self.parks if p.kind == kind]
@@ -53,15 +59,15 @@ def _wired(tmp_path, *tickets, reply="Queued CD-002 next.", confirm=False):
     agent, router = _agent(tmp_path)
     resolved = []
 
-    async def resolve(token, *, kind, status, result, note=None):
-        resolved.append((token, kind, status, result))
+    async def resolve(tokens, *, kind, status, result, note=None):
+        resolved.extend((token, kind, status, result) for token in tokens)
         if confirm:
             yield PendingConfirmationEvent(text="", write_calls=[], persona_name="stagr", token="t",
                                            audit_info={})
         yield DoneEvent(text=reply, response_type=ResponseType.LLM_GENERATION)
 
     agent.chat_system.confirmations = FakeConfirmations(*tickets)
-    agent.chat_system.stream_resolve_deferral = resolve
+    agent.chat_system.stream_resolve_deferrals = resolve
     return agent, router, resolved
 
 
@@ -113,6 +119,9 @@ async def test_a_ticket_out_of_attempts_wakes_stagr_with_the_check_output(tmp_pa
     (token, _, status, result), = resolved
     assert status == "failed" and result["check_tail"] == "AssertionError: 2 != 3"
     assert "Do not queue" in result["instruction"]
+    # DP-517: a failure stagr can fix inside the agreed work is not a reason to stop.
+    assert "queue the corrected ticket" in result["instruction"]
+    assert "wait for Adam only when" in result["instruction"]
 
 
 @pytest.mark.asyncio
@@ -188,7 +197,7 @@ async def test_a_failing_resume_does_not_stop_the_agent(tmp_path):
         raise RuntimeError("model down")
         yield  # pragma: no cover
 
-    agent.chat_system.stream_resolve_deferral = boom
+    agent.chat_system.stream_resolve_deferrals = boom
     await _tick(agent)
 
     assert router.sent == [] and not agent._waking
@@ -308,3 +317,142 @@ def mocked_confirmations():
     from src.confirmations import ConfirmationManager
     store = ConfirmationManager.__new__(ConfirmationManager)
     return store
+
+
+# --- DP-517: a call that found codr busy waits for codr to be idle -------------
+
+
+def _idle_wired(tmp_path, *tokens, reply="Ran it."):
+    agent, router, resolved = _wired(tmp_path, reply=reply)
+    agent.chat_system.confirmations = FakeConfirmations(*tokens, kind=DEFERRAL_KIND_CODR_IDLE)
+    return agent, router, resolved
+
+
+async def _settle(agent):
+    await agent.deploy()
+    await asyncio.gather(*list(agent._wake_runs))
+
+
+@pytest.mark.asyncio
+async def test_an_idle_codr_wakes_each_waiting_call_and_posts_the_reply(fake, tmp_path):
+    fake.shell_output = _shell()
+    agent, router, resolved = _idle_wired(tmp_path, "codr-idle-a", "codr-idle-b")
+
+    await _settle(agent)
+
+    assert sorted((t, k, s) for t, k, s, _ in resolved) == [
+        ("codr-idle-a", DEFERRAL_KIND_CODR_IDLE, "idle"), ("codr-idle-b", DEFERRAL_KIND_CODR_IDLE, "idle")]
+    assert "run what you still need" in resolved[0][3]["instruction"]
+    assert [body for _, _, body in router.sent] == ["stagr: Ran it."], "one conversation, one wake"
+    assert not agent._waking
+
+
+@pytest.mark.asyncio
+async def test_each_conversation_gets_its_own_wake(fake, tmp_path):
+    fake.shell_output = _shell()
+    agent, router, _ = _idle_wired(tmp_path, "codr-idle-a")
+    agent.chat_system.confirmations.parks += FakeConfirmations(
+        "codr-idle-b", kind=DEFERRAL_KIND_CODR_IDLE, key=("adam", "other")).parks
+    calls = []
+
+    async def resolve(tokens, *, kind, status, result, note=None):
+        calls.append(list(tokens))
+        yield DoneEvent(text="ok", response_type=ResponseType.LLM_GENERATION)
+    agent.chat_system.stream_resolve_deferrals = resolve
+
+    await _settle(agent)
+
+    assert sorted(calls) == [["codr-idle-a"], ["codr-idle-b"]]
+
+
+@pytest.mark.asyncio
+async def test_a_held_workspace_lock_wakes_no_waiting_call(fake, tmp_path):
+    """Another stagr call holding codr's box (a long copy) is codr busy too."""
+    fake.shell_output = _shell()
+    agent, _, resolved = _idle_wired(tmp_path, "codr-idle-a")
+    async with workspace_lock(agent.directory):
+        await _settle(agent)
+    assert resolved == []
+
+
+@pytest.mark.asyncio
+async def test_a_park_the_resolve_restores_never_blocks_the_queue(fake, tmp_path):
+    """A park the resolve leaves pending (its persona is gone, say) is not
+    woken again, so `_waking` empties and the next ticket starts."""
+    _task(tmp_path, "CD-002")
+    fake.shell_output = _shell()
+    agent, _, _ = _idle_wired(tmp_path, "codr-idle-a")
+    tries = []
+
+    async def restore(tokens, *, kind, status, result, note=None):
+        tries.append(list(tokens))              # restored: the fake store still lists it
+        return
+        yield  # pragma: no cover
+    agent.chat_system.stream_resolve_deferrals = restore
+
+    await _settle(agent)
+    await _settle(agent)
+    await _settle(agent)
+
+    assert tries == [["codr-idle-a"]]
+    assert _session(fake, "CD-002")
+
+
+@pytest.mark.asyncio
+async def test_a_busy_codr_wakes_no_waiting_call(fake, tmp_path):
+    fake.shell_output = _shell()
+    agent, _, resolved = _idle_wired(tmp_path, "codr-idle-a")
+    fake.busy.add("ses_other")
+
+    await _settle(agent)
+
+    assert resolved == []
+
+
+@pytest.mark.asyncio
+async def test_a_running_task_turn_wakes_no_waiting_call(fake, tmp_path):
+    _task(tmp_path, "CD-001")
+    fake.shell_output = _shell()
+    agent, _, resolved = _idle_wired(tmp_path)
+    await agent.deploy()                                       # CD-001 starts
+    assert _session(fake, "CD-001")
+    agent.chat_system.confirmations = FakeConfirmations("codr-idle-a", kind=DEFERRAL_KIND_CODR_IDLE)
+
+    await _settle(agent)                                       # its turn is open: codr is not idle
+
+    assert resolved == []
+
+
+@pytest.mark.asyncio
+async def test_no_ticket_starts_before_the_waiting_call_has_had_its_turn(fake, tmp_path):
+    """The point of waking it on an idle tick: stagr gets codr's box before
+    the next ticket takes it again."""
+    _task(tmp_path, "CD-002")
+    fake.shell_output = _shell()
+    agent, _, resolved = _idle_wired(tmp_path, "codr-idle-a")
+    gate = asyncio.Event()
+
+    confirmations = agent.chat_system.confirmations
+
+    async def resolve(tokens, *, kind, status, result, note=None):
+        resolved.extend(tokens)
+        confirmations.parks = [p for p in confirmations.parks if p.token not in tokens]   # claimed, like take()
+        await gate.wait()                                      # stagr's turn is still running
+        yield DoneEvent(text="ok", response_type=ResponseType.LLM_GENERATION)
+
+    agent.chat_system.stream_resolve_deferrals = resolve
+    await agent.deploy()
+    await asyncio.sleep(0)
+    await agent.deploy()                                       # the next tick, mid-turn
+    assert resolved == ["codr-idle-a"]
+    assert not [s for s in fake.sessions.values() if s.get("title", "").endswith(":CD-002")]
+
+    gate.set()
+    await asyncio.gather(*list(agent._wake_runs))
+    await agent.deploy()
+    assert _session(fake, "CD-002")
+
+
+def test_a_codr_idle_wait_lives_as_long_as_a_ticket_wait():
+    assert deferral_ttl(DEFERRAL_KIND_CODR_IDLE) == deferral_ttl(DEFERRAL_KIND_CODR_TICKET)
+    assert deferral_ttl(DEFERRAL_KIND_CODR_IDLE) > deferral_ttl(DEFERRAL_KIND_APPROVAL)

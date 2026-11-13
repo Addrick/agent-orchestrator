@@ -1183,3 +1183,92 @@ def test_codr_names_itself_to_the_inference_router():
     config = json.loads(workspace_files({**codr_agent.DEFAULTS})[".opencode/opencode.json"])
     headers = config["provider"]["kcpp-pool"]["options"]["headers"]
     assert headers == {"X-Inference-Requester": "codr"}
+
+
+# --- DP-517: a context compaction inside a task turn ----------------------------
+
+
+def _compaction(fake, sid):
+    """What opencode 1.19.3 writes when it compacts a running turn (shapes
+    copied from CD-028's session on the live box): a user message holding a
+    `compaction` part, the summary, and a synthetic "continue" user message."""
+    fake.add(sid, "user", [{"type": "compaction", "auto": True, "overflow": False}],
+             time={"created": 1}, summary={"diffs": []})
+    fake.add(sid, "assistant", [{"type": "text", "text": "## Objective\n- Deliver the ticket"}],
+             time={"created": 1, "completed": 2}, mode="compaction", agent="compaction",
+             summary=True, finish="stop")
+    fake.add(sid, "user", [{"type": "text", "synthetic": True, "metadata": {"compaction_continue": True},
+                            "text": "Continue if you have next steps, or stop and ask for clarification "
+                                    "if you are unsure how to proceed."}], time={"created": 2})
+
+
+def test_compaction_messages_are_inside_the_turn():
+    msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go",
+                                                  "metadata": {AUTO: {"task": "01-a", "attempt": 1}}}]},
+            {"info": {"role": "assistant", "time": {"completed": 2}, "finish": "tool-calls"}, "parts": []}]
+    _compaction(SimpleNamespace(add=lambda sid, role, parts, **info: msgs.append(
+        {"info": {"role": role, **info}, "parts": parts})), "s")
+    assert opencode.current_turn_start(msgs) == 0
+    assert opencode.turn_end(msgs, 0) == len(msgs)
+    assert not opencode.turn_finished(msgs, 0)            # the summary is not the turn's reply
+    assert opencode.open_task_turn(msgs) == 0 and opencode.auto_turn_running(msgs)
+
+
+@pytest.mark.parametrize("finish", ["unknown", None, "stop"])
+def test_a_turn_caught_mid_compaction_is_not_finished_whatever_its_last_step_says(finish):
+    """An overflow can end the step before a compaction on an error or an
+    unknown finish; while the compaction runs, the turn is not over."""
+    msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go",
+                                                  "metadata": {AUTO: {"task": "01-a", "attempt": 1}}}]},
+            {"info": {"role": "assistant", "time": {"completed": 2}, "finish": finish}, "parts": []},
+            {"info": {"role": "user"}, "parts": [{"type": "compaction", "auto": True}]},
+            {"info": {"role": "assistant", "time": {"created": 3}, "summary": True, "mode": "compaction"},
+             "parts": []}]
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "Continue",
+                                                      "metadata": {"compaction_continue": True}}]})
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "assistant", "time": {"completed": 5}, "finish": "stop"}, "parts": []})
+    assert opencode.turn_finished(msgs, 0)                     # codr's own reply after it
+
+
+async def test_a_compaction_mid_turn_does_not_end_the_attempt(fake, tmp_path):
+    """DP-517: CD-028's three attempts were each checked and failed minutes
+    after a compaction, while codr went on working for up to half an hour."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()                                       # start
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _compaction(fake, sid)
+    _tool_step(fake, sid, inp={"command": "pytest"})
+
+    await agent.deploy()                                       # still working: nothing checked
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert not any("__DERPR_EXIT=" in s for _, s in fake.scripts)
+
+    _reply(fake, sid, "all done")
+    await agent.deploy()
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "pass"
+    assert json.loads(row["outcome_payload"])["reply"] == "all done"   # codr's reply, not the summary
+    assert len(_auto_messages(fake, sid)) == 1
+
+
+async def test_a_compaction_that_pushed_the_start_out_of_the_window_is_still_found(fake, tmp_path):
+    """Before DP-517 the compaction's user messages kept the turn's real start
+    out of the 50-message window, so the agent lost the turn and started the
+    attempt again on top of it (CD-004, -007, -024, -025)."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _compaction(fake, sid)
+    for i in range(60):
+        _tool_step(fake, sid, inp={"command": f"step {i}"})
+
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1                 # not started a second time
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
