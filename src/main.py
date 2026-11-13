@@ -387,9 +387,16 @@ async def main() -> None:
 
     # 7.1 Register the fixr self-improvement supervisor (DP-227). Needs both the
     # ChatSystem (the event bridge wakes fixr via generate_response) and the
-    # NotificationRouter (fixr's send_discord), so it registers after the router.
+    # NotificationRouter (the orphan digest), so it registers after the router.
     from src.self_edit.integration import FixrIntegration
     bot.register_service(FixrIntegration(bot, notification_router))
+
+    # 7.1b Register `notify_adam` (DP-512): any persona with the "notify"
+    # binding can message Adam from inside a turn. Targets are read from
+    # agents.json (`notify.targets`) on each call.
+    from src.tools.notify_integration import NotifyIntegration
+    bot.register_service(NotifyIntegration(
+        notification_router, bot.turn_persistence, lambda: agent_manager.config))
 
     # 7.2 Register the voice command subsystem (DP-238). Needs the
     # NotificationRouter to announce fired timers; the Discord client is

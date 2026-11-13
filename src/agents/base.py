@@ -5,9 +5,10 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from src.chat_system import ChatSystem
+from src.clients.notification import resolve_recipient
 from src.persona import Persona
 from src.personas.store import load_system_personas_from_file
 from src.memory.memory_manager import MemoryManager
@@ -15,36 +16,9 @@ from src.utils.timeutil import local_now, to_local
 
 logger = logging.getLogger(__name__)
 
-
-def resolve_recipient(
-    recipients: Optional[Mapping[str, Any]], channel: Optional[str], key: Any,
-) -> Optional[str]:
-    """Resolve a recipient key/id against a recipients mapping.
-
-    Returns the mapped string ID if found in recipients, the numeric ID if key is
-    digits, or None if key is empty or unresolvable.
-    """
-    if key is None or key == "":
-        return None
-    key_str = str(key).strip()
-    if not key_str:
-        return None
-    if key_str.isdigit():
-        return key_str
-    if not isinstance(recipients, Mapping):
-        return None
-    info = recipients.get(key_str)
-    if not isinstance(info, Mapping):
-        return None
-    if channel == "discord_channel":
-        val = info.get("discord_channel_id")
-    elif channel == "discord_dm":
-        val = info.get("discord_user_id")
-    elif channel and "email" in channel:
-        val = info.get("email")
-    else:
-        val = None
-    return str(val) if val else None
+# Re-exported: it moved down to `clients/notification` (DP-512) so tool
+# handlers can resolve a recipient without importing the agent layer.
+__all__ = ["Agent", "resolve_recipient"]
 
 
 class Agent(ABC):

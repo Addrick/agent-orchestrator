@@ -182,42 +182,4 @@ FIXR_TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
-    {
-        "type": "function",
-        "is_write": False,
-        "service_binding": "fixr",
-        "capabilities": {
-            "produces_untrusted": False,
-            "irreversible": False,
-            "locality": "network",
-            "sensitivity": "internal",
-        },
-        "function": {
-            "name": "send_discord",
-            "description": (
-                "Post a curated report to the team's Discord channel — e.g. an "
-                "agent opened a PR (include the link), or a fork needs a human "
-                "decision. You decide what is worth reporting; do not forward raw "
-                "agent output. Defaults to the configured fixr channel."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "subject": {
-                        "type": "string",
-                        "description": "Short headline for the report.",
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "The report body (markdown ok).",
-                    },
-                    "recipient": {
-                        "type": "string",
-                        "description": "Override Discord channel/recipient id. Defaults to CC_FIXR_DISCORD_CHANNEL.",
-                    },
-                },
-                "required": ["subject", "body"],
-            },
-        },
-    },
 ]

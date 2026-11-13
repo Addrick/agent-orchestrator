@@ -43,7 +43,7 @@ def wired_system():
             prompt="test", enabled_tools=["*"], tool_definitions=get_all_tool_definitions(),
             memory_mode=MemoryMode.CHANNEL_ISOLATED, history_messages=10,
             service_bindings=["zammad", "agents", "fixr", "voice", "proxmox",
-                              "huggingface", "stagr", "mcp", "proposals"],
+                              "huggingface", "stagr", "mcp", "proposals", "notify"],
         ),
     }
 
@@ -62,6 +62,11 @@ def wired_system():
     from src.clients.notification import NotificationRouter
     notification_router = NotificationRouter()
     chat_system.register_service(FixrIntegration(chat_system, notification_router))
+
+    # DP-512 notify_adam (the "notify" binding), wired as main.py does
+    from src.tools.notify_integration import NotifyIntegration
+    chat_system.register_service(NotifyIntegration(
+        notification_router, chat_system.turn_persistence, lambda: agent_manager.config))
 
     # DP-238 voice command subsystem (timer tools behind the "voice" binding)
     from src.voice import VoiceIntegration
