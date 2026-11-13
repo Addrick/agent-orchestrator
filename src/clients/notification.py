@@ -2,10 +2,45 @@
 
 import asyncio
 import logging
+import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from collections import deque
+from typing import Any, Deque, Mapping, Optional, Tuple
+
+from src.generation_events import ResponseType
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_recipient(
+    recipients: Optional[Mapping[str, Any]], channel: Optional[str], key: Any,
+) -> Optional[str]:
+    """Resolve a recipient key/id against a recipients mapping.
+
+    Returns the mapped string ID if found in recipients, the numeric ID if key is
+    digits, or None if key is empty or unresolvable.
+    """
+    if key is None or key == "":
+        return None
+    key_str = str(key).strip()
+    if not key_str:
+        return None
+    if key_str.isdigit():
+        return key_str
+    if not isinstance(recipients, Mapping):
+        return None
+    info = recipients.get(key_str)
+    if not isinstance(info, Mapping):
+        return None
+    if channel == "discord_channel":
+        val = info.get("discord_channel_id")
+    elif channel == "discord_dm":
+        val = info.get("discord_user_id")
+    elif channel and "email" in channel:
+        val = info.get("email")
+    else:
+        val = None
+    return str(val) if val else None
 
 
 class Notifier(ABC):
@@ -137,3 +172,60 @@ class NotificationRouter:
         behalf can be stored as its reply in that conversation."""
         notifier = self._notifiers.get(channel)
         return await notifier.conversation_key(recipient) if notifier else None
+
+
+class HourlyLimiter:
+    """At most `per_hour` sends in any rolling hour. In memory: a restart
+    forgets the window, which errs towards sending."""
+
+    def __init__(self, per_hour: int) -> None:
+        self.per_hour = int(per_hour)
+        self._sent_at: Deque[float] = deque()
+
+    def allow(self) -> bool:
+        """True, and the send is counted, when one more fits in the window."""
+        now = time.monotonic()
+        while self._sent_at and now - self._sent_at[0] > 3600:
+            self._sent_at.popleft()
+        if len(self._sent_at) >= self.per_hour:
+            return False
+        self._sent_at.append(now)
+        return True
+
+
+async def post_as_persona(
+    router: NotificationRouter, persistence: Any, *, persona_name: str,
+    user_identifier: str, channel: str, recipient: str, body: str, reply_text: str,
+) -> bool:
+    """Post `body` to a target on a persona's behalf and, once posted, store
+    `reply_text` as that persona's reply in the conversation the target
+    files under. The one path behind every `notify_adam` call: the native
+    tool (`tools/notify_integration`) and codr's opencode relay
+    (`agents/codr_agent`).
+
+    `persistence` is the `TurnPersistence` (passed in: it sits above this
+    layer). Returns whether the post went out; a target that is not a chat
+    conversation (a DM, a Zammad ticket) is posted and not stored."""
+    try:
+        sent = await router.send(channel=channel, recipient=recipient, subject="", body=body)
+    except Exception as e:  # noqa: BLE001 — a failed post must not break the caller
+        logger.warning("post for persona '%s' failed: %s", persona_name, e)
+        return False
+    if not sent:
+        return False
+    key = await router.conversation_key(channel, recipient)
+    if key is None:
+        logger.info("no conversation for target %s:%s; message for '%s' not stored in history",
+                    channel, recipient, persona_name)
+        return True
+    conv_channel, server_id = key
+    row_id = persistence.commit_or_update_assistant(
+        persona_name=persona_name, user_identifier=user_identifier,
+        channel=conv_channel, server_id=server_id, final_text=reply_text,
+        response_type=ResponseType.LLM_GENERATION, user_interaction_id=None,
+        retry_assistant_id=None, tool_context_json=None,
+    )
+    if row_id is not None:
+        persistence.queue_retain_safe(interaction_id=row_id, persona_name=persona_name,
+                                      channel=conv_channel, untrusted=False)
+    return True

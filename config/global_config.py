@@ -672,7 +672,7 @@ CC_FIXR_BASE_REF = os.environ.get("CC_FIXR_BASE_REF", "origin/master")
 # CC_FIXR_CHANNEL  — channel the bridge files fixr's woken turns under (memory scope).
 # CC_FIXR_MODEL_ARG — `claude --model` arg for DISPATCHED coding agents (not the
 #                     supervisor; the supervisor's model is its persona config).
-# CC_FIXR_DISCORD_CHANNEL — default recipient id for fixr's send_discord tool.
+# CC_FIXR_DISCORD_CHANNEL — channel id for fixr's orphaned-agent digest after a restart.
 CC_FIXR_PERSONA = os.environ.get("CC_FIXR_PERSONA", "fixr")
 CC_FIXR_CHANNEL = os.environ.get("CC_FIXR_CHANNEL", "fixr")
 CC_FIXR_MODEL_ARG = os.environ.get("CC_FIXR_MODEL_ARG", "opus")

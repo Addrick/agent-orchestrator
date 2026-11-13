@@ -337,8 +337,6 @@ _REVIEWED_NON_WRITES = {
     # voice timers: process-local, self-expiring, trivially undone.
     "set_timer",
     "cancel_timer",
-    # notification egress, no state mutated at the destination.
-    "send_discord",
 }
 
 

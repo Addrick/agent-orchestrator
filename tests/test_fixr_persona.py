@@ -33,7 +33,10 @@ def test_fixr_persona_loads_clean():
     assert not fixr.get_security_block_reasons()
     tools = set(fixr.get_enabled_tools())
     assert {"dispatch_fix", "inspect_agents", "answer_agent",
-            "kill_agent", "prune_agents", "send_discord"} <= tools
+            "kill_agent", "prune_agents", "notify_adam"} <= tools
+    # DP-512: fixr reports through the shared notify tool, which needs its binding.
+    assert "send_discord" not in tools
+    assert "notify" in fixr.get_service_bindings()
 
 
 def test_config_without_fixr_still_loads(tmp_path):
@@ -63,7 +66,7 @@ def test_dispatch_fix_is_the_only_parked_fixr_write():
     }
     assert set(fixr_tools) == {
         "dispatch_fix", "inspect_agents", "answer_agent", "kill_agent",
-        "prune_agents", "send_discord"
+        "prune_agents",
     }
     writes = {n for n, t in fixr_tools.items() if t.get("is_write")}
     assert writes == {"dispatch_fix"}

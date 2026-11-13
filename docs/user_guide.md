@@ -1620,6 +1620,54 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | `lookup_agent_history` | Read | Dereference one action series by `action_id` — returns the root row plus its child steps and context tags. Used to recover a full trajectory after a memory recall surfaces an `action_id:<n>` reference from a bridged agent experience. |
 | `manage_agent` | Write | Start, stop, or restart an agent |
 
+### Notify Tool (requires `service_bindings: ["notify"]`)
+
+**Any persona can message you.** A persona with the `notify` binding and
+`notify_adam` in its tools can send you a message while it works, without ending
+its turn. It is meant for personas that work on their own (stagr, fixr, a planner):
+a concrete question they are blocked on, or something you need to know now.
+
+| Tool | Type | Description |
+|---|---|---|
+| `notify_adam` | Send (ungated) | Post `message` to the persona's notify target as `<persona>: <message>`. The persona does not wait for an answer. |
+
+- **Where it goes** is set in `agents.json`, never by the persona:
+
+  ```json
+  "notify": {
+    "per_hour": 20,
+    "targets": {
+      "default": {"channel": "discord_dm", "recipient": "adrich"},
+      "stagr":   {"channel": "discord_channel", "recipient": "debug"}
+    }
+  }
+  ```
+
+  A persona uses the entry under its own name, or `default` if it has none. Each
+  entry has the same shape as an agent's `notification_targets` entry, and
+  `recipient` is a key from the `recipients` block (or a literal id).
+- **It is saved** as that persona's reply in the conversation it was posted to when
+  the target is a Discord channel. A DM is posted and not saved.
+- **Your answer** is an ordinary message in that conversation. The turn that called
+  the tool is not waiting for it.
+- **The persona is told whether it was sent.** It is not sent, and the persona is
+  told why, when: the message is empty; the persona has already sent `per_hour`
+  messages (default 20) in the last hour; no target resolves (an `agents.json`
+  without a `notify` block is this case); the target's channel is not connected;
+  or the target is the conversation the turn is already in, where the persona
+  should simply answer in its reply.
+- **Approval:** it runs without asking by default. Put `notify_adam` under `ask` in
+  a persona's tool policy to approve each message.
+- ⚠️ **Point a target only at somewhere you alone read.** The tool is exempt from the
+  tool-combination rules (a persona that reads web pages or tickets may still have
+  it) because the persona cannot choose the destination. A persona misled by what
+  it read could still repeat that content into its target, so a shared channel is
+  the wrong target for a persona that reads private data.
+
+codr has the same tool under the same name, delivered differently (it runs inside
+opencode): see "codr can message you" above. Its target is the `codr` agent's
+`notification_target`.
+
 ### fixr Tools (requires `service_bindings: ["fixr"]`)
 
 The `fixr` supervisor persona (`claude-opus-4-8`) repairs DERPR's own code. It
@@ -1637,12 +1685,16 @@ agent diagnoses → fixes → tests → opens a PR, and **a human reviews and me
 | `answer_agent` | Write (ungated) | Resume a *waiting* agent (one that asked a question) with a decision, headless via `claude --resume`. |
 | `kill_agent` | Write (ungated) | Stop a stuck/runaway agent's process + event bridge; optionally drop its worktree. |
 | `prune_agents` | Write (ungated) | Reap finished agents: delete the on-disk worktrees of terminal agents (done/error/killed/orphaned) and archive their records (kept for audit, hidden from the default list). Prune one by `agent_id` or bound by `max_age_hours`. Skips any bug with a still-active agent. |
-| `send_discord` | Write (ungated) | Post a curated report (e.g. "agent opened PR <link>", or a fork needing a human) to the team channel. fixr reports on its own judgment. |
 
 Only `dispatch_fix` is confirmation-gated ("gate every dispatch; dial the rest
 later"); the coordination + reporting tools run ungated so the woken supervisor
 isn't approval-prompted on every agent event. Autonomy is bounded by the
 dispatch gate **and** the human-merge PR boundary.
+
+fixr reports to you with `notify_adam` (above), so the persona also needs the
+`notify` binding; its messages go to the `fixr` entry under `notify.targets`, or to
+`default`. (Its own `send_discord` tool was removed in DP-512: it had been sending
+on a channel name nothing was listening on, so nothing was posted.)
 
 An agent signals its supervisor through its final message: `FIXR_QUESTION:` (I
 need a decision), `FIXR_DONE: <pr-url>` (finished), `FIXR_ERROR:` (blocked). A
@@ -1652,7 +1704,7 @@ and wakes `fixr` on those events.
 Config knobs: `CC_FIXR_CLONE_DIR` (base clone path; worktrees live under
 `<clone>/worktrees/<bug>`), `CC_FIXR_BASE_REF` (default `origin/master`),
 `CC_FIXR_MODEL_ARG` (dispatched-agent model, default `sonnet`),
-`CC_FIXR_DISCORD_CHANNEL` (default `send_discord` recipient). A live run also
+`CC_FIXR_DISCORD_CHANNEL` (channel for the notice listing agents lost to a restart). A live run also
 needs `github.com,api.github.com` in `CC_SANDBOX_ALLOWED_DOMAINS` and a scoped
 `GH_TOKEN` in the host env (never in chat).
 

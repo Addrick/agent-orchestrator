@@ -41,21 +41,20 @@ import re
 import shlex
 import tarfile
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
 from config import global_config
 from src.agents.base import Agent
 from src.chat_system import ChatSystem
-from src.clients.notification import NotificationRouter
+from src.clients.notification import HourlyLimiter, NotificationRouter, post_as_persona
 from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET
 from src.engine.providers.local import REQUESTER_HEADER, requester_header
-from src.generation_events import DoneEvent, PendingConfirmationEvent, ResponseType
+from src.generation_events import DoneEvent, PendingConfirmationEvent
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
 from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header, parse_positive_int
@@ -775,7 +774,7 @@ class CodrAgent(Agent):
         self.root, self.slug, self.directory = workspace_directory(self.persona_name)
         self._workspace_synced = False
         self._dispose_pending = False
-        self._sent_at: Deque[float] = deque()
+        self._limiter = HourlyLimiter(int(self.cfg["notify_per_hour"]))
         self._dropped = 0
         self._undelivered = 0
         self._progress: Tuple[Any, float] = (None, 0.0)
@@ -946,15 +945,6 @@ class CodrAgent(Agent):
 
     # -- relay
 
-    def _rate_ok(self) -> bool:
-        now = time.monotonic()
-        while self._sent_at and now - self._sent_at[0] > 3600:
-            self._sent_at.popleft()
-        if len(self._sent_at) >= int(self.cfg["notify_per_hour"]):
-            return False
-        self._sent_at.append(now)
-        return True
-
     def _relayed(self) -> Set[str]:
         rows = self.memory_manager.get_agent_actions(self.agent_name, limit=2000, action_type=RELAY_ACTION)
         return {str(r.get("trigger_context")) for r in rows}
@@ -985,7 +975,7 @@ class CodrAgent(Agent):
                                         outcome="empty")
                     logger.warning("codr agent: notify_adam call %s has no message; not posted", key)
                     continue
-                allowed = self._rate_ok()
+                allowed = self._limiter.allow()
                 # Record first: a crash after the post must not post it twice.
                 row = self._log_task_root(RELAY_ACTION, trigger_context=key,
                                           action_payload={"message": text[:1500]},
@@ -997,33 +987,23 @@ class CodrAgent(Agent):
                 # Whole, here and in `_post`: the Discord client splits long
                 # posts (DP-485). Only the action-log copy is capped, to fit its row.
                 prefix = f"codr [{ticket}]" if ticket else "codr"
-                if await self._post(f"{prefix}: {text}"):
-                    await self._commit_reply(text)
-                else:
+                if not await self._notify(f"{prefix}: {text}", text):
                     self.memory_manager.update_agent_action_outcome(row, "failed")
                     self._undelivered += 1
 
-    async def _commit_reply(self, text: str) -> None:
-        """Store a relayed `notify_adam` message as codr's reply in the
-        conversation it was posted to, so derpr's history has codr's side of
-        the chat."""
+    async def _notify(self, body: str, text: str) -> bool:
+        """Post a relayed `notify_adam` message and store `text` as codr's
+        reply in the conversation it was posted to, so derpr's history has
+        codr's side of the chat. Same path as the native tool (DP-512)."""
         target = self.cfg.get("notification_target") or {}
-        key = await self.notification_router.conversation_key(
-            target.get("channel", "discord_channel"), str(target.get("recipient")))
-        if key is None:
-            logger.info("codr agent: no conversation for the notification target; relay not stored in history")
-            return
-        channel, server_id = key
-        persistence = self.chat_system.turn_persistence
-        row_id = persistence.commit_or_update_assistant(
+        if not target.get("recipient"):
+            logger.warning("codr agent: no notification_target configured; not posting: %s", body[:200])
+            return False
+        return await post_as_persona(
+            self.notification_router, self.chat_system.turn_persistence,
             persona_name=self.persona_name, user_identifier=f"agent:{self.agent_name}",
-            channel=channel, server_id=server_id, final_text=text,
-            response_type=ResponseType.LLM_GENERATION, user_interaction_id=None,
-            retry_assistant_id=None, tool_context_json=None,
-        )
-        if row_id is not None:
-            persistence.queue_retain_safe(interaction_id=row_id, persona_name=self.persona_name,
-                                          channel=channel, untrusted=False)
+            channel=target.get("channel", "discord_channel"), recipient=str(target["recipient"]),
+            body=body, reply_text=text)
 
     # -- waking stagr (DP-493)
 

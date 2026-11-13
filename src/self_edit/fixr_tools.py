@@ -10,8 +10,9 @@ Five tools, registered behind the ``fixr`` service binding:
 - ``answer_agent``   (ungated): resume a waiting agent with a decision. Bounded
   by the already-approved dispatch; gating it would break fixr's woken loop.
 - ``kill_agent``     (ungated): stop a stuck/runaway agent — a reduction action.
-- ``send_discord``   (ungated): fixr curates + reports on its own judgment (the
-  locked autonomy shape). Outbound but low-risk/reversible.
+
+fixr reports to a human with ``notify_adam`` (the ``notify`` binding, DP-512),
+which replaced this module's own ``send_discord``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING
 
-from config import global_config
 from src.self_edit.dispatcher import Dispatcher, DispatcherError
 from src.self_edit.registry import AgentRecord, AgentRegistry
 
@@ -28,7 +28,6 @@ from src.self_edit.registry import AgentRecord, AgentRegistry
 PruneCloseCallback = Callable[[List[AgentRecord]], Awaitable[None]]
 
 if TYPE_CHECKING:
-    from src.clients.notification import NotificationRouter
     from src.tools.tool_manager import ToolManager
 
 logger = logging.getLogger(__name__)
@@ -53,13 +52,11 @@ class FixrToolHandler:
         self,
         dispatcher: Dispatcher,
         registry: AgentRegistry,
-        notification_router: "NotificationRouter",
         *,
         on_prune_close: Optional[PruneCloseCallback] = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._registry = registry
-        self._notifier = notification_router
         self._on_prune_close = on_prune_close
 
     def register(self, manager: "ToolManager") -> None:
@@ -68,7 +65,6 @@ class FixrToolHandler:
         manager.register("answer_agent", self._answer_agent)
         manager.register("kill_agent", self._kill_agent)
         manager.register("prune_agents", self._prune_agents)
-        manager.register("send_discord", self._send_discord)
 
     async def _dispatch_fix(self, bug_id: str, description: str) -> Dict[str, Any]:
         logger.info("Tool dispatch_fix: %s", bug_id)
@@ -130,15 +126,3 @@ class FixrToolHandler:
             "count": len(pruned),
             "agents": [_record_view(r) for r in pruned],
         }
-
-    async def _send_discord(
-        self, subject: str, body: str, recipient: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        target = recipient or global_config.CC_FIXR_DISCORD_CHANNEL
-        if not target:
-            return {
-                "status": "error",
-                "message": "No Discord recipient: pass `recipient` or set CC_FIXR_DISCORD_CHANNEL.",
-            }
-        ok = await self._notifier.send("discord", str(target), subject, body)
-        return {"status": "sent" if ok else "failed", "recipient": str(target)}

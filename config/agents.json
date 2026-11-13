@@ -82,6 +82,12 @@
         }
     },
 
+    "notify": {
+        "per_hour": 20,
+        "targets": {
+            "default": {"channel": "discord_dm", "recipient": "adrich"}
+        }
+    },
     "recipients": {
         "adrich": {
             "discord_user_id": "321783731146850305",

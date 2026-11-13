@@ -77,7 +77,7 @@ def _wake_message(record: AgentRecord, event: AgentEvent) -> str:
         lines.append(f"(detail: {event.payload['detail']})")
     lines.append(
         f"Branch `{record.branch}`. Use inspect_agents/answer_agent/"
-        f"kill_agent/send_discord as appropriate. Decide and act."
+        f"kill_agent/notify_adam as appropriate. Decide and act."
     )
     return "\n".join(lines)
 
@@ -141,7 +141,7 @@ class FixrIntegration(ServiceIntegration):
     def register_tools(self, tool_manager: "ToolManager") -> None:
         from src.self_edit.fixr_tools import FixrToolHandler
         handler = FixrToolHandler(
-            self.dispatcher, self.registry, self._notifier,
+            self.dispatcher, self.registry,
             on_prune_close=self._close_agent_threads,
         )
         handler.register(tool_manager)
@@ -202,7 +202,7 @@ class FixrIntegration(ServiceIntegration):
         )
         try:
             await self._notifier.send(
-                "discord", str(channel), "fixr: orphaned agents after restart", body,
+                "discord_channel", str(channel), "fixr: orphaned agents after restart", body,
             )
         except Exception:  # noqa: BLE001 — digest is best-effort
             logger.exception("notify_orphans: digest send failed")
