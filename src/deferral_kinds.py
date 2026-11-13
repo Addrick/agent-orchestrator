@@ -60,6 +60,14 @@ DEFERRAL_KIND_NODE_JOB = "node_job"
 #: next. The ticket ID (`CD-NNN`, never reused) IS the park token.
 DEFERRAL_KIND_CODR_TICKET = "codr_ticket"
 
+#: A stagr call that needs codr's box (`codr_shell`, `copy_to_codr`) and found
+#: codr busy (DP-517). Answered by the codr agent on the first tick codr is
+#: idle, before it starts another ticket, so stagr can run the call again.
+#: The token is minted by the refusing handler (`codr-idle-<hex>`); every one
+#: pending is settled on that tick, and the per-conversation lock folds a
+#: turn's several refusals into one continuation.
+DEFERRAL_KIND_CODR_IDLE = "codr_idle"
+
 #: Key a tool result uses to say "this is not my final answer".
 #:
 #: A handler that kicks off out-of-band work returns an ordinary result dict

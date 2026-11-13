@@ -259,21 +259,58 @@ def message_meta(message: Dict[str, Any], field: str) -> Any:
     return None
 
 
+def is_compaction(message: Dict[str, Any]) -> bool:
+    """Whether `message` is one of the three opencode (1.19.3) writes when it
+    compacts a session's context inside a running turn (DP-517): a user
+    message holding a `compaction` part, the summary (an assistant message
+    marked `summary`, mode `compaction`), and a synthetic user message
+    (`compaction_continue`) telling the model to go on. None of them is a turn
+    of its own; before DP-517 the two user messages each read as a new turn,
+    so a ticket was checked and failed while codr was still working on it."""
+    info = message.get("info") or {}
+    if _role(message) == "assistant":
+        return info.get("summary") is True or info.get("mode") == "compaction"
+    return any(p.get("type") == "compaction" or part_meta(p).get("compaction_continue")
+               for p in message.get("parts", []))
+
+
+def starts_turn(message: Dict[str, Any]) -> bool:
+    """A user message that starts a turn: not delivered into a running one
+    (`INJECTED_FIELD`), and not written by a compaction inside one."""
+    return (_role(message) == "user" and not message_meta(message, INJECTED_FIELD)
+            and not is_compaction(message))
+
+
 def current_turn_start(messages: List[Dict[str, Any]]) -> Optional[int]:
-    """Index of the user message that started the session's latest turn: the
-    newest user message that was not delivered into a running turn."""
+    """Index of the user message that started the session's latest turn."""
     for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        if _role(m) == "user" and not message_meta(m, INJECTED_FIELD):
+        if starts_turn(messages[i]):
             return i
     return None
 
 
 def turn_end(messages: List[Dict[str, Any]], start: int) -> int:
-    """End (exclusive) of the turn started at `start`: the next user message
-    that was not delivered into it, or the end of the list."""
-    return next((i for i in range(start + 1, len(messages)) if _role(messages[i]) == "user"
-                 and not message_meta(messages[i], INJECTED_FIELD)), len(messages))
+    """End (exclusive) of the turn started at `start`: the next message that
+    starts a turn, or the end of the list."""
+    return next((i for i in range(start + 1, len(messages)) if starts_turn(messages[i])), len(messages))
+
+
+def open_task_turn(messages: List[Dict[str, Any]]) -> Optional[int]:
+    """Index of the newest turn the codr agent started, if it is still open
+    (no `result`), else None. It is not always the latest turn: a chat
+    message sent after a task turn ended but before the next tick starts a
+    turn of its own after it.
+
+    Only the NEWEST task turn counts (DP-517). An older one left open is
+    superseded: the agent has started a newer turn in that session since, so
+    the old one was lost (before DP-517 a compaction could push its start out
+    of the message window, and the attempt was started again on top of it)
+    and nothing will ever close it."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if starts_turn(m) and message_meta(m, AUTO_FIELD) is not None:
+            return i if open_auto(m) is not None else None
+    return None
 
 
 def open_auto(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -290,8 +327,8 @@ def turn_finished(messages: List[Dict[str, Any]], start: int) -> bool:
     Status alone is not enough: a turn just posted with `prompt_async` is
     briefly idle before the server marks it busy."""
     for m in reversed(messages[start + 1:]):
-        if _role(m) != "assistant":
-            continue
+        if _role(m) != "assistant" or is_compaction(m):
+            continue            # a compaction summary is not the turn's reply (DP-517)
         info = m.get("info") or {}
         return bool((info.get("time") or {}).get("completed")) and info.get("finish") != "tool-calls"
     return False

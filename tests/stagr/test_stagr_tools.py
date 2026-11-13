@@ -9,7 +9,7 @@ import asyncio
 import json
 import shutil
 import subprocess
-from src.deferral_kinds import DEFERRAL_KIND_CODR_TICKET, declared_deferral
+from src.deferral_kinds import DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, declared_deferral
 from pathlib import Path
 
 import pytest
@@ -26,6 +26,7 @@ from src.stagr.codr_ticket import ATTEMPT_ACTION as CODR_ATTEMPT_ACTION, CODR_AG
 from src.stagr.handler import StagrToolHandler
 from src.tool_policy import ToolPolicy
 from src.tools.tool_loop import _render_confirmation_text
+from src.tools.tool_manager import tool_error
 from src.tools.definitions import ALL_TOOL_DEFINITIONS
 from src.tools.tool_defs.stagr import STAGR_TOOLS
 from tests.test_opencode_provider import FakeOpencode, real_bash
@@ -116,21 +117,39 @@ async def test_codr_shell_runs_in_codr_workspace_and_holds_its_lock(boxes):
     assert not _codr_lock().locked() and workspace_hold("codr") is None
 
 
-async def test_codr_shell_is_refused_while_codr_works(boxes):
+def _waits_for_codr(result):
+    """DP-517: a call that found codr busy is a wait, not an error: it
+    declares a `codr_idle` deferral, so stagr is woken when codr is idle."""
+    assert result["status"] == "waiting" and "re-invoked" in result["message"], result
+    assert tool_error({"result": result}) is None          # parked, not reported as a failure
+    kind, token = declared_deferral(result)
+    assert kind == DEFERRAL_KIND_CODR_IDLE and token.startswith("codr-idle-")
+    return token
+
+
+async def test_codr_shell_waits_while_codr_works(boxes):
     stagr, codr, stagr_dir, codr_dir = boxes
     codr.busy.add("ses_1")
     result = await StagrToolHandler()._codr_shell("touch x")
-    assert result["status"] == "error" and "idle" in result["message"]
+    _waits_for_codr(result)
     assert not (codr_dir / "x").exists()
     assert workspace_hold("codr") is None
 
 
-async def test_codr_shell_is_refused_while_a_codr_turn_starts(boxes):
+async def test_codr_shell_waits_while_a_codr_turn_starts(boxes):
     stagr, codr, stagr_dir, codr_dir = boxes
     async with _codr_lock():
         result = await StagrToolHandler()._codr_shell("touch x")
-    assert result["status"] == "error" and "idle" in result["message"]
+    _waits_for_codr(result)
     assert not (codr_dir / "x").exists()
+
+
+async def test_each_wait_gets_its_own_token(boxes):
+    stagr, codr, stagr_dir, codr_dir = boxes
+    codr.busy.add("ses_1")
+    handler = StagrToolHandler()
+    first = _waits_for_codr(await handler._codr_shell("true"))
+    assert _waits_for_codr(await handler._codr_shell("true")) != first
 
 
 async def test_codr_shell_waits_for_an_ended_task_turn_to_be_checked(boxes):
@@ -146,9 +165,31 @@ async def test_codr_shell_waits_for_an_ended_task_turn_to_be_checked(boxes):
     codr.add(sid, "assistant", [{"type": "text", "text": "done"}],
              time={"created": 1, "completed": 2}, finish="stop")
     result = await StagrToolHandler()._codr_shell("touch x")
-    assert result["status"] == "error" and "not checked" in result["message"]
+    _waits_for_codr(result)
+    assert "not checked" in result["message"]
     assert not (codr_dir / "x").exists()
     start["parts"][0]["metadata"][AUTO_FIELD]["result"] = "pass"      # the check ran
+    result = await StagrToolHandler()._codr_shell("touch x")
+    assert result["status"] == "ok" and (codr_dir / "x").exists()
+
+
+async def test_a_superseded_open_task_turn_does_not_hold_the_box(boxes):
+    """DP-517: an older task turn left open in a session where the agent has
+    since started a newer one will never be closed; it must not keep codr's
+    box looking busy (CD-004, -007, -024, -025 on the live box)."""
+    stagr, codr, stagr_dir, codr_dir = boxes
+    sid = "ses_task"
+    codr.sessions[sid] = {"id": sid, "directory": workspace_directory("codr")[2],
+                          "title": session_title("codr") + ":CD-004", "time": {"created": 1, "updated": 2}}
+    codr.messages[sid] = []
+    codr.add(sid, "user", [{"type": "text", "text": "do CD-004",
+                            "metadata": {AUTO_FIELD: {"task": "CD-004", "attempt": 1}}}])     # lost
+    codr.add(sid, "assistant", [{"type": "text", "text": "done"}],
+             time={"created": 1, "completed": 2}, finish="stop")
+    codr.add(sid, "user", [{"type": "text", "text": "do CD-004",
+                            "metadata": {AUTO_FIELD: {"task": "CD-004", "attempt": 1, "result": "pass"}}}])
+    codr.add(sid, "assistant", [{"type": "text", "text": "done"}],
+             time={"created": 3, "completed": 4}, finish="stop")
     result = await StagrToolHandler()._codr_shell("touch x")
     assert result["status"] == "ok" and (codr_dir / "x").exists()
 
@@ -231,7 +272,7 @@ async def test_a_copy_to_codr_waits_for_codr_to_be_idle(boxes):
     (stagr_dir / "repo").mkdir()
     codr.busy.add("ses_1")
     result = await StagrToolHandler()._copy_to_codr("repo", "tasks/09-c1")
-    assert result["status"] == "error" and "idle" in result["message"]
+    _waits_for_codr(result)
     assert not (codr_dir / "tasks").exists()
 
 
