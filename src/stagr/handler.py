@@ -63,7 +63,7 @@ from src.stagr.codr_ticket import (
     ATTEMPT_ACTION, CODR_AGENT_NAME, PROJECT_RE, attempt_context, parse_positive_int,
     render_task_md, ticket_id, ticket_number,
 )
-from src.stagr.net import BOXES, ZONES, SandboxNet
+from src.stagr.net import BOXES, ZONES, SandboxNet, normalize_host
 
 if TYPE_CHECKING:
     from src.memory.memory_manager import MemoryManager
@@ -171,8 +171,10 @@ class StagrToolHandler:
     def register(self, manager: "ToolManager") -> None:
         manager.register("stagr_shell", self._stagr_shell)
         manager.register("list_web_access", self._list_web_access)
-        manager.register("request_web_access", self._request_web_access)
-        manager.register("request_network", self._request_network, enricher=self._request_network_warning)
+        manager.register("request_web_access", self._request_web_access,
+                         settler=self._request_web_access_settled)
+        manager.register("request_network", self._request_network, enricher=self._request_network_warning,
+                         settler=self._request_network_settled)
         manager.register("sandbox_net_status", self._sandbox_net_status)
         manager.register("set_sandbox_net", self._set_sandbox_net)
         manager.register("codr_shell", self._codr_shell)
@@ -261,6 +263,33 @@ class StagrToolHandler:
         if result.get("status") == "ok":
             logger.info("stagr: web access to %s approved (%s)", host or domain, reason)
         return result
+
+    # DP-514 settlers: reads that answer a request before it parks, so stagr
+    # learns the state instead of Adam approving a no-op. They never act; a
+    # None (including an unreadable state) parks the request as usual.
+
+    async def _request_network_settled(self, zone: str = "", **_: Any) -> Optional[Dict[str, Any]]:
+        zone = (zone or "").strip().lower()
+        if zone not in ZONES or await self._net.switch_on(STAGR_BOX, zone) is not True:
+            return None
+        return {"status": "ok", "box": STAGR_BOX, zone: True, "changed": False,
+                "message": f"{zone.upper()} is already on; nothing to approve. "
+                           "list_web_access shows both switches."}
+
+    async def _request_web_access_settled(self, host: str = "", domain: str = "",
+                                          **_: Any) -> Optional[Dict[str, Any]]:
+        host = host or domain
+        if normalize_host(host) is None:
+            return None  # the handler's own error, after approval, says why
+        wan = await self._net.switch_on(STAGR_BOX, "wan")
+        if wan is False:
+            return _error("stagr's WAN is off, so no host can be let through. "
+                          "Ask for WAN with request_network first.")
+        if wan is True and await self._net.host_admitted(STAGR_BOX, host) is True:
+            return {"status": "ok", "host": normalize_host(host), "changed": False,
+                    "message": f"{normalize_host(host)} is already let through; nothing to approve. "
+                               "If a fetch still fails, the cause is elsewhere."}
+        return None
 
     async def _request_network_warning(self, zone: str = "", **_: Any) -> Optional[str]:
         """The approval prompt's enrichment: the LAN+WAN warning when the other

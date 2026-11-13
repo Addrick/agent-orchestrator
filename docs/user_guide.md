@@ -1023,7 +1023,15 @@ only thing that talks to both:
   - **The log**: every connection the proxy passed (box, host, time) and every
     refusal, in the same panel.
   - The setup agent can **ask** for a switch with `request_network`, giving its
-    reason; you get an approval prompt. codr cannot flip its own. **codr's
+    reason; you get an approval prompt. codr cannot flip its own.
+  - **No prompt for a request that would change nothing (DP-514).** Before a
+    `request_network` or `request_web_access` reaches you, DERPR reads the
+    box's current state. If the switch is already on, or the host is already
+    let through (a default or one you approved since WAN went on), the agent
+    is told so straight away and you get no prompt. A `request_web_access`
+    while WAN is off gets the answer "turn WAN on first" instead of a prompt
+    you could approve and that would then fail. If the state can't be read,
+    the request parks for approval as usual. **codr's
     switches stay off for now**: for the foreseeable future only the setup box
     touches the internet. codr's box works the same way, so opening it later is
     a setting, not new code.

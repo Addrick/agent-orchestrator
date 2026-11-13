@@ -125,6 +125,7 @@ async def test_ctx_reset_when_audit_logging_raises(mocked_chat_system):
     enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
+    chat_system.tool_manager.settle = AsyncMock(return_value=None)  # type: ignore[assignment]
     _script_engine(chat_system, [
         ({"type": "tool_calls", "calls": [
             {"id": "w1", "name": "create_ticket",
@@ -223,6 +224,7 @@ async def test_continuation_sets_and_resets_turn_context(mocked_chat_system):
     enable_all_tools(chat_system.personas["test_persona"])
     offer_tools(chat_system, "test_persona", "create_ticket", "get_agent_status", "get_agent_history")
     chat_system.tool_manager.enrich_audit_action = AsyncMock(return_value=None)  # type: ignore[assignment]
+    chat_system.tool_manager.settle = AsyncMock(return_value=None)  # type: ignore[assignment]
     chat_system.tool_manager.execute_tool = AsyncMock(return_value={"ok": True})  # type: ignore[assignment]
 
     # Turn 1: gate a write, then finish with text (DP-297: the gate no longer

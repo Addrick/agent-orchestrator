@@ -218,3 +218,47 @@ async def test_status_covers_both_boxes_and_a_dead_host_fails_alone(monkeypatch)
     assert set(boxes) == {"codr", "stagr"}
     assert boxes["codr"]["wan"] is True and boxes["codr"]["lan"] is None
     assert "lan" in boxes["codr"]["errors"] and boxes["codr"]["log"]
+
+
+# --- DP-514: requests answered before they park ---------------------------------
+
+async def test_request_network_for_a_switch_already_on_needs_no_approval(node):
+    node.on[("stagr", "lan")] = True
+    handler = _handler(node)
+    answer = await handler._request_network_settled(zone="LAN", reason="dt21")
+    assert answer is not None and answer["changed"] is False and answer["lan"] is True
+    assert [c for c in node.calls if c[-1] in ("on", "off")] == [], "a settler must never flip"
+
+
+@pytest.mark.parametrize("state", [False, None])
+async def test_request_network_parks_when_off_or_unreadable(node, state, monkeypatch):
+    handler = _handler(node)
+    if state is None:
+        async def unreadable(box, zone):
+            return {"status": "error", "message": "ssh failed"}
+        monkeypatch.setattr(handler._net, "_switch", unreadable)
+    assert await handler._request_network_settled(zone="wan") is None
+
+
+async def test_web_access_with_wan_off_is_refused_before_it_parks(node):
+    answer = await _handler(node)._request_web_access_settled(host="example.org")
+    assert answer is not None and answer["status"] == "error" and "request_network" in answer["message"]
+
+
+@pytest.mark.parametrize("host, admitted", [
+    ("github.com", True),            # a default
+    ("api.github.com", True),        # a default admits its subdomains
+    ("notgithub.com", False),        # ...but not a lookalike suffix
+    ("files.example.org", True),     # approved: exactly that host
+    ("cdn.files.example.org", False),
+    ("pypi.org", False),
+])
+async def test_web_access_already_let_through_needs_no_approval(node, host, admitted):
+    node.on[("stagr", "wan")] = True
+    node.approved["stagr"] = ["files.example.org"]
+    answer = await _handler(node)._request_web_access_settled(host=host)
+    if admitted:
+        assert answer is not None and answer["changed"] is False
+    else:
+        assert answer is None, "not yet admitted: park for approval"
+    assert not any(c[2] == "allow" for c in node.calls if c[0] == EGRESS_VERB)
