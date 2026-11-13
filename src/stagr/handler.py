@@ -34,12 +34,17 @@ runs `opencode` (DP-481): that starts a codr session the codr agent never
 watches (no loop guard, time limit or check), held open only by this call.
 
 Files move with `OpencodeClient.write_file` / `read_file` (DP-455), as one
-tar.gz each way; derpr is the only thing that talks to both boxes.
+tar.gz each way; derpr is the only thing that talks to both boxes. The same two
+calls back the file tools (DP-516): `*_read_file` returns numbered lines and
+`*_edit_file` replaces one exact, unique piece of text and returns the diff, so
+a change reads as a diff in the portal instead of a sed one-liner. codr's pair
+runs under `codr_shell`'s gate (`_codr_window`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import posixpath
 import re
@@ -47,8 +52,9 @@ import shlex
 import shutil
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import aiohttp
 
@@ -75,6 +81,9 @@ CODR_PERSONA = "codr"
 STAGR_BOX = "stagr"
 PATH_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 MAX_SHELL_SECONDS = 3600
+# What a file tool reads or writes; bigger files are a shell job.
+MAX_EDIT_BYTES = 2 * 1024 * 1024
+DEFAULT_READ_LINES = 400
 DEFAULT_SHELL_SECONDS = 600
 # What one copy may carry, compressed. write_file moves ~0.5 MB/s.
 MAX_TRANSFER_BYTES = 200 * 1024 * 1024
@@ -161,6 +170,116 @@ def _shell_result(out: str, seconds: int) -> Dict[str, Any]:
     return result
 
 
+_CODR_BUSY = "codr is starting or running a turn; try again when it is idle."
+
+
+def _file_path(path: str, box: str) -> Union[str, Dict[str, Any]]:
+    rel = _rel_path(path)
+    if rel is None or rel == ".":
+        return _error(f"path must name a file relative to {box}'s workdir, with no '..' "
+                      f"(anything outside it is a shell job): {path!r}")
+    return rel
+
+
+async def _stat(client: OpencodeClient, path: str) -> Tuple[str, Optional[str], int]:
+    """(kind, octal mode, size) of `path`; kind is missing, link, file or other."""
+    q = shlex.quote(path)
+    out = await client.run_shell(
+        f"if [ -L {q} ]; then echo link; elif [ -f {q} ]; then echo \"file $(stat -c '%a %s' -- {q})\"; "
+        f"elif [ -e {q} ]; then echo other; else echo missing; fi")
+    words = out.strip().split()
+    if words[:1] == ["file"] and len(words) == 3 and words[1].isdigit() and words[2].isdigit():
+        return "file", words[1], int(words[2])
+    return (words[0] if words and words[0] in ("missing", "link", "other") else "other"), None, 0
+
+
+async def _text(client: OpencodeClient, path: str, box: str) -> Union[Tuple[str, str], Dict[str, Any]]:
+    """(text, mode) of an existing regular UTF-8 file, or the error."""
+    kind, mode, size = await _stat(client, path)
+    if kind == "missing":
+        return _error(f"{path} does not exist on {box}.")
+    if kind == "link":
+        return _error(f"{path} is a symlink on {box}; name the file it points to.")
+    if kind != "file" or mode is None:
+        return _error(f"{path} is not a regular file on {box}.")
+    if size > MAX_EDIT_BYTES:
+        return _error(f"{path} is {size} bytes; the file tools stop at {MAX_EDIT_BYTES}. Use the shell.")
+    try:
+        return (await client.read_file(path)).decode("utf-8"), mode
+    except UnicodeDecodeError:
+        return _error(f"{path} is not UTF-8 text; use the shell.")
+
+
+def _whole(value: Any, name: str) -> Union[Optional[int], Dict[str, Any]]:
+    """A positive whole-number tool argument (models may send a string), None if absent."""
+    if value in (None, ""):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _error(f"{name} must be a whole number.")
+    return n if n >= 1 else _error(f"{name} must be at least 1.")
+
+
+async def _read_lines(client: OpencodeClient, path: str, offset: Any, limit: Any, box: str) -> Dict[str, Any]:
+    rel = _file_path(path, box)
+    if isinstance(rel, dict):
+        return rel
+    start, count = _whole(offset, "offset"), _whole(limit, "limit")
+    if isinstance(start, dict):
+        return start
+    if isinstance(count, dict):
+        return count
+    got = await _text(client, rel, box)
+    if isinstance(got, dict):
+        return got
+    lines = got[0].splitlines()
+    first = start or 1
+    last = min(len(lines), first - 1 + (count or DEFAULT_READ_LINES))
+    body = "\n".join(f"{n:>6}\t{lines[n - 1]}" for n in range(first, last + 1))
+    result: Dict[str, Any] = {"status": "ok", "path": rel, "lines": f"{first}-{last} of {len(lines)}",
+                              "content": _clip(body, global_config.STAGR_OUTPUT_CHARS)}
+    if last < len(lines):
+        result["note"] = f"more lines follow: read again with offset {last + 1}"
+    return result
+
+
+async def _edit(client: OpencodeClient, path: str, old_text: str, new_text: str, box: str) -> Dict[str, Any]:
+    rel = _file_path(path, box)
+    if isinstance(rel, dict):
+        return rel
+    old_text, new_text = old_text or "", new_text or ""
+    if len(new_text.encode("utf-8")) > MAX_EDIT_BYTES:
+        return _error(f"new_text is over {MAX_EDIT_BYTES} bytes; use the shell.")
+    if not old_text:
+        kind, _, _ = await _stat(client, rel)
+        if kind != "missing":
+            return _error(f"{rel} already exists on {box}: an empty old_text only creates a new file. "
+                          "Name the exact text to replace instead.")
+        before, after = "", new_text
+        await client.write_file(rel, after.encode("utf-8"))
+    else:
+        got = await _text(client, rel, box)
+        if isinstance(got, dict):
+            return got
+        before, mode = got
+        n = before.count(old_text)
+        if n != 1:
+            hint = ("Read the file again and copy the text exactly." if n == 0
+                    else "Include more of the surrounding lines.")
+            return _error(f"old_text occurs {n} times in {rel}; it must occur exactly once. {hint}")
+        if old_text == new_text:
+            return _error("old_text and new_text are the same; nothing to change.")
+        after = before.replace(old_text, new_text)
+        await client.write_file(rel, after.encode("utf-8"))
+        # write_file replaces the file, which would reset its permissions.
+        await client.run_shell(f"chmod {mode} -- {shlex.quote(rel)}")
+    diff = "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    return {"status": "ok", "path": rel, "created": not old_text,
+            "diff": _clip(diff, global_config.STAGR_OUTPUT_CHARS)}
+
+
 class StagrToolHandler:
     def __init__(self, runner: SSHRunner | None = None, net_runner: SSHRunner | None = None,
                  memory_manager: "MemoryManager | None" = None) -> None:
@@ -176,6 +295,10 @@ class StagrToolHandler:
         manager.register("sandbox_net_status", self._sandbox_net_status)
         manager.register("set_sandbox_net", self._set_sandbox_net)
         manager.register("codr_shell", self._codr_shell)
+        manager.register("stagr_read_file", self._stagr_read_file)
+        manager.register("stagr_edit_file", self._stagr_edit_file)
+        manager.register("codr_read_file", self._codr_read_file)
+        manager.register("codr_edit_file", self._codr_edit_file)
         manager.register("copy_to_codr", self._copy_to_codr)
         manager.register("copy_from_codr", self._copy_from_codr)
         manager.register("queue_codr_task", self._queue_codr_task, enricher=self._queue_preview)
@@ -224,24 +347,82 @@ class StagrToolHandler:
         if isinstance(prepared, dict):
             return prepared
         script, seconds = prepared
-        _, _, codr_dir = workspace_directory(CODR_PERSONA)
-        lock = workspace_lock(codr_dir)
-        if lock.locked():
-            return _error("codr is starting or running a turn; try again when it is idle.")
         try:
             # Held for the whole command, so codr starts nothing while it runs.
-            async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                with workspace_held(codr_dir, "stagr's codr_shell", seconds + 60):
-                    codr = OpencodeClient(http, codr_dir)
-                    if not await self._codr_idle(codr):
-                        return _error("codr is working, or its last task turn is not checked yet; "
-                                      "try again when it is idle.")
-                    out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+            async with self._codr_window("stagr's codr_shell", seconds + 60) as codr:
+                out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+        except _Refused as e:
+            return _error(str(e))
         except LLMCommunicationError as e:
             return _error(f"codr shell failed: {e}")
         except TimeoutError:
             return _error(f"codr shell gave no answer within {seconds + 60} s.")
         return _shell_result(out, seconds)
+
+    @asynccontextmanager
+    async def _codr_window(self, holder: str, max_seconds: Optional[int] = None) -> AsyncIterator[OpencodeClient]:
+        """A client on codr's workspace while codr is idle, holding its lock
+        (and the `workspace_held` mark) so codr starts nothing until the block
+        ends. Raises `_Refused` when codr is starting, working, or has a task
+        turn whose check has not run yet. The one gate for everything stagr
+        does in codr's box: its shell, the copy in, and the file tools."""
+        _, _, codr_dir = workspace_directory(CODR_PERSONA)
+        lock = workspace_lock(codr_dir)
+        if lock.locked():
+            raise _Refused(_CODR_BUSY)
+        async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
+            with workspace_held(codr_dir, holder, max_seconds):
+                codr = OpencodeClient(http, codr_dir)
+                if not await self._codr_idle(codr):
+                    raise _Refused("codr is working, or its last task turn is not checked yet; "
+                                   "try again when it is idle.")
+                yield codr
+
+    # -- files (DP-516) ----------------------------------------------------------------
+
+    async def _stagr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
+        if (err := self._configured()):
+            return err
+        try:
+            async with self._stagr_session() as http:
+                return await _read_lines(self._stagr(http), path, offset, limit, "stagr")
+        except LLMCommunicationError as e:
+            return _error(f"reading on stagr failed: {e}")
+        except TimeoutError:
+            return _error("reading on stagr timed out.")
+
+    async def _stagr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
+        if (err := self._configured()):
+            return err
+        try:
+            async with self._stagr_session() as http:
+                return await _edit(self._stagr(http), path, old_text, new_text, "stagr")
+        except LLMCommunicationError as e:
+            return _error(f"editing on stagr failed: {e}")
+        except TimeoutError:
+            return _error("editing on stagr timed out.")
+
+    async def _codr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
+        try:
+            async with self._codr_window("stagr's codr_read_file") as codr:
+                return await _read_lines(codr, path, offset, limit, "codr")
+        except _Refused as e:
+            return _error(str(e))
+        except LLMCommunicationError as e:
+            return _error(f"reading on codr failed: {e}")
+        except TimeoutError:
+            return _error("reading on codr timed out.")
+
+    async def _codr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
+        try:
+            async with self._codr_window("stagr's codr_edit_file") as codr:
+                return await _edit(codr, path, old_text, new_text, "codr")
+        except _Refused as e:
+            return _error(str(e))
+        except LLMCommunicationError as e:
+            return _error(f"editing on codr failed: {e}")
+        except TimeoutError:
+            return _error("editing on codr timed out.")
 
     # -- network (DP-465) ----------------------------------------------------------
 
@@ -382,21 +563,15 @@ class StagrToolHandler:
             return _error(f"dest must be a new path relative to codr's workspace, with no '..': {dest!r}")
         keep = _flag(keep_git)
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
-        lock = workspace_lock(codr_dir)
-        if lock.locked():
-            return _error("codr is starting or running a turn; try again when it is idle.")
+        if workspace_lock(codr_dir).locked():
+            return _error(_CODR_BUSY)
         try:
             async with aiohttp.ClientSession(headers=auth_headers()) as http:
                 await self._refuse_existing(OpencodeClient(http, codr_dir), dst, "codr")
             async with self._stagr_session() as http:
                 archive = await self._pack(self._stagr(http), src, keep_git=keep)
-            async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                with workspace_held(codr_dir, "stagr's copy_to_codr"):
-                    codr = OpencodeClient(http, codr_dir)
-                    if not await self._codr_idle(codr):
-                        raise _Refused("codr is working, or its last task turn is not checked yet; "
-                                       "copy when it is idle.")
-                    await self._unpack(codr, archive, posixpath.basename(src), dst)
+            async with self._codr_window("stagr's copy_to_codr") as codr:
+                await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
             return _error(str(e))
         except LLMCommunicationError as e:
