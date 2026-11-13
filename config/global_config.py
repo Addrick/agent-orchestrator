@@ -151,11 +151,12 @@ MAX_TOOL_CALLS = 15
 # ordinary turns.
 MAX_TOOL_ITERATIONS = 25
 
-# Upper bound on a persona's own `max_tool_calls` (DP-428). The override
-# replaces MAX_TOOL_CALLS for that persona, and its runaway guard is derived
-# from it (`tool_loop.runaway_guard_for`) so the ordering above holds per
-# persona too; this cap only stops a typo from buying a thousand-call turn.
-MAX_TOOL_CALLS_OVERRIDE_CAP = 100
+# Floor on a persona's own `max_tool_calls` (DP-428). The override replaces
+# MAX_TOOL_CALLS for that persona, and its runaway guard is derived from it
+# (`tool_loop.runaway_guard_for`) so the ordering above holds per persona too.
+# DP-513 removed the upper cap (was 100): it guarded nothing the derived
+# guard doesn't, and it blocked legitimately long agentic turns.
+MAX_TOOL_CALLS_MIN = 1
 # Max cached API request payloads (for dump commands); FIFO eviction beyond this
 MAX_CACHED_API_REQUESTS = 128
 # Seconds before a gated write expires unanswered.

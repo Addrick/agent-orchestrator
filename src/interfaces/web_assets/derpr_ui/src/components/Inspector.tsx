@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Persona, ToolDef } from '../types/contracts'
+import type { PatchPersonaResult, Persona, ToolDef } from '../types/contracts'
 import type { PortalStore } from '../state/store'
 import { policyLabel, estimateTokens, fmtTok } from '../state/util'
 import { readPref, writePref } from '../state/persist'
@@ -145,6 +145,17 @@ function coerceNum(s: string): number | string {
   return s.trim() !== '' && !Number.isNaN(n) ? n : s
 }
 
+// DP-513: "max_tool_calls (needs whole number ≥ 1)" rather than a bare key —
+// a rejected value keeps the field's previous setting, so say what was wanted.
+function describeProblems(res: PatchPersonaResult): string {
+  const reasons = res.rejected_reasons || {}
+  const parts = (res.rejected_fields || []).map((k) =>
+    reasons[k] ? `${k} (needs ${reasons[k]})` : k,
+  )
+  for (const k of res.unknown_fields || []) parts.push(`${k} (unknown field)`)
+  return parts.join('; ')
+}
+
 function PersonaPane({ store }: { store: PortalStore }) {
   const p = store.persona
   const modelList = store.modelList
@@ -171,6 +182,7 @@ function PersonaPane({ store }: { store: PortalStore }) {
   )
 
   if (!p) return <div className="dimrow">no persona loaded</div>
+  const hints = p.field_constraints || {}
 
   const set = (k: string, v: string) => setBuf((b) => ({ ...b, [k]: v }))
   const reset = () => {
@@ -204,14 +216,11 @@ function PersonaPane({ store }: { store: PortalStore }) {
     setStatus(null)
     try {
       const res = await store.savePersona(patch, devCommands)
-      const problems = [...(res.rejected_fields || []), ...(res.unknown_fields || [])]
+      const problems = describeProblems(res)
       if (res.error) {
         setStatus({ kind: 'err', text: `${res.error}: ${res.detail || 'save failed'}` })
-      } else if (problems.length) {
-        setStatus({
-          kind: 'warn',
-          text: `saved, but ignored/coerced: ${problems.join(', ')}`,
-        })
+      } else if (problems) {
+        setStatus({ kind: 'warn', text: `saved the rest; not applied — ${problems}` })
       } else {
         setStatus({ kind: 'ok', text: 'saved' })
       }
@@ -323,9 +332,10 @@ function PersonaPane({ store }: { store: PortalStore }) {
       </Pair>
 
       <Pair>
-        <Cell label="max_tool_calls">
+        <Cell label="max_tool_calls" hint={hints.max_tool_calls}>
           <input
             type="number"
+            min={1}
             value={buf.max_tool_calls}
             placeholder="default"
             onChange={(e) => set('max_tool_calls', e.target.value)}
@@ -366,32 +376,30 @@ function PersonaPane({ store }: { store: PortalStore }) {
       </div>
 
       <Pair>
-        <Cell label="ltm_max_items">
+        <Cell label="ltm_max_items" hint={hints.ltm_max_items}>
           <input
             type="number"
             min={1}
-            max={50}
             value={buf.ltm_max_items}
             placeholder="default"
-            title="memories inserted into each new message (1-50). Empty = MEMORY_MAX_SUMMARIES_IN_CONTEXT."
+            title="memories inserted into each new message"
             onChange={(e) => set('ltm_max_items', e.target.value)}
           />
         </Cell>
       </Pair>
 
       <Pair>
-        <Cell label="ltm_max_tokens · hindsight">
+        <Cell label="ltm_max_tokens · hindsight" hint={hints.ltm_max_tokens}>
           <input
             type="number"
             min={100}
-            max={32000}
             value={buf.ltm_max_tokens}
             placeholder="default"
-            title="Hindsight only: token cap for the recalled memories (100-32000). Empty = scales with ltm_max_items."
+            title="Hindsight only: token cap for the recalled memories"
             onChange={(e) => set('ltm_max_tokens', e.target.value)}
           />
         </Cell>
-        <Cell label="ltm_budget · hindsight">
+        <Cell label="ltm_budget · hindsight" hint={hints.ltm_budget}>
           <select
             value={buf.ltm_budget}
             title="Hindsight only: how hard recall searches. Empty = server default."
@@ -494,11 +502,21 @@ function Single({ label, children }: { label: string; children: React.ReactNode 
   )
 }
 
-function Cell({ label, children }: { label: string; children: React.ReactNode }) {
+function Cell({
+  label,
+  hint,
+  children,
+}: {
+  label: string
+  // DP-513: the field's accepted values, from GET persona field_constraints.
+  hint?: string
+  children: React.ReactNode
+}) {
   return (
     <div>
       <span className="lbl">{label}</span>
       <div className="ctrl">{children}</div>
+      {hint && <div className="hint">{hint}</div>}
     </div>
   )
 }

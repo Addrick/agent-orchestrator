@@ -27,12 +27,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type
 
 from config.global_config import (
-    DEFAULT_PERSONA, MAX_TOOL_CALLS, MAX_TOOL_CALLS_OVERRIDE_CAP,
+    DEFAULT_PERSONA, MAX_TOOL_CALLS, MAX_TOOL_CALLS_MIN,
     LTM_TOKENS_PER_ITEM, MEMORY_MAX_SUMMARIES_IN_CONTEXT,
 )
 from src.origin import split_allowlist_entries
 from src.persona import (
-    LTM_BUDGETS, LTM_MAX_ITEMS_CAP, LTM_MAX_TOKENS_CAP, LTM_MAX_TOKENS_MIN,
+    LTM_BUDGETS, LTM_MAX_ITEMS_MIN, LTM_MAX_TOKENS_MIN,
     ExecutionMode, MemoryMode, Persona,
 )
 from src.tool_policy import KNOWN_OVERRIDES
@@ -53,6 +53,10 @@ class PersonaField:
     set_cli: Optional[SetFn] = None    # None = not settable via `set`
     patch_key: Optional[str] = None    # JSON key on the PATCH route, if patchable
     patch_apply: Optional[PatchFn] = None
+    # DP-513: the accepted values in words, for fields whose rule is not
+    # obvious from the input type. Served on GET (the portal shows it next to
+    # the input) and echoed per field when a PATCH rejects a value.
+    constraint: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -86,7 +90,8 @@ def _optional_number_setter(
         except ValueError:
             apply(persona, None)
             return fallback_msg.format(raw=raw, name=persona.get_name()), True
-        if range_msg is not None and not (lo <= value <= hi):
+        if range_msg is not None and (
+                (lo is not None and value < lo) or (hi is not None and value > hi)):
             return range_msg, False
         apply(persona, value)
         return ok_msg.format(value=value, name=persona.get_name()), True
@@ -149,6 +154,21 @@ def _optional_number_patch(apply: Callable[[Persona, Any], Any]) -> PatchFn:
     the value was rejected (coerced away)."""
     def patch_apply(persona: Persona, value: Any) -> bool:
         return apply(persona, value) is None and value is not None
+    return patch_apply
+
+
+def _validated_patch(
+        coerce: Callable[[Any], Any], apply: Callable[[Persona, Any], Any]) -> PatchFn:
+    """PATCH semantics for a clear-to-default setter that must not lose a
+    saved value to a typo: null / "" clear, an invalid value is rejected and
+    changes nothing (the setter itself would clear on invalid input)."""
+    def patch_apply(persona: Persona, value: Any) -> bool:
+        if isinstance(value, str) and value.strip() == '':
+            value = None
+        if value is not None and coerce(value) is None:
+            return True
+        apply(persona, value)
+        return False
     return patch_apply
 
 
@@ -837,12 +857,14 @@ PERSONA_FIELDS: List[PersonaField] = [
                 "Max tool calls for {name} cleared ('{raw}' is not a number); "
                 f"the global default ({MAX_TOOL_CALLS}) will be used."
             ),
-            lo=1,
-            hi=MAX_TOOL_CALLS_OVERRIDE_CAP,
-            range_msg=f"Error: max_tool_calls must be between 1 and {MAX_TOOL_CALLS_OVERRIDE_CAP}.",
+            lo=MAX_TOOL_CALLS_MIN,
+            range_msg=f"Error: max_tool_calls must be at least {MAX_TOOL_CALLS_MIN}.",
         ),
         patch_key='max_tool_calls',
-        patch_apply=_optional_number_patch(lambda p, v: p.set_max_tool_calls(v)),
+        patch_apply=_validated_patch(
+            Persona._coerce_max_tool_calls, lambda p, v: p.set_max_tool_calls(v)),
+        constraint=(f"whole number ≥ {MAX_TOOL_CALLS_MIN}; "
+                    f"empty = global default ({MAX_TOOL_CALLS})"),
     ),
     PersonaField(
         name='ltm_max_items',
@@ -850,11 +872,13 @@ PERSONA_FIELDS: List[PersonaField] = [
         set_cli=_ltm_setter(
             apply=lambda p, v: p.set_ltm_max_items(v),
             label='ltm_max_items',
-            valid=f"an integer 1-{LTM_MAX_ITEMS_CAP}, or none",
+            valid=f"an integer of at least {LTM_MAX_ITEMS_MIN}, or none",
             describe=_what_ltm_max_items,
         ),
         patch_key='ltm_max_items',
         patch_apply=_ltm_patch(lambda p, v: p.set_ltm_max_items(v)),
+        constraint=(f"whole number ≥ {LTM_MAX_ITEMS_MIN}; empty = default "
+                    f"(MEMORY_MAX_SUMMARIES_IN_CONTEXT={MEMORY_MAX_SUMMARIES_IN_CONTEXT})"),
     ),
     PersonaField(
         name='ltm_max_tokens',
@@ -862,11 +886,13 @@ PERSONA_FIELDS: List[PersonaField] = [
         set_cli=_ltm_setter(
             apply=lambda p, v: p.set_ltm_max_tokens(v),
             label='ltm_max_tokens',
-            valid=f"an integer {LTM_MAX_TOKENS_MIN}-{LTM_MAX_TOKENS_CAP}, or none",
+            valid=f"an integer of at least {LTM_MAX_TOKENS_MIN}, or none",
             describe=_what_ltm_max_tokens,
         ),
         patch_key='ltm_max_tokens',
         patch_apply=_ltm_patch(lambda p, v: p.set_ltm_max_tokens(v)),
+        constraint=(f"whole number ≥ {LTM_MAX_TOKENS_MIN}; "
+                    f"empty = {LTM_TOKENS_PER_ITEM} per item"),
     ),
     PersonaField(
         name='ltm_budget',
@@ -879,6 +905,7 @@ PERSONA_FIELDS: List[PersonaField] = [
         ),
         patch_key='ltm_budget',
         patch_apply=_ltm_patch(lambda p, v: p.set_ltm_budget(v)),
+        constraint=f"{', '.join(LTM_BUDGETS)}; empty = server default",
     ),
     PersonaField(
         name='chat_template',
@@ -957,6 +984,14 @@ def apply_patch_fields(persona: Persona, data: Dict[str, Any], rejected: List[st
         if f.patch_key in data and f.patch_apply is not None:
             if f.patch_apply(persona, data[f.patch_key]):
                 rejected.append(f.patch_key)
+
+
+def field_constraints() -> Dict[str, str]:
+    """DP-513: PATCH key -> accepted values in words, for every patchable
+    field that declares a constraint. Served on persona GET so the portal can
+    show the rule instead of discovering it from a rejection."""
+    return {f.patch_key: f.constraint for f in patchable_fields()
+            if f.patch_key is not None and f.constraint is not None}
 
 
 def registry_patch_keys() -> Set[str]:

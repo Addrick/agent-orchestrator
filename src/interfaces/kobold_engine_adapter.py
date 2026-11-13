@@ -67,7 +67,9 @@ from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
     apply_persona_patch_body,
     get_kobold_extras_for_get,
+    rejection_reasons,
 )
+from src.persona_fields import field_constraints
 
 if TYPE_CHECKING:
     from src.confirmations import ConfirmationManager
@@ -770,6 +772,8 @@ class KoboldEngineAdapter:
             "service_bindings": p.get_service_bindings(),
             "security_blocked": p.is_security_blocked(),
             "security_block_reasons": p.get_security_block_reasons(),
+            # DP-513: accepted values per field, shown next to the inputs.
+            "field_constraints": field_constraints(),
         }
 
     def _setup_portal(self) -> None:
@@ -1537,6 +1541,7 @@ class KoboldEngineAdapter:
                 content={
                     "result": "created",
                     "rejected_fields": rejected,
+                    "rejected_reasons": rejection_reasons(rejected),
                     "unknown_fields": unknown,
                     "persona": self._persona_to_dict(p),
                 },
@@ -1569,7 +1574,10 @@ class KoboldEngineAdapter:
                 logger.error(f"Persona save failed for {name}: {e}")
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "save_failed", "detail": str(e), "rejected_fields": rejected, "unknown_fields": unknown},
+                    content={
+                        "error": "save_failed", "detail": str(e), "rejected_fields": rejected,
+                        "rejected_reasons": rejection_reasons(rejected), "unknown_fields": unknown,
+                    },
                 )
             logger.info(f"Updated and saved persona settings for {name} (rejected={rejected}, unknown={unknown})")
             await self._audit_control_change(
@@ -1577,7 +1585,14 @@ class KoboldEngineAdapter:
                 {"fields": sorted(set(data.keys()) - set(unknown))},
                 {"rejected": rejected, "unknown": unknown},
             )
-            return {"result": "success", "rejected_fields": rejected, "unknown_fields": unknown}
+            return {
+                "result": "success",
+                "rejected_fields": rejected,
+                # DP-513: the rule each rejected value broke, so the portal
+                # can say why instead of naming the key.
+                "rejected_reasons": rejection_reasons(rejected),
+                "unknown_fields": unknown,
+            }
 
         @self.app.get("/api/v1/infra/status")
         async def infra_status() -> Any:
