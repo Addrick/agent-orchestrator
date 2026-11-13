@@ -1127,7 +1127,11 @@ only thing that talks to both:
   the product repo, or one that several projects share. stagr then copies it
   into place with `codr_shell` once it passes. Since a later ticket can edit a
   fixture in its worktree, stagr records the fixture's hashes when it passes, and
-  any later check that relies on the fixture fails when they change.
+  any later check that relies on the fixture checks them first. On a mismatch
+  it prints `fixture changed:` with the files and stops, so codr sees why on
+  its retry and stagr sees it in the result. A ticket that needs the fixture to
+  change is queued first as a fixture ticket of its own, and its new hashes are
+  recorded when it passes.
 - **Moving files between the boxes**: `copy_to_codr` copies a file or folder from
   the setup box to any path in codr's workspace, and `copy_from_codr` copies one
   back to any path on the setup box. Only `copy_from_codr` needs your approval:
