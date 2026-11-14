@@ -86,13 +86,18 @@ class ToolManager:
     def __init__(self) -> None:
         self._handlers: Dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
         self._enrichers: Dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
+        self._settlers: Dict[str, Callable[..., Coroutine[Any, Any, Any]]] = {}
 
-    def register(self, name: str, handler: Callable[..., Coroutine[Any, Any, Any]], 
-                 enricher: Optional[Callable[..., Coroutine[Any, Any, Any]]] = None) -> None:
-        """Register an async handler for a named tool, and optionally an enrichment handler."""
+    def register(self, name: str, handler: Callable[..., Coroutine[Any, Any, Any]],
+                 enricher: Optional[Callable[..., Coroutine[Any, Any, Any]]] = None,
+                 settler: Optional[Callable[..., Coroutine[Any, Any, Any]]] = None) -> None:
+        """Register an async handler for a named tool, and optionally an
+        enrichment handler and a settler (see `settle`)."""
         self._handlers[name] = handler
         if enricher:
             self._enrichers[name] = enricher
+        if settler:
+            self._settlers[name] = settler
 
     def unregister(self, name: str) -> None:
         """Remove a tool handler (and its enricher). Used by runtime-registered
@@ -100,6 +105,7 @@ class ToolManager:
         no-op."""
         self._handlers.pop(name, None)
         self._enrichers.pop(name, None)
+        self._settlers.pop(name, None)
 
     async def enrich_audit_action(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[str]:
         """Returns a human-readable enrichment string for a tool call if an enricher is registered."""
@@ -109,6 +115,27 @@ class ToolManager:
             except Exception as e:
                 logger.warning(f"Enrichment failed for {tool_name}: {e}")
         return None
+
+    async def settle(self, tool_name: str, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """DP-514: the answer to a call under ask that need not park, or None.
+
+        A settler is a READ: it checks whether what the call asks for already
+        holds (stagr's switch already on, a host already let through) or cannot
+        work (WAN off), and returns the tool result the model gets instead of
+        an approval prompt. It must never perform the action -- the approval
+        is the only thing that may. Returns the `execute_tool` shape
+        (`{"result": ...}`). A settler that returns None or raises parks the
+        call as usual, so a failed read falls back to asking, never to running.
+        """
+        settler = self._settlers.get(tool_name)
+        if settler is None:
+            return None
+        try:
+            answer = await settler(**arguments)
+        except Exception as e:
+            logger.warning(f"Settler failed for {tool_name}: {e}; parking it")
+            return None
+        return None if answer is None else {"result": answer}
 
     def get_tool_definitions(self) -> List[Dict[str, Any]]:
         """Returns definitions for registered tools plus non-callable tool flags."""

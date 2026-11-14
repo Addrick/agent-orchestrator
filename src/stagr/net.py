@@ -206,6 +206,48 @@ class SandboxNet:
             out["closed"] = closed
         return out
 
+    async def switch_on(self, box: str, zone: str) -> Optional[bool]:
+        """One switch, or None when it cannot be read (DP-514)."""
+        res = await self._switch(box, zone)
+        return res["on"] if res.get("status") == "ok" else None
+
+    async def host_admitted(self, box: str, host: str) -> Optional[bool]:
+        """Whether the box's proxy already lets ``host`` through, or None when
+        the allowlist cannot be read or parsed (DP-514). Mirrors egress-ctl's
+        filter: a default admits itself and its subdomains, ``=host`` and an
+        approved host admit exactly that host."""
+        h = normalize_host(host)
+        if h is None:
+            return None
+        res = await self._egress(box, "list")
+        if res.get("status") == "error":
+            return None
+        section: Optional[str] = None
+        for raw in str(res.get("stdout") or "").split("\n"):
+            if raw in ("default:", "approved:"):
+                section = raw[:-1]
+                continue
+            # As write_filter reads the list: `read -r` trims only spaces and
+            # tabs (a CRLF line keeps its '\r'), and `valid_host` drops any
+            # entry that is not a lowercase host name. An entry the filter
+            # leaves out must not count as let through here, or the proxy
+            # keeps refusing a host whose request never reaches Adam.
+            line = raw.strip(" \t")
+            if not line or section is None:
+                continue
+            exact = line.startswith("=")
+            name = line[1:] if exact else line
+            if len(name) > 253 or not HOST_RE.match(name):
+                continue
+            if exact:
+                if name == h:
+                    return True
+            elif section == "default" and (h == line or h.endswith("." + line)):
+                return True
+            elif section == "approved" and h == line:
+                return True
+        return False if section is not None else None
+
     async def allow(self, box: str, host: str) -> Dict[str, Any]:
         if box not in BOXES:
             return _error(f"no such box: {box!r} (one of {', '.join(BOXES)}).")

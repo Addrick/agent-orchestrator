@@ -63,6 +63,7 @@ def _make_tool_manager(results: Dict[str, Any]):
         return results.get(name, {"result": "ok"})
     manager.execute_tool = AsyncMock(side_effect=execute)
     manager.enrich_audit_action = AsyncMock(return_value=None)
+    manager.settle = AsyncMock(return_value=None)
     return manager
 
 
@@ -437,6 +438,69 @@ async def test_confirm_mode_parks_write_calls():
     assert parks[0].token
     # Write tool was NOT executed — manager should not have been called for it.
     tools.execute_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_call_under_ask_is_answered_without_parking():
+    """DP-514: a call whose settler answers it (the state it asks for already
+    holds) gets the settler's result in history; nothing parks and its
+    handler never runs. A sibling call with no answer still parks."""
+    engine = _make_engine([
+        [
+            {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "noop"}},
+                {"id": "w2", "name": "update_ticket", "arguments": {"id": 1}},
+            ]},
+            {"type": "done", "full_text": ""},
+        ],
+        [{"type": "done", "full_text": "done"}],
+    ])
+    tools = _make_tool_manager({})
+
+    async def settle(name, args):
+        return {"result": {"status": "ok", "changed": False}} if name == "create_ticket" else None
+    tools.settle = AsyncMock(side_effect=settle)
+    history: List[Dict[str, Any]] = []
+    events = await _drain(ToolLoop(engine, tools).run(
+        persona=_make_persona(execution_mode=ExecutionMode.CONFIRM),
+        conversation_history=history, params=MagicMock(), tools=_OFFERED,
+    ))
+    parks = [e for e in events if isinstance(e, ToolDeferredEvent)]
+    assert [p.write_call["name"] for p in parks] == ["update_ticket"]
+    tools.execute_tool.assert_not_called()
+    answered = [m for m in history if m.get("role") == "tool" and m.get("tool_call_id") == "w1"]
+    assert answered and '"changed": false' in answered[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_settle_falls_back_to_parking():
+    """DP-514: no settler, a None answer, or a settler that raises all mean
+    "park it" -- a failed read never lets a call run unapproved."""
+    from src.tools.tool_manager import ToolManager
+
+    async def handler(**_):
+        raise AssertionError("a settler path must never run the handler")
+
+    async def boom(**_):
+        raise RuntimeError("node unreachable")
+
+    async def none(**_):
+        return None
+
+    async def held(**_):
+        return {"status": "ok", "changed": False}
+
+    m = ToolManager()
+    m.register("plain", handler)
+    m.register("raises", handler, settler=boom)
+    m.register("unanswered", handler, settler=none)
+    m.register("answered", handler, settler=held)
+    assert await m.settle("plain", {}) is None
+    assert await m.settle("raises", {}) is None
+    assert await m.settle("unanswered", {}) is None
+    assert await m.settle("answered", {}) == {"result": {"status": "ok", "changed": False}}
+    m.unregister("answered")
+    assert await m.settle("answered", {}) is None
 
 
 @pytest.mark.asyncio
