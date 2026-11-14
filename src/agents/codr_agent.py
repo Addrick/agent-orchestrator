@@ -71,7 +71,8 @@ NOTIFY_TOOL = "notify_adam"
 RELAY_ACTION = "notify_relay"
 NOTICE_ACTION = "ticket_notice"
 REPEAT_LIMIT = 3            # identical tool calls / reasoning steps in a row
-_STALL = "nothing new for {} s"   # the stall guard's reason, formatted with stall_seconds
+_STALL_PREFIX = "nothing new for "
+_STALL = _STALL_PREFIX + "{} s"   # the stall guard's reason, formatted with stall_seconds
 # Stored in the action log, whose payloads are capped at 4,000 chars.
 CHECK_TAIL_CHARS = 2500
 _EXIT_MARK = "__DERPR_EXIT="
@@ -941,8 +942,10 @@ class CodrAgent(Agent):
         end = turn_end(msgs, start)
         if end < len(msgs) or turn_finished(msgs, start):
             outage = provider_outage(msgs[start + 1:end])
-            if outage is not None and auto.get("task") in {t.id for t in self._tasks()}:
-                await self._outage(client, sid, ticket, msgs[:end], start, auto, outage)
+            task = None if outage is None else next(
+                (t for t in self._tasks() if t.id == auto.get("task")), None)
+            if outage is not None and task is not None:
+                await self._outage(client, sid, ticket, msgs[:end], start, auto, outage, task)
             else:
                 await self._finish(client, sid, ticket, msgs[:end], start, auto)
             return
@@ -1377,7 +1380,7 @@ class CodrAgent(Agent):
         reason, nudgeable = self._stuck_reason(turn, auto)
         if not reason:
             return
-        if reason == _STALL.format(int(self.cfg["stall_seconds"])) and await self._model_server_stall(turn, state):
+        if reason.startswith(_STALL_PREFIX) and await self._model_server_stall(turn, state):
             # DP-518: the model server's stall, not codr's. Start the clock again.
             self._progress = (progress_signature(turn), time.monotonic())
             logger.info("codr agent: task %s waits on the model server; not counted as a stall", auto.get("task"))
@@ -1435,7 +1438,7 @@ class CodrAgent(Agent):
             return False
 
     async def _outage(self, client: OpencodeClient, sid: str, ticket: Optional[str], msgs: List[Dict[str, Any]],
-                      start: int, auto: Dict[str, Any], outage: str) -> None:
+                      start: int, auto: Dict[str, Any], outage: str, task: CodrTask) -> None:
         """codr's turn ended because the model server was not there (DP-518,
         `provider_outage`). Not an attempt: no check runs and nothing is
         recorded. The first tick that sees it posts it once and notes when it
@@ -1445,7 +1448,6 @@ class CodrAgent(Agent):
         session tells codr to carry on, with the same attempt, nudges and
         start, plus the time the server was down in `paused` (which the
         overrun guard leaves out)."""
-        task = next(t for t in self._tasks() if t.id == auto.get("task"))
         if ticket is not None:
             await self._mirror(client, sid, ticket, msgs)
         start_part = self._auto_part(msgs[start])

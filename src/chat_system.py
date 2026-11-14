@@ -18,7 +18,7 @@ from config.global_config import (
 )
 from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
-from src.confirmations import ConfirmationManager, Decision, ParkedWrite
+from src.confirmations import ConfirmationManager, ConversationKey, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope, scope_from_row
@@ -1442,42 +1442,15 @@ class ChatSystem:
             # the queue is empty is what actually folds a flurry of approvals
             # into one summary.
             failed: List[str] = []
-            while batch:
-                # `queued`, not `decision`: this loop settles everything the
-                # drain folded in, which is not necessarily the decision this
-                # call arrived with — and shadowing the parameter here made the
-                # continuation's coordinates look like they came from whichever
-                # park happened to be last in the batch.
-                for queued in batch:
-                    if queued.settled:
-                        # DP-518: applied by an earlier settle whose
-                        # continuation did not complete. Applying it again
-                        # would re-patch history and, for a kind whose work
-                        # ran elsewhere, re-record it; only the turn is owed.
-                        applied.append(queued)
-                        continue
-                    # Isolated per decision. A single try around the whole loop
-                    # abandoned every un-applied sibling: drain() had already
-                    # popped them from _queued and take() had already removed
-                    # their parks, so they existed in no structure at all and
-                    # the operator's approval simply evaporated. One decision
-                    # that cannot be applied must not silently discard the rest.
-                    try:
-                        await self.confirmations.apply(queued)
-                    except Exception as e:
-                        err_id, _ = format_internal_error(
-                            e, scrub=get_scrubber().scrub,
-                        )
-                        logger.error(
-                            f"[err {err_id}] Error settling a "
-                            f"{queued.park.kind} deferral for "
-                            f"{queued.park.user_identifier}: {e}", exc_info=True,
-                        )
-                        queued.patched = False
-                        failed.append(
-                            queued.park.write_call.get("name") or "action")
-                    applied.append(queued)
-                batch = self.confirmations.drain(key)
+            try:
+                await self._apply_folded(key, batch, applied, failed)
+            except BaseException:
+                # DP-518: cancelled mid-batch (an approval's `apply` awaits its
+                # tool). What was already applied is settled with no
+                # continuation run; without this its owed mark lived only in
+                # the DB, invisible to the poller until the next boot.
+                self.confirmations.owe_continuations(applied)
+                raise
 
             if failed and not any(d.patched or d.settled for d in applied):
                 # Nothing survived — there is no outcome for a continuation to
@@ -1495,6 +1468,49 @@ class ChatSystem:
             async with aclosing(self._run_continuation(parked, applied)) as agen:
                 async for ev in agen:
                     yield ev
+
+    async def _apply_folded(self, key: ConversationKey, batch: List[Decision],
+                            applied: List[Decision], failed: List[str]) -> None:
+        """Apply `batch` and everything drained for `key` after it, appending
+        each decision to `applied` (and the name of each that raised to
+        `failed`) as it goes, so a caller cut off mid-batch still knows what
+        was settled."""
+        while batch:
+            # `queued`, not `decision`: this loop settles everything the
+            # drain folded in, which is not necessarily the decision this
+            # call arrived with — and shadowing the parameter here made the
+            # continuation's coordinates look like they came from whichever
+            # park happened to be last in the batch.
+            for queued in batch:
+                if queued.settled:
+                    # DP-518: applied by an earlier settle whose
+                    # continuation did not complete. Applying it again
+                    # would re-patch history and, for a kind whose work
+                    # ran elsewhere, re-record it; only the turn is owed.
+                    applied.append(queued)
+                    continue
+                # Isolated per decision. A single try around the whole loop
+                # abandoned every un-applied sibling: drain() had already
+                # popped them from _queued and take() had already removed
+                # their parks, so they existed in no structure at all and
+                # the operator's approval simply evaporated. One decision
+                # that cannot be applied must not silently discard the rest.
+                try:
+                    await self.confirmations.apply(queued)
+                except Exception as e:
+                    err_id, _ = format_internal_error(
+                        e, scrub=get_scrubber().scrub,
+                    )
+                    logger.error(
+                        f"[err {err_id}] Error settling a "
+                        f"{queued.park.kind} deferral for "
+                        f"{queued.park.user_identifier}: {e}", exc_info=True,
+                    )
+                    queued.patched = False
+                    failed.append(
+                        queued.park.write_call.get("name") or "action")
+                applied.append(queued)
+            batch = self.confirmations.drain(key)
 
     async def _run_continuation(
             self, parked: ParkedWrite, applied: List[Decision],
