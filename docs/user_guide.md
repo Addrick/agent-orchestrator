@@ -2016,10 +2016,24 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `list_web_access` | no | Both switches of the setup box, and the hosts its WAN lets through: defaults and approved |
 | `request_web_access` | yes | Allow one more host until the setup box's WAN goes off |
 | `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
+| `stagr_read_file` | no | Read a text file in the setup box's workdir as numbered lines (`offset`, `limit`) |
+| `stagr_edit_file` | no | Replace one exact, unique piece of text in a setup-box file (or create a new file) and return the diff |
 | `codr_shell` | no | Run bash in codr's workspace; while codr is working it waits, and stagr is woken when codr is idle (DP-517); codr waits while it runs |
+| `codr_read_file` / `codr_edit_file` | no | The same two, in codr's workspace, under `codr_shell`'s rule: while codr is working they wait, and stagr is woken when codr is idle |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
 | `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts, max_seconds); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
+
+**Reading and editing files (DP-516).** The two `*_read_file` / `*_edit_file`
+pairs give stagr a reviewable way to change a file instead of a `sed` or heredoc
+in a shell call. An edit names the file, the exact text it replaces and the new
+text. It is refused unless that text occurs exactly once, so it never changes
+a place stagr didn't mean. Its result is a unified diff, which is what you read
+in the portal. With empty `old_text` it creates a file that does not exist yet.
+Paths are relative to the box's workdir (`/home/agent/work` on the setup box,
+codr's workspace on codr's); anything outside it stays a shell job. An edit
+keeps the file's permissions and refuses a symlink or a file that is not UTF-8
+text. The shells still do everything else, and every command stays visible.
 
 Two more tools sit behind the same binding for the portal's INFRA panel only,
 and no persona is given them: `sandbox_net_status` (both boxes' switches,

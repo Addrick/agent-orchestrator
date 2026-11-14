@@ -35,6 +35,63 @@ def _caps(*, untrusted: bool = False) -> Dict[str, Any]:
     }
 
 
+def _file_tools(box: str, where: str, workdir: str, gate: str) -> List[Dict[str, Any]]:
+    """`<box>_read_file` and `<box>_edit_file` (DP-516): the same two tools on
+    each box. Neither is is_write, for the reason that box's shell is not;
+    both return file content, so both are produces_untrusted like the shells."""
+    path = {"type": "string", "description": f"The file, relative to {workdir}."}
+    return [
+        {
+            "type": "function",
+            "is_write": False,
+            "service_binding": "stagr",
+            "capabilities": _caps(untrusted=True),
+            "function": {
+                "name": f"{box}_read_file",
+                "description": (
+                    f"Read a UTF-8 text file in {where} as numbered lines. Read before you edit, and "
+                    f"copy old_text from here exactly.{gate}"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": path,
+                        "offset": {"type": "integer", "description": "First line to show (1-based). Default 1."},
+                        "limit": {"type": "integer", "description": "How many lines. Default 400."},
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "is_write": False,
+            "service_binding": "stagr",
+            "capabilities": _caps(untrusted=True),
+            "function": {
+                "name": f"{box}_edit_file",
+                "description": (
+                    f"Change a text file in {where}: replace old_text, which must occur exactly once, "
+                    "with new_text. Returns the diff. With an empty old_text it creates a file that "
+                    "does not exist yet. Keeps the file's permissions; refuses symlinks and files that "
+                    f"are not UTF-8. Prefer this to sed or a heredoc for changing a file.{gate}"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": path,
+                        "old_text": {"type": "string",
+                                     "description": "The exact text to replace, with enough lines around it "
+                                                    "to be unique. Empty to create a new file."},
+                        "new_text": {"type": "string", "description": "What replaces it."},
+                    },
+                    "required": ["path", "old_text", "new_text"],
+                },
+            },
+        },
+    ]
+
+
 STAGR_TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
@@ -195,6 +252,9 @@ STAGR_TOOLS: List[Dict[str, Any]] = [
             },
         },
     },
+    *(_file_tools("stagr", "stagr, your setup VM", "/home/agent/work", "")
+      + _file_tools("codr", "codr's workspace on its offline sandbox", "codr's workspace",
+                    " Refused while codr is working, like codr_shell.")),
     {
         "type": "function",
         "is_write": False,

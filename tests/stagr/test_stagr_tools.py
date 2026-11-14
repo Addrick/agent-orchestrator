@@ -546,3 +546,194 @@ def test_load_tasks_skips_a_half_staged_task(tmp_path):
     (staged / "TASK.md").write_text("x")
     (staged / "check.sh").write_text("true")
     assert load_tasks(tmp_path, default_attempts=3) == []
+
+
+# --- DP-516: reading and editing files on either box --------------------------
+
+
+async def test_read_file_numbers_lines_and_pages(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "notes.txt").write_text("".join(f"line {n}\n" for n in range(1, 11)))
+    handler = StagrToolHandler()
+    whole = await handler._stagr_read_file("notes.txt")
+    assert whole["status"] == "ok" and whole["lines"] == "1-10 of 10" and "note" not in whole
+    assert whole["content"].splitlines()[0] == "     1\tline 1"
+    page = await handler._stagr_read_file("notes.txt", offset=4, limit="3")
+    assert page["lines"] == "4-6 of 10" and page["content"].splitlines() == [
+        "     4\tline 4", "     5\tline 5", "     6\tline 6"]
+    assert page["note"] == "more lines follow: read again with offset 7"
+    bad = await handler._stagr_read_file("notes.txt", offset=0)
+    assert bad["status"] == "error" and "at least 1" in bad["message"]
+
+
+async def test_edit_replaces_one_unique_match_and_returns_the_diff(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "app.py").write_bytes(("a = 1\nb = 2\nc = 3\n").encode())
+    result = await StagrToolHandler()._stagr_edit_file("app.py", "b = 2\n", "b = 20\n")
+    assert result["status"] == "ok" and result["created"] is False, result
+    assert (stagr_dir / "app.py").read_bytes().decode() == "a = 1\nb = 20\nc = 3\n"
+    assert "-b = 2\n+b = 20\n" in result["diff"] and result["diff"].startswith("--- a/app.py")
+
+
+@pytest.mark.parametrize("old, word", [("x = 1\n", "2 times"), ("nope", "0 times")])
+async def test_edit_refuses_an_ambiguous_or_missing_match_and_changes_nothing(boxes, old, word):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "dup.py").write_bytes(("x = 1\ny\nx = 1\n").encode())
+    result = await StagrToolHandler()._stagr_edit_file("dup.py", old, "z\n")
+    assert result["status"] == "error" and word in result["message"]
+    assert (stagr_dir / "dup.py").read_bytes().decode() == "x = 1\ny\nx = 1\n"
+
+
+async def test_empty_old_text_creates_a_new_file_but_never_overwrites(boxes):
+    _, _, stagr_dir, _ = boxes
+    handler = StagrToolHandler()
+    made = await handler._stagr_edit_file("fixtures/new/data.json", "", '{"a": 1}\n')
+    assert made["status"] == "ok" and made["created"] is True
+    assert (stagr_dir / "fixtures" / "new" / "data.json").read_bytes().decode() == '{"a": 1}\n'
+    again = await handler._stagr_edit_file("fixtures/new/data.json", "", "clobber\n")
+    assert again["status"] == "error" and "already exists" in again["message"]
+    assert (stagr_dir / "fixtures" / "new" / "data.json").read_bytes().decode() == '{"a": 1}\n'
+
+
+async def test_edit_refuses_what_it_cannot_round_trip(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "blob.bin").write_bytes(b"\xff\xfe\x00bin")
+    (stagr_dir / "adir").mkdir()
+    handler = StagrToolHandler()
+    assert "not UTF-8" in (await handler._stagr_edit_file("blob.bin", "bin", "x"))["message"]
+    assert "not a regular file" in (await handler._stagr_edit_file("adir", "a", "b"))["message"]
+    assert "does not exist" in (await handler._stagr_read_file("ghost.py"))["message"]
+    assert (stagr_dir / "blob.bin").read_bytes() == b"\xff\xfe\x00bin"
+
+
+@pytest.mark.skipif(shutil.which("ln") is None or __import__("os").name == "nt",
+                    reason="needs real symlinks and POSIX modes")
+async def test_edit_keeps_permissions_and_refuses_a_symlink(boxes):
+    _, _, stagr_dir, _ = boxes
+    script = stagr_dir / "run.sh"
+    script.write_bytes(("#!/bin/sh\necho old\n").encode())
+    script.chmod(0o755)
+    (stagr_dir / "link.sh").symlink_to(script)
+    handler = StagrToolHandler()
+    assert (await handler._stagr_edit_file("run.sh", "old", "new"))["status"] == "ok"
+    assert script.stat().st_mode & 0o777 == 0o755
+    assert "symlink" in (await handler._stagr_edit_file("link.sh", "new", "x"))["message"]
+
+
+@pytest.mark.parametrize("path", ["../etc/passwd", "/etc/passwd", "a/../../b", "$(id)", ".", ""])
+async def test_file_tools_refuse_paths_outside_the_workdir(boxes, path):
+    handler = StagrToolHandler()
+    for result in (await handler._stagr_read_file(path), await handler._stagr_edit_file(path, "", "x"),
+                   await handler._codr_read_file(path), await handler._codr_edit_file(path, "", "x")):
+        assert result["status"] == "error" and "relative" in result["message"], (path, result)
+
+
+async def test_codr_file_tools_work_in_codr_workspace_under_its_lock(boxes):
+    _, codr, stagr_dir, codr_dir = boxes
+    (codr_dir / "cfg.ini").write_bytes(("[a]\nk = 1\n").encode())
+    held = []
+    inner = codr.shell_output
+
+    def shell(script):
+        hold = workspace_hold("codr")
+        held.append((_codr_lock().locked(), hold and hold.holder))
+        return inner(script)
+
+    codr.shell_output = shell
+    handler = StagrToolHandler()
+    read = await handler._codr_read_file("cfg.ini")
+    assert read["status"] == "ok" and "k = 1" in read["content"]
+    edit = await handler._codr_edit_file("cfg.ini", "k = 1", "k = 2")
+    assert edit["status"] == "ok" and (codr_dir / "cfg.ini").read_bytes().decode() == "[a]\nk = 2\n"
+    assert not (stagr_dir / "cfg.ini").exists()
+    assert held and all(locked for locked, _ in held)
+    assert {h for _, h in held} == {"stagr's codr_read_file", "stagr's codr_edit_file"}
+    assert not _codr_lock().locked() and workspace_hold("codr") is None
+
+
+async def test_codr_file_tools_wait_while_codr_works(boxes):
+    _, codr, _, codr_dir = boxes
+    (codr_dir / "cfg.ini").write_bytes(("k = 1\n").encode())
+    codr.busy.add("ses_1")
+    handler = StagrToolHandler()
+    for result in (await handler._codr_read_file("cfg.ini"), await handler._codr_edit_file("cfg.ini", "1", "2")):
+        _waits_for_codr(result)
+    async with _codr_lock():
+        _waits_for_codr(await handler._codr_edit_file("cfg.ini", "1", "2"))
+    assert (codr_dir / "cfg.ini").read_bytes().decode() == "k = 1\n"
+    assert workspace_hold("codr") is None
+
+
+# --- DP-516 review: parallel calls, honest pages, exact lines ------------------
+
+
+async def test_parallel_edits_of_one_file_both_land(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "app.py").write_bytes(b"a = 1\nb = 2\n")
+    handler = StagrToolHandler()
+    one, two = await asyncio.gather(handler._stagr_edit_file("app.py", "a = 1", "a = 10"),
+                                    handler._stagr_edit_file("app.py", "b = 2", "b = 20"))
+    assert one["status"] == two["status"] == "ok", (one, two)
+    assert (stagr_dir / "app.py").read_bytes() == b"a = 10\nb = 20\n"
+    assert [p.name for p in stagr_dir.iterdir()] == ["app.py"]
+
+
+async def test_parallel_codr_reads_are_not_refused_as_busy(boxes):
+    _, _, _, codr_dir = boxes
+    (codr_dir / "a.txt").write_bytes(b"a\n")
+    (codr_dir / "b.txt").write_bytes(b"b\n")
+    handler = StagrToolHandler()
+    results = await asyncio.gather(handler._codr_read_file("a.txt"), handler._codr_read_file("b.txt"))
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+
+
+async def test_a_read_stops_at_the_output_budget_instead_of_cutting_lines(boxes, monkeypatch):
+    _, _, stagr_dir, _ = boxes
+    monkeypatch.setattr(global_config, "STAGR_OUTPUT_CHARS", 1000)
+    (stagr_dir / "big.txt").write_text("".join(f"{'x' * 60} {n}\n" for n in range(1, 101)))
+    page = await StagrToolHandler()._stagr_read_file("big.txt")
+    shown = page["content"].split("\n")
+    assert "characters cut" not in page["content"] and len(page["content"]) <= 1000
+    last = int(shown[-1].split("\t")[0])
+    assert page["lines"] == f"1-{last} of 100" and last == len(shown) < 100
+    assert page["note"] == f"more lines follow: read again with offset {last + 1}"
+
+
+async def test_lines_split_on_newline_only_so_crlf_edits_match(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "win.txt").write_bytes(b"a\r\nb" + "\u2028".encode() + b"c\r\n")
+    handler = StagrToolHandler()
+    page = await handler._stagr_read_file("win.txt")
+    assert page["lines"] == "1-2 of 2" and page["content"].split("\n")[0] == "     1\ta\r"
+    edit = await handler._stagr_edit_file("win.txt", "a\r\nb", "A\r\nB")
+    assert edit["status"] == "ok" and (stagr_dir / "win.txt").read_bytes().startswith(b"A\r\nB")
+
+
+async def test_an_offset_past_the_end_is_an_error_and_an_empty_file_says_so(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "ten.txt").write_text("".join(f"{n}\n" for n in range(10)))
+    (stagr_dir / "empty.txt").write_bytes(b"")
+    handler = StagrToolHandler()
+    past = await handler._stagr_read_file("ten.txt", offset=50)
+    assert past["status"] == "error" and "past the end" in past["message"]
+    empty = await handler._stagr_read_file("empty.txt")
+    assert empty["status"] == "ok" and empty["lines"] == "0 of 0" and empty["note"] == "the file is empty"
+
+
+async def test_an_overlapping_match_is_ambiguous(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "l.py").write_bytes(b"x = [0, 0, 0]\n")
+    result = await StagrToolHandler()._stagr_edit_file("l.py", "0, 0", "1, 1")
+    assert result["status"] == "error" and "2 times" in result["message"]
+    assert (stagr_dir / "l.py").read_bytes() == b"x = [0, 0, 0]\n"
+
+
+async def test_a_failed_write_leaves_no_side_file(boxes):
+    stagr, _, stagr_dir, _ = boxes
+    (stagr_dir / "f.txt").write_bytes(b"old\n")
+    inner = stagr.shell_output
+    stagr.shell_output = lambda script: "" if "sha256sum" in script else inner(script)
+    result = await StagrToolHandler()._stagr_edit_file("f.txt", "old", "new")
+    assert result["status"] == "error" and "failed" in result["message"]
+    assert [p.name for p in stagr_dir.iterdir()] == ["f.txt"]
+    assert (stagr_dir / "f.txt").read_bytes() == b"old\n"

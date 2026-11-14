@@ -34,12 +34,17 @@ runs `opencode` (DP-481): that starts a codr session the codr agent never
 watches (no loop guard, time limit or check), held open only by this call.
 
 Files move with `OpencodeClient.write_file` / `read_file` (DP-455), as one
-tar.gz each way; derpr is the only thing that talks to both boxes.
+tar.gz each way; derpr is the only thing that talks to both boxes. The same two
+calls back the file tools (DP-516): `*_read_file` returns numbered lines and
+`*_edit_file` replaces one exact, unique piece of text and returns the diff, so
+a change reads as a diff in the portal instead of a sed one-liner. codr's pair
+runs under `codr_shell`'s gate (`_codr_window`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import difflib
 import logging
 import posixpath
 import re
@@ -47,8 +52,9 @@ import shlex
 import shutil
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Set, Tuple, Union
 
 import aiohttp
 
@@ -75,6 +81,9 @@ CODR_PERSONA = "codr"
 STAGR_BOX = "stagr"
 PATH_RE = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 MAX_SHELL_SECONDS = 3600
+# What a file tool reads or writes; bigger files are a shell job.
+MAX_EDIT_BYTES = 2 * 1024 * 1024
+DEFAULT_READ_LINES = 400
 DEFAULT_SHELL_SECONDS = 600
 # What one copy may carry, compressed. write_file moves ~0.5 MB/s.
 MAX_TRANSFER_BYTES = 200 * 1024 * 1024
@@ -114,11 +123,15 @@ class _Refused(Exception):
 
 
 class _CodrBusy(_Refused):
-    """codr turned out to be busy once the workspace lock was held: answered
-    with a wait (`_codr_busy`), not an error."""
+    """codr is busy (its lock is taken, or it turned out busy once the lock
+    was held): answered with a wait (`_codr_busy`), not an error."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(what)
+        self.what = what
 
     def answer(self) -> Dict[str, Any]:
-        return _codr_busy("the copy")
+        return _codr_busy(self.what)
 
 
 def _error(message: str) -> Dict[str, Any]:
@@ -187,12 +200,157 @@ def _shell_result(out: str, seconds: int) -> Dict[str, Any]:
     return result
 
 
+def _file_path(path: str, box: str) -> Union[str, Dict[str, Any]]:
+    rel = _rel_path(path)
+    if rel is None or rel == ".":
+        return _error(f"path must name a file relative to {box}'s workdir, with no '..' "
+                      f"(anything outside it is a shell job): {path!r}")
+    return rel
+
+
+async def _stat(client: OpencodeClient, path: str) -> Tuple[str, int, str]:
+    """(kind, size, detail) of `path`; kind is missing, link, file, other or
+    error. `[ -e ]` is also false when the path cannot be looked at (a parent
+    it may not enter, a dead mount), so `stat` tells that apart from missing."""
+    q = shlex.quote(path)
+    out = await client.run_shell(
+        f"if [ -L {q} ]; then echo link; elif [ -f {q} ]; then echo \"file $(stat -c '%s' -- {q})\"; "
+        f"elif [ -e {q} ]; then echo other; elif err=$(LC_ALL=C stat -- {q} 2>&1); then echo other; "
+        f"else case $err in *'No such file or directory'*) echo missing;; *) echo \"error $err\";; esac; fi")
+    text = out.strip()
+    words = text.split()
+    if words[:1] == ["file"] and len(words) == 2 and words[1].isdigit():
+        return "file", int(words[1]), ""
+    if len(words) == 1 and words[0] in ("missing", "link", "other"):
+        return words[0], 0, ""
+    return "error", 0, text.removeprefix("error").strip()[-300:]
+
+
+async def _text(client: OpencodeClient, path: str, box: str) -> Union[str, Dict[str, Any]]:
+    """The text of an existing regular UTF-8 file, or the error."""
+    kind, size, detail = await _stat(client, path)
+    if kind == "missing":
+        return _error(f"{path} does not exist on {box}.")
+    if kind == "error":
+        return _error(f"{path} could not be checked on {box}: {detail}")
+    if kind == "link":
+        return _error(f"{path} is a symlink on {box}; name the file it points to.")
+    if kind != "file":
+        return _error(f"{path} is not a regular file on {box}.")
+    if size > MAX_EDIT_BYTES:
+        return _error(f"{path} is {size} bytes; the file tools stop at {MAX_EDIT_BYTES}. Use the shell.")
+    try:
+        return (await client.read_file(path)).decode("utf-8")
+    except UnicodeDecodeError:
+        return _error(f"{path} is not UTF-8 text; use the shell.")
+
+
+def _lines(text: str) -> List[str]:
+    """The file's lines split on '\\n' only, as `sed` and `wc -l` count them. A
+    '\\r' stays in its line, so text copied from the view matches the file."""
+    lines = text.split("\n")
+    return lines[:-1] if lines and lines[-1] == "" else lines
+
+
+def _whole(value: Any, name: str) -> Union[Optional[int], Dict[str, Any]]:
+    """A positive whole-number tool argument (models may send a string), None if absent."""
+    if value in (None, ""):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return _error(f"{name} must be a whole number.")
+    return n if n >= 1 else _error(f"{name} must be at least 1.")
+
+
+async def _read_lines(client: OpencodeClient, path: str, offset: Any, limit: Any, box: str) -> Dict[str, Any]:
+    rel = _file_path(path, box)
+    if isinstance(rel, dict):
+        return rel
+    start, count = _whole(offset, "offset"), _whole(limit, "limit")
+    if isinstance(start, dict):
+        return start
+    if isinstance(count, dict):
+        return count
+    got = await _text(client, rel, box)
+    if isinstance(got, dict):
+        return got
+    lines = _lines(got)
+    first = start or 1
+    if not lines:
+        return {"status": "ok", "path": rel, "lines": "0 of 0", "content": "", "note": "the file is empty"}
+    if first > len(lines):
+        return _error(f"offset {first} is past the end of {rel}, which has {len(lines)} lines.")
+    # Stop at the output budget rather than clip the middle: a clipped page
+    # would claim lines it never showed, and the next offset would skip them.
+    budget = global_config.STAGR_OUTPUT_CHARS
+    shown: List[str] = []
+    for n in range(first, min(len(lines), first - 1 + (count or DEFAULT_READ_LINES)) + 1):
+        row = f"{n:>6}\t{lines[n - 1]}"
+        if shown and len(row) + 1 > budget:
+            break
+        shown.append(row)
+        budget -= len(row) + 1
+    last = first + len(shown) - 1
+    # Only a single line longer than the whole budget is still clipped.
+    result: Dict[str, Any] = {"status": "ok", "path": rel, "lines": f"{first}-{last} of {len(lines)}",
+                              "content": _clip("\n".join(shown), global_config.STAGR_OUTPUT_CHARS)}
+    if last < len(lines):
+        result["note"] = f"more lines follow: read again with offset {last + 1}"
+    return result
+
+
+async def _edit(client: OpencodeClient, path: str, old_text: str, new_text: str, box: str) -> Dict[str, Any]:
+    rel = _file_path(path, box)
+    if isinstance(rel, dict):
+        return rel
+    old_text, new_text = old_text or "", new_text or ""
+    if len(new_text.encode("utf-8")) > MAX_EDIT_BYTES:
+        return _error(f"new_text is over {MAX_EDIT_BYTES} bytes; use the shell.")
+    if not old_text:
+        kind, _, detail = await _stat(client, rel)
+        if kind == "error":
+            return _error(f"{rel} could not be checked on {box}: {detail}")
+        if kind != "missing":
+            return _error(f"{rel} already exists on {box}: an empty old_text only creates a new file. "
+                          "Name the exact text to replace instead.")
+        before, after = "", new_text
+        await client.write_file(rel, after.encode("utf-8"))
+    else:
+        got = await _text(client, rel, box)
+        if isinstance(got, dict):
+            return got
+        before = got
+        n = before.count(old_text)
+        # count() skips overlapping matches ('0, 0' in '0, 0, 0'); a second
+        # match starting inside the first is still a second place.
+        if n == 1 and before.find(old_text, before.find(old_text) + 1) != -1:
+            n = 2
+        if n != 1:
+            hint = ("Read the file again and copy the text exactly." if n == 0
+                    else "Include more of the surrounding lines.")
+            return _error(f"old_text occurs {n} times in {rel}; it must occur exactly once. {hint}")
+        if old_text == new_text:
+            return _error("old_text and new_text are the same; nothing to change.")
+        after = before.replace(old_text, new_text)
+        await client.write_file(rel, after.encode("utf-8"))  # keeps the file's mode
+    diff = "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    return {"status": "ok", "path": rel, "created": not old_text,
+            "diff": _clip(diff, global_config.STAGR_OUTPUT_CHARS)}
+
+
 class StagrToolHandler:
     def __init__(self, runner: SSHRunner | None = None, net_runner: SSHRunner | None = None,
                  memory_manager: "MemoryManager | None" = None) -> None:
         self._net = SandboxNet(runner, net_runner)
         # The codr agent's attempt log: where a ticket ID was used before.
         self._memory = memory_manager
+        # One file tool at a time: tool_loop runs a turn's calls in parallel, and
+        # two edits of one file would each replace it from the same original,
+        # losing one; on codr the second call would also find codr's lock taken
+        # by its sibling and report codr busy.
+        self._files = asyncio.Lock()
 
     def register(self, manager: "ToolManager") -> None:
         manager.register("stagr_shell", self._stagr_shell)
@@ -204,6 +362,10 @@ class StagrToolHandler:
         manager.register("sandbox_net_status", self._sandbox_net_status)
         manager.register("set_sandbox_net", self._set_sandbox_net)
         manager.register("codr_shell", self._codr_shell)
+        manager.register("stagr_read_file", self._stagr_read_file)
+        manager.register("stagr_edit_file", self._stagr_edit_file)
+        manager.register("codr_read_file", self._codr_read_file)
+        manager.register("codr_edit_file", self._codr_edit_file)
         manager.register("copy_to_codr", self._copy_to_codr)
         manager.register("copy_from_codr", self._copy_from_codr)
         manager.register("queue_codr_task", self._queue_codr_task, enricher=self._queue_preview)
@@ -252,23 +414,87 @@ class StagrToolHandler:
         if isinstance(prepared, dict):
             return prepared
         script, seconds = prepared
-        _, _, codr_dir = workspace_directory(CODR_PERSONA)
-        lock = workspace_lock(codr_dir)
-        if lock.locked():
-            return _codr_busy("the command")
         try:
             # Held for the whole command, so codr starts nothing while it runs.
-            async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                with workspace_held(codr_dir, "stagr's codr_shell", seconds + 60):
-                    codr = OpencodeClient(http, codr_dir)
-                    if not await self._codr_idle(codr):
-                        return _codr_busy("the command")
-                    out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+            async with self._codr_window("stagr's codr_shell", "the command", seconds + 60) as codr:
+                out = await codr.run_shell(script, timeout=aiohttp.ClientTimeout(total=seconds + 60))
+        except _Refused as e:
+            return e.answer()
         except LLMCommunicationError as e:
             return _error(f"codr shell failed: {e}")
         except TimeoutError:
             return _error(f"codr shell gave no answer within {seconds + 60} s.")
         return _shell_result(out, seconds)
+
+    @asynccontextmanager
+    async def _codr_window(self, holder: str, what: str,
+                           max_seconds: Optional[int] = None) -> AsyncIterator[OpencodeClient]:
+        """A client on codr's workspace while codr is idle, holding its lock
+        (and the `workspace_held` mark) so codr starts nothing until the block
+        ends. Raises `_CodrBusy(what)` when codr is starting, working, or has a
+        task turn whose check has not run yet: a wait that wakes stagr when
+        codr is idle (DP-517), not an error. The one gate for everything stagr
+        does in codr's box: its shell, the copy in, and the file tools."""
+        _, _, codr_dir = workspace_directory(CODR_PERSONA)
+        lock = workspace_lock(codr_dir)
+        if lock.locked():
+            raise _CodrBusy(what)
+        async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
+            with workspace_held(codr_dir, holder, max_seconds):
+                codr = OpencodeClient(http, codr_dir)
+                if not await self._codr_idle(codr):
+                    raise _CodrBusy(what)
+                yield codr
+
+    # -- files (DP-516) ----------------------------------------------------------------
+
+    async def _stagr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
+        if (err := self._configured()):
+            return err
+        async with self._files:
+            try:
+                async with self._stagr_session() as http:
+                    return await _read_lines(self._stagr(http), path, offset, limit, "stagr")
+            except LLMCommunicationError as e:
+                return _error(f"reading on stagr failed: {e}")
+            except TimeoutError:
+                return _error("reading on stagr timed out.")
+
+    async def _stagr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
+        if (err := self._configured()):
+            return err
+        async with self._files:
+            try:
+                async with self._stagr_session() as http:
+                    return await _edit(self._stagr(http), path, old_text, new_text, "stagr")
+            except LLMCommunicationError as e:
+                return _error(f"editing on stagr failed: {e}")
+            except TimeoutError:
+                return _error("editing on stagr timed out.")
+
+    async def _codr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
+        async with self._files:
+            try:
+                async with self._codr_window("stagr's codr_read_file", "the read") as codr:
+                    return await _read_lines(codr, path, offset, limit, "codr")
+            except _Refused as e:
+                return e.answer()
+            except LLMCommunicationError as e:
+                return _error(f"reading on codr failed: {e}")
+            except TimeoutError:
+                return _error("reading on codr timed out.")
+
+    async def _codr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
+        async with self._files:
+            try:
+                async with self._codr_window("stagr's codr_edit_file", "the edit") as codr:
+                    return await _edit(codr, path, old_text, new_text, "codr")
+            except _Refused as e:
+                return e.answer()
+            except LLMCommunicationError as e:
+                return _error(f"editing on codr failed: {e}")
+            except TimeoutError:
+                return _error("editing on codr timed out.")
 
     # -- network (DP-465) ----------------------------------------------------------
 
@@ -355,7 +581,7 @@ class StagrToolHandler:
         MAX_TRANSFER_BYTES, would be packed and thrown away each time; checked
         again under the lock), or `dest` already there."""
         if not await self._codr_idle(codr):
-            raise _CodrBusy()
+            raise _CodrBusy("the copy")
         await self._refuse_existing(codr, dest, "codr")
 
     @staticmethod
@@ -411,8 +637,8 @@ class StagrToolHandler:
     async def _unpack(client: OpencodeClient, archive: bytes, name: str, dest: str) -> None:
         """Unpack `archive` (which holds `name`) and move it to `dest`, which
         must not exist. It is unpacked beside `dest` first and moved in one
-        rename, so a failure leaves no half copy. The staged archive (and a
-        partial upload of it) is removed whatever happens."""
+        rename, so a failure leaves no half copy. The staged archive is
+        removed whatever happens (write_file removes its own partial upload)."""
         tag = uuid.uuid4().hex[:8]
         parent = posixpath.dirname(dest)
         staged = f".stagr-in-{tag}.tar.gz"
@@ -425,7 +651,7 @@ class StagrToolHandler:
                 f"[ ! -e {shlex.quote(dest)} ] && mv -T -- {tmp}/{shlex.quote(name)} {shlex.quote(dest)} "
                 f"&& echo {_OK_MARK}; rm -rf -- {tmp}", timeout=_LONG)
         finally:
-            await client.run_shell(f"rm -f -- {staged} {staged}.derpr-part")
+            await client.run_shell(f"rm -f -- {staged}")
         if _OK_MARK not in out:
             raise _Refused(f"unpacking to {dest} failed: {out[-500:] or 'it exists now, or the copy was empty'}")
 
@@ -447,20 +673,15 @@ class StagrToolHandler:
             return _error(f"dest must be a new path relative to codr's workspace, with no '..': {dest!r}")
         keep = _flag(keep_git)
         _, _, codr_dir = workspace_directory(CODR_PERSONA)
-        lock = workspace_lock(codr_dir)
-        if lock.locked():
+        if workspace_lock(codr_dir).locked():
             return _codr_busy("the copy")
         try:
             async with aiohttp.ClientSession(headers=auth_headers()) as http:
                 await self._ready_for_copy(OpencodeClient(http, codr_dir), dst)
             async with self._stagr_session() as http:
                 archive = await self._pack(self._stagr(http), src, keep_git=keep)
-            async with lock, aiohttp.ClientSession(headers=auth_headers()) as http:
-                with workspace_held(codr_dir, "stagr's copy_to_codr"):
-                    codr = OpencodeClient(http, codr_dir)
-                    if not await self._codr_idle(codr):
-                        raise _CodrBusy()
-                    await self._unpack(codr, archive, posixpath.basename(src), dst)
+            async with self._codr_window("stagr's copy_to_codr", "the copy") as codr:
+                await self._unpack(codr, archive, posixpath.basename(src), dst)
         except _Refused as e:
             return e.answer()
         except LLMCommunicationError as e:
