@@ -34,6 +34,7 @@ class FakeOpencode:
         self.sessions = {}      # id -> session dict
         self.messages = {}      # id -> list of {info, parts}
         self.busy = set()
+        self.status = {}        # sid -> a /session/status entry other than busy (e.g. retry)
         self.calls = []         # (method, path, directory, body)
         self.reply_text = "done."
         self.reply_error = None
@@ -91,7 +92,7 @@ class FakeOpencode:
         if path == "/instance/dispose":
             return web.json_response(True)
         if path == "/session/status":
-            return web.json_response({sid: {"type": "busy"} for sid in self.busy})
+            return web.json_response({**{sid: {"type": "busy"} for sid in self.busy}, **self.status})
         return await self.session_route(request.method, parts, directory, body)
 
     async def session_route(self, method, parts, directory, body) -> web.Response:
@@ -112,6 +113,7 @@ class FakeOpencode:
             return web.json_response(part)
         if action == "abort":
             self.busy.discard(sid)
+            self.status.pop(sid, None)
             return web.json_response(True)
         if action == "message" and method == "GET":
             return web.json_response(self.messages[sid])

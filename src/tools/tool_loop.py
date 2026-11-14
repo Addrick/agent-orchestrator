@@ -1069,7 +1069,7 @@ class ToolLoop:
                     turn_tainted=turn_tainted,
                 )
                 _log_turn_call_tally(call_tally, iterations_used, calls_used)
-                yield ErrorEvent(message=err_msg)
+                yield ErrorEvent(message=err_msg, retryable=not e.permanent)
                 return
             except Exception as e:
                 err_id, err_msg = format_internal_error(e, scrub=get_scrubber().scrub)
@@ -1085,7 +1085,7 @@ class ToolLoop:
                     turn_tainted=turn_tainted,
                 )
                 _log_turn_call_tally(call_tally, iterations_used, calls_used)
-                yield ErrorEvent(message=err_msg)
+                yield ErrorEvent(message=err_msg, retryable=False)
                 return
 
             if api_payload:
