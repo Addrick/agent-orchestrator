@@ -621,3 +621,78 @@ async def test_codr_file_tools_are_refused_while_codr_works(boxes):
         assert "idle" in (await handler._codr_edit_file("cfg.ini", "1", "2"))["message"]
     assert (codr_dir / "cfg.ini").read_bytes().decode() == "k = 1\n"
     assert workspace_hold("codr") is None
+
+
+# --- DP-516 review: parallel calls, honest pages, exact lines ------------------
+
+
+async def test_parallel_edits_of_one_file_both_land(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "app.py").write_bytes(b"a = 1\nb = 2\n")
+    handler = StagrToolHandler()
+    one, two = await asyncio.gather(handler._stagr_edit_file("app.py", "a = 1", "a = 10"),
+                                    handler._stagr_edit_file("app.py", "b = 2", "b = 20"))
+    assert one["status"] == two["status"] == "ok", (one, two)
+    assert (stagr_dir / "app.py").read_bytes() == b"a = 10\nb = 20\n"
+    assert [p.name for p in stagr_dir.iterdir()] == ["app.py"]
+
+
+async def test_parallel_codr_reads_are_not_refused_as_busy(boxes):
+    _, _, _, codr_dir = boxes
+    (codr_dir / "a.txt").write_bytes(b"a\n")
+    (codr_dir / "b.txt").write_bytes(b"b\n")
+    handler = StagrToolHandler()
+    results = await asyncio.gather(handler._codr_read_file("a.txt"), handler._codr_read_file("b.txt"))
+    assert [r["status"] for r in results] == ["ok", "ok"], results
+
+
+async def test_a_read_stops_at_the_output_budget_instead_of_cutting_lines(boxes, monkeypatch):
+    _, _, stagr_dir, _ = boxes
+    monkeypatch.setattr(global_config, "STAGR_OUTPUT_CHARS", 1000)
+    (stagr_dir / "big.txt").write_text("".join(f"{'x' * 60} {n}\n" for n in range(1, 101)))
+    page = await StagrToolHandler()._stagr_read_file("big.txt")
+    shown = page["content"].split("\n")
+    assert "characters cut" not in page["content"] and len(page["content"]) <= 1000
+    last = int(shown[-1].split("\t")[0])
+    assert page["lines"] == f"1-{last} of 100" and last == len(shown) < 100
+    assert page["note"] == f"more lines follow: read again with offset {last + 1}"
+
+
+async def test_lines_split_on_newline_only_so_crlf_edits_match(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "win.txt").write_bytes(b"a\r\nb" + "\u2028".encode() + b"c\r\n")
+    handler = StagrToolHandler()
+    page = await handler._stagr_read_file("win.txt")
+    assert page["lines"] == "1-2 of 2" and page["content"].split("\n")[0] == "     1\ta\r"
+    edit = await handler._stagr_edit_file("win.txt", "a\r\nb", "A\r\nB")
+    assert edit["status"] == "ok" and (stagr_dir / "win.txt").read_bytes().startswith(b"A\r\nB")
+
+
+async def test_an_offset_past_the_end_is_an_error_and_an_empty_file_says_so(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "ten.txt").write_text("".join(f"{n}\n" for n in range(10)))
+    (stagr_dir / "empty.txt").write_bytes(b"")
+    handler = StagrToolHandler()
+    past = await handler._stagr_read_file("ten.txt", offset=50)
+    assert past["status"] == "error" and "past the end" in past["message"]
+    empty = await handler._stagr_read_file("empty.txt")
+    assert empty["status"] == "ok" and empty["lines"] == "0 of 0" and empty["note"] == "the file is empty"
+
+
+async def test_an_overlapping_match_is_ambiguous(boxes):
+    _, _, stagr_dir, _ = boxes
+    (stagr_dir / "l.py").write_bytes(b"x = [0, 0, 0]\n")
+    result = await StagrToolHandler()._stagr_edit_file("l.py", "0, 0", "1, 1")
+    assert result["status"] == "error" and "2 times" in result["message"]
+    assert (stagr_dir / "l.py").read_bytes() == b"x = [0, 0, 0]\n"
+
+
+async def test_a_failed_write_leaves_no_side_file(boxes):
+    stagr, _, stagr_dir, _ = boxes
+    (stagr_dir / "f.txt").write_bytes(b"old\n")
+    inner = stagr.shell_output
+    stagr.shell_output = lambda script: "" if "sha256sum" in script else inner(script)
+    result = await StagrToolHandler()._stagr_edit_file("f.txt", "old", "new")
+    assert result["status"] == "error" and "failed" in result["message"]
+    assert [p.name for p in stagr_dir.iterdir()] == ["f.txt"]
+    assert (stagr_dir / "f.txt").read_bytes() == b"old\n"

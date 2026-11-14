@@ -380,25 +380,35 @@ class OpencodeClient:
         """Write `data` to `path` (relative to `directory`), any size. opencode
         has no write endpoint and one shell command must stay under Linux's
         128 KiB argument cap, so the bytes go in `_WRITE_CHUNK` pieces to a
-        side file that replaces `path` only once its sha256 matches."""
-        target, part = shlex.quote(path), shlex.quote(f"{path}.derpr-part")
-        await self.run_shell(f'mkdir -p -- "$(dirname -- {target})" && : > {part}', directory=directory)
-        for i in range(0, len(data), _WRITE_CHUNK):
-            chunk = base64.b64encode(data[i:i + _WRITE_CHUNK]).decode()
-            await self.run_shell(f"echo {chunk} | base64 -d >> {part}", directory=directory)
-        digest = hashlib.sha256(data).hexdigest()
-        out = await self.run_shell(
-            f'[ "$(sha256sum < {part} | cut -c1-64)" = {digest} ] && mv -f -- {part} {target} '
-            f'&& echo {_WRITTEN_MARK}', directory=directory)
-        # A failed command comes back as output, not as an HTTP error.
-        if _WRITTEN_MARK not in out:
-            raise LLMCommunicationError(f"opencode: writing {path} failed: {out[-300:]}")
+        side file that replaces `path` only once its sha256 matches. A file it
+        replaces keeps its permissions; a failed write leaves no side file.
+        The side file's name is unique, so two writes in flight never share it."""
+        target = shlex.quote(path)
+        part = shlex.quote(f"{path}.{uuid.uuid4().hex[:8]}.derpr-part")
+        written = False
+        try:
+            await self.run_shell(f'mkdir -p -- "$(dirname -- {target})" && : > {part}', directory=directory)
+            for i in range(0, len(data), _WRITE_CHUNK):
+                chunk = base64.b64encode(data[i:i + _WRITE_CHUNK]).decode()
+                await self.run_shell(f"echo {chunk} | base64 -d >> {part}", directory=directory)
+            digest = hashlib.sha256(data).hexdigest()
+            out = await self.run_shell(
+                f'[ "$(sha256sum < {part} | cut -c1-64)" = {digest} ] '
+                f'&& {{ [ ! -e {target} ] || chmod --reference={target} -- {part}; }} '
+                f'&& mv -f -- {part} {target} && echo {_WRITTEN_MARK}', directory=directory)
+            # A failed command comes back as output, not as an HTTP error.
+            if _WRITTEN_MARK not in out:
+                raise LLMCommunicationError(f"opencode: writing {path} failed: {out[-300:]}")
+            written = True
+        finally:
+            if not written:
+                await self.run_shell(f"rm -f -- {part}", directory=directory)
 
     async def read_file(self, path: str, *, directory: Optional[str] = None) -> bytes:
         """`path` (relative to `directory`) as bytes, any size. opencode's file
         endpoint sends a binary file whole (base64) but strips the trailing
         newlines off a text file, so a gzip copy is what travels."""
-        staged = f"{path}.derpr-read.gz"
+        staged = f"{path}.{uuid.uuid4().hex[:8]}.derpr-read.gz"
         out = await self.run_shell(
             f"gzip -c -- {shlex.quote(path)} > {shlex.quote(staged)} && echo {_WRITTEN_MARK}",
             directory=directory)

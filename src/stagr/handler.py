@@ -181,33 +181,48 @@ def _file_path(path: str, box: str) -> Union[str, Dict[str, Any]]:
     return rel
 
 
-async def _stat(client: OpencodeClient, path: str) -> Tuple[str, Optional[str], int]:
-    """(kind, octal mode, size) of `path`; kind is missing, link, file or other."""
+async def _stat(client: OpencodeClient, path: str) -> Tuple[str, int, str]:
+    """(kind, size, detail) of `path`; kind is missing, link, file, other or
+    error. `[ -e ]` is also false when the path cannot be looked at (a parent
+    it may not enter, a dead mount), so `stat` tells that apart from missing."""
     q = shlex.quote(path)
     out = await client.run_shell(
-        f"if [ -L {q} ]; then echo link; elif [ -f {q} ]; then echo \"file $(stat -c '%a %s' -- {q})\"; "
-        f"elif [ -e {q} ]; then echo other; else echo missing; fi")
-    words = out.strip().split()
-    if words[:1] == ["file"] and len(words) == 3 and words[1].isdigit() and words[2].isdigit():
-        return "file", words[1], int(words[2])
-    return (words[0] if words and words[0] in ("missing", "link", "other") else "other"), None, 0
+        f"if [ -L {q} ]; then echo link; elif [ -f {q} ]; then echo \"file $(stat -c '%s' -- {q})\"; "
+        f"elif [ -e {q} ]; then echo other; elif err=$(LC_ALL=C stat -- {q} 2>&1); then echo other; "
+        f"else case $err in *'No such file or directory'*) echo missing;; *) echo \"error $err\";; esac; fi")
+    text = out.strip()
+    words = text.split()
+    if words[:1] == ["file"] and len(words) == 2 and words[1].isdigit():
+        return "file", int(words[1]), ""
+    if len(words) == 1 and words[0] in ("missing", "link", "other"):
+        return words[0], 0, ""
+    return "error", 0, text.removeprefix("error").strip()[-300:]
 
 
-async def _text(client: OpencodeClient, path: str, box: str) -> Union[Tuple[str, str], Dict[str, Any]]:
-    """(text, mode) of an existing regular UTF-8 file, or the error."""
-    kind, mode, size = await _stat(client, path)
+async def _text(client: OpencodeClient, path: str, box: str) -> Union[str, Dict[str, Any]]:
+    """The text of an existing regular UTF-8 file, or the error."""
+    kind, size, detail = await _stat(client, path)
     if kind == "missing":
         return _error(f"{path} does not exist on {box}.")
+    if kind == "error":
+        return _error(f"{path} could not be checked on {box}: {detail}")
     if kind == "link":
         return _error(f"{path} is a symlink on {box}; name the file it points to.")
-    if kind != "file" or mode is None:
+    if kind != "file":
         return _error(f"{path} is not a regular file on {box}.")
     if size > MAX_EDIT_BYTES:
         return _error(f"{path} is {size} bytes; the file tools stop at {MAX_EDIT_BYTES}. Use the shell.")
     try:
-        return (await client.read_file(path)).decode("utf-8"), mode
+        return (await client.read_file(path)).decode("utf-8")
     except UnicodeDecodeError:
         return _error(f"{path} is not UTF-8 text; use the shell.")
+
+
+def _lines(text: str) -> List[str]:
+    """The file's lines split on '\\n' only, as `sed` and `wc -l` count them. A
+    '\\r' stays in its line, so text copied from the view matches the file."""
+    lines = text.split("\n")
+    return lines[:-1] if lines and lines[-1] == "" else lines
 
 
 def _whole(value: Any, name: str) -> Union[Optional[int], Dict[str, Any]]:
@@ -233,12 +248,26 @@ async def _read_lines(client: OpencodeClient, path: str, offset: Any, limit: Any
     got = await _text(client, rel, box)
     if isinstance(got, dict):
         return got
-    lines = got[0].splitlines()
+    lines = _lines(got)
     first = start or 1
-    last = min(len(lines), first - 1 + (count or DEFAULT_READ_LINES))
-    body = "\n".join(f"{n:>6}\t{lines[n - 1]}" for n in range(first, last + 1))
+    if not lines:
+        return {"status": "ok", "path": rel, "lines": "0 of 0", "content": "", "note": "the file is empty"}
+    if first > len(lines):
+        return _error(f"offset {first} is past the end of {rel}, which has {len(lines)} lines.")
+    # Stop at the output budget rather than clip the middle: a clipped page
+    # would claim lines it never showed, and the next offset would skip them.
+    budget = global_config.STAGR_OUTPUT_CHARS
+    shown: List[str] = []
+    for n in range(first, min(len(lines), first - 1 + (count or DEFAULT_READ_LINES)) + 1):
+        row = f"{n:>6}\t{lines[n - 1]}"
+        if shown and len(row) + 1 > budget:
+            break
+        shown.append(row)
+        budget -= len(row) + 1
+    last = first + len(shown) - 1
+    # Only a single line longer than the whole budget is still clipped.
     result: Dict[str, Any] = {"status": "ok", "path": rel, "lines": f"{first}-{last} of {len(lines)}",
-                              "content": _clip(body, global_config.STAGR_OUTPUT_CHARS)}
+                              "content": _clip("\n".join(shown), global_config.STAGR_OUTPUT_CHARS)}
     if last < len(lines):
         result["note"] = f"more lines follow: read again with offset {last + 1}"
     return result
@@ -252,7 +281,9 @@ async def _edit(client: OpencodeClient, path: str, old_text: str, new_text: str,
     if len(new_text.encode("utf-8")) > MAX_EDIT_BYTES:
         return _error(f"new_text is over {MAX_EDIT_BYTES} bytes; use the shell.")
     if not old_text:
-        kind, _, _ = await _stat(client, rel)
+        kind, _, detail = await _stat(client, rel)
+        if kind == "error":
+            return _error(f"{rel} could not be checked on {box}: {detail}")
         if kind != "missing":
             return _error(f"{rel} already exists on {box}: an empty old_text only creates a new file. "
                           "Name the exact text to replace instead.")
@@ -262,8 +293,12 @@ async def _edit(client: OpencodeClient, path: str, old_text: str, new_text: str,
         got = await _text(client, rel, box)
         if isinstance(got, dict):
             return got
-        before, mode = got
+        before = got
         n = before.count(old_text)
+        # count() skips overlapping matches ('0, 0' in '0, 0, 0'); a second
+        # match starting inside the first is still a second place.
+        if n == 1 and before.find(old_text, before.find(old_text) + 1) != -1:
+            n = 2
         if n != 1:
             hint = ("Read the file again and copy the text exactly." if n == 0
                     else "Include more of the surrounding lines.")
@@ -271,9 +306,7 @@ async def _edit(client: OpencodeClient, path: str, old_text: str, new_text: str,
         if old_text == new_text:
             return _error("old_text and new_text are the same; nothing to change.")
         after = before.replace(old_text, new_text)
-        await client.write_file(rel, after.encode("utf-8"))
-        # write_file replaces the file, which would reset its permissions.
-        await client.run_shell(f"chmod {mode} -- {shlex.quote(rel)}")
+        await client.write_file(rel, after.encode("utf-8"))  # keeps the file's mode
     diff = "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
                                         fromfile=f"a/{rel}", tofile=f"b/{rel}"))
     return {"status": "ok", "path": rel, "created": not old_text,
@@ -286,6 +319,11 @@ class StagrToolHandler:
         self._net = SandboxNet(runner, net_runner)
         # The codr agent's attempt log: where a ticket ID was used before.
         self._memory = memory_manager
+        # One file tool at a time: tool_loop runs a turn's calls in parallel, and
+        # two edits of one file would each replace it from the same original,
+        # losing one; on codr the second call would also find codr's lock taken
+        # by its sibling and report codr busy.
+        self._files = asyncio.Lock()
 
     def register(self, manager: "ToolManager") -> None:
         manager.register("stagr_shell", self._stagr_shell)
@@ -383,46 +421,50 @@ class StagrToolHandler:
     async def _stagr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
         if (err := self._configured()):
             return err
-        try:
-            async with self._stagr_session() as http:
-                return await _read_lines(self._stagr(http), path, offset, limit, "stagr")
-        except LLMCommunicationError as e:
-            return _error(f"reading on stagr failed: {e}")
-        except TimeoutError:
-            return _error("reading on stagr timed out.")
+        async with self._files:
+            try:
+                async with self._stagr_session() as http:
+                    return await _read_lines(self._stagr(http), path, offset, limit, "stagr")
+            except LLMCommunicationError as e:
+                return _error(f"reading on stagr failed: {e}")
+            except TimeoutError:
+                return _error("reading on stagr timed out.")
 
     async def _stagr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
         if (err := self._configured()):
             return err
-        try:
-            async with self._stagr_session() as http:
-                return await _edit(self._stagr(http), path, old_text, new_text, "stagr")
-        except LLMCommunicationError as e:
-            return _error(f"editing on stagr failed: {e}")
-        except TimeoutError:
-            return _error("editing on stagr timed out.")
+        async with self._files:
+            try:
+                async with self._stagr_session() as http:
+                    return await _edit(self._stagr(http), path, old_text, new_text, "stagr")
+            except LLMCommunicationError as e:
+                return _error(f"editing on stagr failed: {e}")
+            except TimeoutError:
+                return _error("editing on stagr timed out.")
 
     async def _codr_read_file(self, path: str, offset: Any = None, limit: Any = None) -> Dict[str, Any]:
-        try:
-            async with self._codr_window("stagr's codr_read_file") as codr:
-                return await _read_lines(codr, path, offset, limit, "codr")
-        except _Refused as e:
-            return _error(str(e))
-        except LLMCommunicationError as e:
-            return _error(f"reading on codr failed: {e}")
-        except TimeoutError:
-            return _error("reading on codr timed out.")
+        async with self._files:
+            try:
+                async with self._codr_window("stagr's codr_read_file") as codr:
+                    return await _read_lines(codr, path, offset, limit, "codr")
+            except _Refused as e:
+                return _error(str(e))
+            except LLMCommunicationError as e:
+                return _error(f"reading on codr failed: {e}")
+            except TimeoutError:
+                return _error("reading on codr timed out.")
 
     async def _codr_edit_file(self, path: str, old_text: str = "", new_text: str = "") -> Dict[str, Any]:
-        try:
-            async with self._codr_window("stagr's codr_edit_file") as codr:
-                return await _edit(codr, path, old_text, new_text, "codr")
-        except _Refused as e:
-            return _error(str(e))
-        except LLMCommunicationError as e:
-            return _error(f"editing on codr failed: {e}")
-        except TimeoutError:
-            return _error("editing on codr timed out.")
+        async with self._files:
+            try:
+                async with self._codr_window("stagr's codr_edit_file") as codr:
+                    return await _edit(codr, path, old_text, new_text, "codr")
+            except _Refused as e:
+                return _error(str(e))
+            except LLMCommunicationError as e:
+                return _error(f"editing on codr failed: {e}")
+            except TimeoutError:
+                return _error("editing on codr timed out.")
 
     # -- network (DP-465) ----------------------------------------------------------
 
@@ -527,8 +569,8 @@ class StagrToolHandler:
     async def _unpack(client: OpencodeClient, archive: bytes, name: str, dest: str) -> None:
         """Unpack `archive` (which holds `name`) and move it to `dest`, which
         must not exist. It is unpacked beside `dest` first and moved in one
-        rename, so a failure leaves no half copy. The staged archive (and a
-        partial upload of it) is removed whatever happens."""
+        rename, so a failure leaves no half copy. The staged archive is
+        removed whatever happens (write_file removes its own partial upload)."""
         tag = uuid.uuid4().hex[:8]
         parent = posixpath.dirname(dest)
         staged = f".stagr-in-{tag}.tar.gz"
@@ -541,7 +583,7 @@ class StagrToolHandler:
                 f"[ ! -e {shlex.quote(dest)} ] && mv -T -- {tmp}/{shlex.quote(name)} {shlex.quote(dest)} "
                 f"&& echo {_OK_MARK}; rm -rf -- {tmp}", timeout=_LONG)
         finally:
-            await client.run_shell(f"rm -f -- {staged} {staged}.derpr-part")
+            await client.run_shell(f"rm -f -- {staged}")
         if _OK_MARK not in out:
             raise _Refused(f"unpacking to {dest} failed: {out[-500:] or 'it exists now, or the copy was empty'}")
 
