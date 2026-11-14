@@ -417,6 +417,12 @@ class MemoryManager:
                 -- remain approval-only and are unused by other kinds; they are
                 -- not worth a second table.
                 kind TEXT NOT NULL DEFAULT '{DEFERRAL_KIND_APPROVAL}',
+                -- DP-518: 1 while a settled deferral's continuation turn is
+                -- owed — the row is `resolved` (its result is in history) but
+                -- the turn that reports it has not completed. Only kinds in
+                -- `deferral_kinds.CONTINUATION_RETRIED_KINDS` set it; an
+                -- approval never does. Cleared when a continuation completes.
+                continuation_owed INTEGER NOT NULL DEFAULT 0,
                 resolved_at REAL,
                 -- Two columns, not one. `resolution` is a machine-readable
                 -- outcome the duplicate guard filters on; `resolution_reason`
@@ -560,6 +566,14 @@ class MemoryManager:
                 conn.execute(
                     "ALTER TABLE Parked_Writes ADD COLUMN kind TEXT NOT NULL "
                     f"DEFAULT '{DEFERRAL_KIND_APPROVAL}'"
+                )
+            # DP-518: additive, default 0 — no row written before it owes a
+            # continuation, which is what every one of them is (their
+            # continuations ran, or were lost before this column existed).
+            if 'continuation_owed' not in parked_cols:
+                conn.execute(
+                    "ALTER TABLE Parked_Writes ADD COLUMN continuation_owed "
+                    "INTEGER NOT NULL DEFAULT 0"
                 )
 
             # Pending_Retain migration (DP-495): rows outlive their send.
@@ -2903,7 +2917,9 @@ class MemoryManager:
     def finalize_parked_write(self, token: str, status: str,
                               resolution: Optional[str] = None,
                               reason: Optional[str] = None,
-                              now: Optional[float] = None) -> bool:
+                              now: Optional[float] = None, *,
+                              owe_continuation: bool = False,
+                              turn_tainted: bool = False) -> bool:
         """Move a park to a terminal state and erase its payload columns.
 
         The row is kept rather than deleted: a *resolved* park is what lets the
@@ -2917,9 +2933,19 @@ class MemoryManager:
 
         `resolution` is machine-readable and filterable; `reason` is the
         sentence a human reads. Keep them apart — see the schema comment.
+
+        DP-518: `owe_continuation` marks the row as still owing the turn that
+        reports it, in the same UPDATE, so no crash can land between the two.
+        Such a row keeps `write_call` and `audit_info` until
+        `close_parked_continuation`: a continuation re-run after a restart is
+        rebuilt from them (`ParkedWrite.from_row`). Only a non-approval kind
+        sets it, whose call already ran elsewhere and is never executed from
+        this row. `turn_tainted` is raised (never lowered) with it, so a taint
+        `apply()` added in memory survives into that re-run.
         """
         if status not in PARK_DB_TERMINAL:
             raise ValueError(f"Not a terminal park status: {status}")
+        owed = 1 if owe_continuation and status == PARK_DB_RESOLVED else 0
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -2927,11 +2953,15 @@ class MemoryManager:
                 cursor.execute(
                     """UPDATE Parked_Writes
                        SET status = ?, resolved_at = ?, resolution = ?,
-                           resolution_reason = ?, write_call = NULL,
-                           audit_info = NULL, confirmation_text = ''
+                           resolution_reason = ?,
+                           write_call = CASE WHEN ? THEN write_call END,
+                           audit_info = CASE WHEN ? THEN audit_info END,
+                           confirmation_text = '', continuation_owed = ?,
+                           turn_tainted = MAX(turn_tainted, ?)
                        WHERE token = ? AND status IN (?, ?)""",
                     (status, time.time() if now is None else now,
-                     resolution, reason, token,
+                     resolution, reason, owed, owed, owed,
+                     1 if owed and turn_tainted else 0, token,
                      PARK_DB_PENDING, PARK_DB_CLAIMED),
                 )
                 conn.commit()
@@ -2941,8 +2971,35 @@ class MemoryManager:
                 conn.rollback()
                 return False
 
-    def load_parked_writes(self, statuses: Sequence[str]) -> List[Dict[str, Any]]:
+    def close_parked_continuation(self, token: str) -> bool:
+        """The continuation a resolved park owed has completed (DP-518): clear
+        the mark and erase the payload `finalize_parked_write` kept for it.
+        False when no row owed one (already closed, never owed, or a store
+        error) — never raises."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """UPDATE Parked_Writes
+                       SET continuation_owed = 0, write_call = NULL,
+                           audit_info = NULL
+                       WHERE token = ? AND status = ? AND continuation_owed = 1""",
+                    (token, PARK_DB_RESOLVED),
+                )
+                conn.commit()
+                return cursor.rowcount > 0
+            except sqlite3.Error as e:
+                logger.error(f"Failed to close the continuation of parked write {token}: {e}")
+                conn.rollback()
+                return False
+
+    def load_parked_writes(self, statuses: Sequence[str], *,
+                           continuation_owed: bool = False) -> List[Dict[str, Any]]:
         """Every park in the given states, oldest first, payloads decoded.
+
+        `continuation_owed` narrows it to the rows still owing their
+        continuation turn (DP-518; only ever `resolved` ones).
 
         A payload that will not decode is left as None rather than guessed at.
         For `write_call` that is not a cosmetic loss — it is the call an
@@ -2954,13 +3011,14 @@ class MemoryManager:
         if not statuses:
             return []
         placeholders = ", ".join("?" for _ in statuses)
+        owed = " AND continuation_owed = 1" if continuation_owed else ""
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             try:
                 cursor.execute(
                     f"""SELECT * FROM Parked_Writes
-                        WHERE status IN ({placeholders})
+                        WHERE status IN ({placeholders}){owed}
                         ORDER BY created_at ASC""",
                     tuple(statuses),
                 )

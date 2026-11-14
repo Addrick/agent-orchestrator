@@ -139,6 +139,12 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
         header = f"[{len(lines)} pending {verb} resolved:]"
     else:
         header = f"[{len(lines)} deferred {verb} finished:]"
+    if any(d.settled for d in batch):
+        # DP-518: an earlier turn about this did not complete. If it got as
+        # far as acting, its steps are in the history above.
+        lines.append("(an earlier reply about this was cut off before it finished; "
+                     "anything it already did is in the history above, so do not do "
+                     "it again)")
     return (
         header + "\n"
         + "\n".join(lines)
@@ -1290,25 +1296,58 @@ class ChatSystem:
         first claimed is restored, not settled: its decision would sit in a
         queue no drain of this conversation reads."""
         claimed = [p for p in (self._claim_deferral(t, kind) for t in tokens) if p is not None]
-        if not claimed:
+        decisions = [Decision(park=p, approved=True, note=note,
+                              result=copy.deepcopy(result), outcome_status=status)
+                     for p in claimed]
+
+        def put_back(d: Decision) -> None:
+            self.confirmations.restore(d.park)
+            logger.error("deferral %s (%s): not in the batch's conversation; left pending",
+                         d.park.token, kind)
+
+        async with aclosing(self._stream_settle_batch(decisions, put_back)) as agen:
+            async for ev in agen:
+                yield ev
+
+    async def stream_resume_continuations(
+            self, tokens: List[str], *, kind: str,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Run the continuation turn these settled deferrals still owe (DP-518).
+
+        Each was settled already — its result is in history and its row is
+        `resolved` — but the turn reporting it errored, was cut off, or died
+        with the process (`ConfirmationManager.owed_of_kind`). Nothing is
+        claimed or applied again: the decisions go through `_stream_settle`
+        marked `settled`, so they fold with anything else queued for the
+        conversation and get ONE continuation, exactly as a fresh settle does,
+        and the mark is closed only when that turn completes.
+
+        Only `CONTINUATION_RETRIED_KINDS` are ever owed, so this cannot reach
+        an approval. One conversation per call, like `stream_resolve_deferrals`:
+        a token from another one is put back, owed as before."""
+        owed = [d for d in (self.confirmations.take_owed(t, kind) for t in tokens) if d is not None]
+        async with aclosing(self._stream_settle_batch(
+                owed, lambda d: self.confirmations.owe_continuations([d]))) as agen:
+            async for ev in agen:
+                yield ev
+
+    async def _stream_settle_batch(
+            self, decisions: List[Decision], put_back: Callable[[Decision], None],
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Settle `decisions` of one conversation as ONE batch: every one but
+        the last is queued before the drain that settles the last takes them
+        all (see `stream_resolve_deferrals`). A decision from another
+        conversation than the first is handed to `put_back` instead."""
+        if not decisions:
             return
-        key = claimed[0].key
-        group: List[ParkedWrite] = []
-        for parked in claimed:
-            if parked.key == key:
-                group.append(parked)
-                continue
-            self.confirmations.restore(parked)
-            logger.error("deferral %s (%s): not in the batch's conversation %r; left pending",
-                         parked.token, kind, key)
-
-        def decision(parked: ParkedWrite) -> Decision:
-            return Decision(park=parked, approved=True, note=note,
-                            result=copy.deepcopy(result), outcome_status=status)
-
-        for parked in group[:-1]:
-            self.confirmations.enqueue(decision(parked))
-        async with aclosing(self._stream_settle(decision(group[-1]))) as agen:
+        key = decisions[0].park.key
+        group = [d for d in decisions if d.park.key == key]
+        for d in decisions:
+            if d.park.key != key:
+                put_back(d)
+        for d in group[:-1]:
+            self.confirmations.enqueue(d)
+        async with aclosing(self._stream_settle(group[-1])) as agen:
             async for ev in agen:
                 yield ev
 
@@ -1410,6 +1449,13 @@ class ChatSystem:
                 # continuation's coordinates look like they came from whichever
                 # park happened to be last in the batch.
                 for queued in batch:
+                    if queued.settled:
+                        # DP-518: applied by an earlier settle whose
+                        # continuation did not complete. Applying it again
+                        # would re-patch history and, for a kind whose work
+                        # ran elsewhere, re-record it; only the turn is owed.
+                        applied.append(queued)
+                        continue
                     # Isolated per decision. A single try around the whole loop
                     # abandoned every un-applied sibling: drain() had already
                     # popped them from _queued and take() had already removed
@@ -1433,10 +1479,12 @@ class ChatSystem:
                     applied.append(queued)
                 batch = self.confirmations.drain(key)
 
-            if failed and not any(d.patched for d in applied):
+            if failed and not any(d.patched or d.settled for d in applied):
                 # Nothing survived — there is no outcome for a continuation to
                 # report, so say so directly rather than asking the model to
-                # summarize an empty result set.
+                # summarize an empty result set. No continuation will run, so
+                # none is owed either (DP-518).
+                self.confirmations.close_continuations(applied)
                 yield ErrorEvent(
                     message="Error processing the confirmed action"
                             f"{'s' if len(failed) > 1 else ''}: "
@@ -1444,6 +1492,27 @@ class ChatSystem:
                 )
                 return
 
+            async with aclosing(self._run_continuation(parked, applied)) as agen:
+                async for ev in agen:
+                    yield ev
+
+    async def _run_continuation(
+            self, parked: ParkedWrite, applied: List[Decision],
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """The ONE continuation turn reporting `applied`, in `parked`'s
+        conversation.
+
+        DP-518: a retried kind's continuation is owed until this turn
+        completes, i.e. reaches its `DoneEvent` (the turn's row is committed by
+        then). The mark is closed BEFORE that event goes up, so a consumer that
+        stops reading at it cannot leave a finished turn owed. Anything else —
+        an `ErrorEvent` (the model server down), an exception, a cancel, the
+        process dying — leaves it owed, and the kind's authority asks again
+        (`stream_resume_continuations`). What can repeat is only a turn that
+        did not finish; its saved steps (DP-444) are in the history the next
+        try reads."""
+        completed = False
+        try:
             # Every coordinate comes off the park — the turn that raised the
             # deferral — and none from configuration. That is the DP-345
             # invariant: a resume that has to be told where to answer is one
@@ -1457,7 +1526,13 @@ class ChatSystem:
                 continuation=_ContinuationState(batch=applied),
             )) as agen:
                 async for ev in agen:
+                    if isinstance(ev, DoneEvent) and not completed:
+                        completed = True
+                        self.confirmations.close_continuations(applied)
                     yield ev
+        finally:
+            if not completed:
+                self.confirmations.owe_continuations(applied)
 
     async def resolve_park(
             self, user_identifier: str, persona_name: str, token: str,

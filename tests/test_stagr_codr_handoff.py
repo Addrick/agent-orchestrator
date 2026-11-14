@@ -52,6 +52,10 @@ class FakeConfirmations:
     def pending_of_kind(self, kind):
         return [p for p in self.parks if p.kind == kind]
 
+    def owed_of_kind(self, kind):
+        """DP-518: no settled reply is owed in these tests (tests/test_codr_agent.py covers it)."""
+        return []
+
 
 def _wired(tmp_path, *tickets, reply="Queued CD-002 next.", confirm=False):
     """A codr agent whose chat system holds deferrals for `tickets` and

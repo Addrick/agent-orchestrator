@@ -69,6 +69,20 @@ DEFERRAL_KIND_CODR_TICKET = "codr_ticket"
 #: one continuation.
 DEFERRAL_KIND_CODR_IDLE = "codr_idle"
 
+#: The kinds whose continuation turn is owed until one completes (DP-518).
+#: Settling one of these marks its row `continuation_owed`, and a continuation
+#: that errors, is cut off, or dies with the process leaves the mark, so the
+#: kind's authority asks again (`ChatSystem.stream_resume_continuations`) until
+#: one turn completes — the codr agent, which polls each tick anyway. These are
+#: the kinds whose continuation moves the work on: stagr queues the next ticket
+#: or reruns the refused call in it, and nobody else would.
+#:
+#: Never `approval`: an approval's write runs once, in `apply()`, whatever
+#: happens to its reply. Not `node_job` either: no authority polls for it after
+#: the node's ping (retried once, seconds later), and the outcome is patched into
+#: history for the operator's next message, who is the one driving that work.
+CONTINUATION_RETRIED_KINDS = frozenset({DEFERRAL_KIND_CODR_TICKET, DEFERRAL_KIND_CODR_IDLE})
+
 #: Key a tool result uses to say "this is not my final answer".
 #:
 #: A handler that kicks off out-of-band work returns an ordinary result dict
@@ -159,6 +173,8 @@ __all__ = [
     "DEFERRAL_KIND_APPROVAL",
     "DEFERRAL_KIND_NODE_JOB",
     "DEFERRAL_KIND_CODR_TICKET",
+    "DEFERRAL_KIND_CODR_IDLE",
+    "CONTINUATION_RETRIED_KINDS",
     "DEFERRAL_DECLARATION_KEY",
     "declare_deferral",
     "declared_deferral",

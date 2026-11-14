@@ -261,3 +261,124 @@ async def test_several_waits_from_one_turn_settle_as_one_continuation(mocked_cha
     assert chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE) == []
     entries = _tool_entries(mem_manager)
     assert entries["q1"]["status"] == entries["q2"]["status"] == "idle"
+
+
+# --- DP-518: a settled deferral's continuation is owed until one completes ---
+
+
+class _ProcessDied(BaseException):
+    """Stands in for the process dying mid-continuation: nothing in the turn
+    pipeline catches a BaseException, so it unwinds like a kill would."""
+
+
+def _engine_fails(chat_system, exc):
+    async def fake_generate_response(persona_config, history_object, *a, **k):
+        raise exc
+    chat_system.text_engine.generate_response.side_effect = fake_generate_response
+
+
+def _owed_row(mem_manager, token):
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute("SELECT status, continuation_owed, write_call FROM Parked_Writes WHERE token = ?", (token,))
+    return tuple(cursor.fetchone())
+
+
+def _restart(chat_system):
+    """A fresh ConfirmationManager over the same DB, rebuilt as boot does."""
+    from src.confirmations import ConfirmationManager
+    chat_system.confirmations = ConfirmationManager(
+        lambda: chat_system.tool_manager, chat_system.memory_manager, chat_system._offered_tool_names,
+        persona_lookup=lambda name: chat_system.personas.get(name))
+    chat_system.confirmations.rebuild_from_store()
+    return chat_system.confirmations
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_that_errors_is_owed_and_runs_again_exactly_once(mocked_chat_system):
+    """The model server is down when codr's ticket ends: the deferral is settled
+    (history patched) but stagr's turn errors. It used to be gone for good; now
+    the codr agent can ask again, once that turn completes nothing is owed, and
+    the tool never runs again."""
+    from src.engine import LLMCommunicationError
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    executed = _tool(chat_system)
+    await _turn(chat_system)
+
+    _engine_fails(chat_system, LLMCommunicationError("Cannot connect to the model server"))
+    events = await _drain(chat_system.stream_resolve_deferral(
+        "CD-001", kind=DEFERRAL_KIND_CODR_TICKET, status="passed", result={"ticket": "CD-001", "state": "passed"}))
+    assert not [e for e in events if isinstance(e, DoneEvent)]
+    assert _tool_entries(mem_manager)["q1"]["status"] == "passed", "settled: the result is in history"
+    owed = chat_system.confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET)
+    assert [d.park.token for d in owed] == ["CD-001"]
+    assert _owed_row(mem_manager, "CD-001")[:2] == ("resolved", 1)
+
+    _set_engine(chat_system, [_text("CD-001 passed; queueing the next one.")])
+    events = await _drain(chat_system.stream_resume_continuations(["CD-001"], kind=DEFERRAL_KIND_CODR_TICKET))
+    assert [e.text for e in events if isinstance(e, DoneEvent)] == ["CD-001 passed; queueing the next one."]
+    sent = json.dumps(chat_system.text_engine.generate_response.call_args.args[1])
+    assert "create_ticket (codr_ticket): passed" in sent and "cut off before it finished" in sent
+
+    assert chat_system.confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == []
+    assert _owed_row(mem_manager, "CD-001") == ("resolved", 0, None), "closed, payload erased"
+    assert await _drain(chat_system.stream_resume_continuations(
+        ["CD-001"], kind=DEFERRAL_KIND_CODR_TICKET)) == [], "no second continuation"
+    assert await _drain(chat_system.stream_resolve_deferral(
+        "CD-001", kind=DEFERRAL_KIND_CODR_TICKET, status="passed", result={})) == [], "settled once"
+    assert _restart(chat_system).owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == [], "nor after a restart"
+    assert executed == ["create_ticket"]
+
+
+@pytest.mark.asyncio
+async def test_a_restart_during_the_continuation_reruns_it_once(mocked_chat_system):
+    """derpr dies after the deferral is settled and before stagr's turn
+    finishes. The boot reload finds the continuation still owed (master's
+    `rebuild_from_store` read only pending/claimed rows, so it was lost)."""
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    executed = _tool(chat_system)
+    await _turn(chat_system)
+
+    _engine_fails(chat_system, _ProcessDied())
+    with pytest.raises(_ProcessDied):
+        await _drain(chat_system.stream_resolve_deferral(
+            "CD-001", kind=DEFERRAL_KIND_CODR_TICKET, status="passed", result={"state": "passed"}))
+
+    confirmations = _restart(chat_system)
+    (owed,) = confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET)
+    assert (owed.park.token, owed.park.user_identifier, owed.park.channel) == ("CD-001", "adam", "ops")
+    assert owed.status == "passed" and owed.patched, "read back from the row and from history"
+    assert "CD-001" not in confirmations.pending, "not settleable again"
+
+    _set_engine(chat_system, [_text("CD-001 passed.")])
+    events = await _drain(chat_system.stream_resume_continuations(["CD-001"], kind=DEFERRAL_KIND_CODR_TICKET))
+    assert [e.text for e in events if isinstance(e, DoneEvent)] == ["CD-001 passed."]
+    assert _restart(chat_system).owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == []
+    assert _tool_entries(mem_manager)["q1"]["status"] == "passed"
+    assert executed == ["create_ticket"]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_whose_reply_errors_is_never_owed(mocked_chat_system):
+    """Approval semantics are untouched: the approved write ran once, its row
+    is resolved with its payload erased, and nothing asks for the reply again."""
+    from src.engine import LLMCommunicationError
+    chat_system, mem_manager = mocked_chat_system
+    _confirm_persona(chat_system)
+    ran = []
+
+    async def handler(**kwargs):
+        ran.append(kwargs)
+        return {"status": "ok"}
+    chat_system.tool_manager._handlers["create_ticket"] = handler
+    await _turn(chat_system)
+    (park,) = chat_system.confirmations.list_for("adam", "test_persona")
+
+    _engine_fails(chat_system, LLMCommunicationError("down"))
+    await _drain(chat_system.stream_resolve_park("adam", "test_persona", park.token, approved=True))
+
+    assert len(ran) == 1
+    assert _owed_row(mem_manager, park.token) == ("resolved", 0, None)
+    assert chat_system.confirmations.owed_of_kind("approval") == []
+    assert _restart(chat_system).owed_of_kind("approval") == []

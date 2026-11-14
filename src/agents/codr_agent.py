@@ -71,6 +71,7 @@ NOTIFY_TOOL = "notify_adam"
 RELAY_ACTION = "notify_relay"
 NOTICE_ACTION = "ticket_notice"
 REPEAT_LIMIT = 3            # identical tool calls / reasoning steps in a row
+_STALL = "nothing new for {} s"   # the stall guard's reason, formatted with stall_seconds
 # Stored in the action log, whose payloads are capped at 4,000 chars.
 CHECK_TAIL_CHARS = 2500
 _EXIT_MARK = "__DERPR_EXIT="
@@ -322,6 +323,45 @@ def detect_loop(turn: List[Dict[str, Any]]) -> Optional[str]:
     if len(last_r) == REPEAT_LIMIT and len(set(last_r)) == 1 and len(last_r[0]) >= 40:
         return f"the same reasoning in {REPEAT_LIMIT} steps in a row"
     return None
+
+
+def _final_reply(turn: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The turn's newest assistant message that is not a compaction's."""
+    return next((m for m in reversed(turn) if _role(m) == "assistant" and not is_compaction(m)), {})
+
+
+def provider_outage(turn: List[Dict[str, Any]]) -> Optional[str]:
+    """Why the turn ended, when it ended because the model server was not
+    there (DP-518), else None. `turn` is the turn's messages after the user
+    message that started it.
+
+    opencode 1.19.3 records a provider failure on the assistant message as
+    `info.error = {"name": "APIError", "data": {"message", "statusCode"?,
+    "isRetryable", ...}}` once its own retries (about five, over a minute) are
+    spent (read from its bundle on codr-vm, 2026-11-13; no live example was on
+    the box). `isRetryable` is the AI SDK's: true for a connection that failed
+    ("Cannot connect to API: ..."), and for 408, 409, 429 and every 5xx — the
+    :5001 router answers 503 when no model server is up. That is the outage.
+    A non-retryable APIError (a 400: bad request, context too long) is the
+    server answering, and `MessageAbortedError` is DERPR's own abort, so both
+    end the attempt as before."""
+    error = (_final_reply(turn).get("info") or {}).get("error") or {}
+    data = error.get("data") or {}
+    if error.get("name") != "APIError" or data.get("isRetryable") is not True:
+        return None
+    status = data.get("statusCode")
+    return " ".join(str(s) for s in ("APIError", status, data.get("message") or "") if s).strip()
+
+
+def waiting_on_model(turn: List[Dict[str, Any]]) -> bool:
+    """Whether the turn is waiting on the model server rather than on codr's
+    own work: its newest message is an unfinished reply with no tool call in
+    progress (a tool that hangs is codr's)."""
+    last = turn[-1] if turn else {}
+    if _role(last) != "assistant" or ((last.get("info") or {}).get("time") or {}).get("completed"):
+        return False
+    return not any(p.get("type") == "tool" and (p.get("state") or {}).get("status") in ("pending", "running")
+                   for p in last.get("parts", []))
 
 
 def progress_signature(turn: List[Dict[str, Any]]) -> Tuple[int, int, int]:
@@ -800,6 +840,9 @@ class CodrAgent(Agent):
         self._waking: Set[str] = set()
         self._wake_runs: Set["asyncio.Task[None]"] = set()
         self._unsettled: Set[str] = set()       # wakes their resolve left pending (DP-517)
+        # DP-518: owed continuations whose last try failed: token -> (failures,
+        # monotonic time of the next try). In memory: a restart tries at once.
+        self._resume_backoff: Dict[str, Tuple[int, float]] = {}
 
     # -- plumbing
 
@@ -870,16 +913,7 @@ class CodrAgent(Agent):
             busy = {sid for sid, st in status.items() if (st or {}).get("type", "idle") != "idle"}
             found = await self._scan(client, busy)
             if found is not None:
-                sid, ticket, msgs, start = found
-                auto = open_auto(msgs[start]) or {}
-                # A later turn (a chat message sent between ticks) means this one ended.
-                end = turn_end(msgs, start)
-                if end < len(msgs) or turn_finished(msgs, start):
-                    await self._finish(client, sid, ticket, msgs[:end], start, auto)
-                else:
-                    if ticket is not None:
-                        await self._mirror(client, sid, ticket, msgs)
-                    await self._watch(client, sid, msgs, start, auto)
+                await self._tend(client, *found, state=status.get(found[0]) or {})
                 return
 
             if self._dispose_pending and not busy:
@@ -897,6 +931,24 @@ class CodrAgent(Agent):
             # on the next tick behind its back.
             if not busy and self.cfg["start_tasks"] and not self._waking:
                 await self._start_next(client)
+
+    async def _tend(self, client: OpencodeClient, sid: str, ticket: Optional[str],
+                    msgs: List[Dict[str, Any]], start: int, state: Dict[str, Any]) -> None:
+        """The open task turn: finish it when it has ended, else watch it.
+        `state` is the session's `/session/status` entry."""
+        auto = open_auto(msgs[start]) or {}
+        # A later turn (a chat message sent between ticks) means this one ended.
+        end = turn_end(msgs, start)
+        if end < len(msgs) or turn_finished(msgs, start):
+            outage = provider_outage(msgs[start + 1:end])
+            if outage is not None and auto.get("task") in {t.id for t in self._tasks()}:
+                await self._outage(client, sid, ticket, msgs[:end], start, auto, outage)
+            else:
+                await self._finish(client, sid, ticket, msgs[:end], start, auto)
+            return
+        if ticket is not None:
+            await self._mirror(client, sid, ticket, msgs)
+        await self._watch(client, sid, msgs, start, auto, state)
 
     async def _scan(self, client: OpencodeClient, busy: Set[str]
                     ) -> Optional[Tuple[str, Optional[str], List[Dict[str, Any]], int]]:
@@ -1031,6 +1083,7 @@ class CodrAgent(Agent):
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return
+        self._resume_owed(DEFERRAL_KIND_CODR_TICKET, lambda tokens: f"stagr [{', '.join(tokens)}]")
         waiting = [p.token for p in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_TICKET)
                    if p.token not in self._waking and p.token not in self._unsettled]
         if not waiting:
@@ -1057,6 +1110,9 @@ class CodrAgent(Agent):
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return
+        # DP-518: a codr_idle reply owed from an earlier try is asked again
+        # only here, on a tick that saw codr idle: its result says codr is free.
+        self._resume_owed(DEFERRAL_KIND_CODR_IDLE, lambda _tokens: "stagr")
         by_conversation: Dict[Any, List[str]] = {}
         for park in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE):
             if park.token not in self._waking and park.token not in self._unsettled:
@@ -1064,23 +1120,44 @@ class CodrAgent(Agent):
         for tokens in by_conversation.values():
             self._spawn_wake(tokens, DEFERRAL_KIND_CODR_IDLE, "idle", dict(IDLE_WAKE_RESULT), "stagr")
 
+    def _resume_owed(self, kind: str, label: Callable[[List[str]], str]) -> None:
+        """Ask stagr again for each reply of `kind` it still owes (DP-518): its
+        deferral was settled, but the turn reporting it errored (the model
+        server was down) or was cut off by a restart. One run per
+        conversation, through the same `_spawn_wake` as a first wake, so no
+        ticket starts while it runs. A token whose last try failed waits
+        (`_resume_backoff`: one tick, doubling to 10 minutes), so a long
+        outage neither floods the log nor holds the queue on every tick."""
+        now = time.monotonic()
+        by_conversation: Dict[Any, List[str]] = {}
+        for decision in self.chat_system.confirmations.owed_of_kind(kind):
+            token = decision.park.token
+            if token in self._waking or self._resume_backoff.get(token, (0, 0.0))[1] > now:
+                continue
+            by_conversation.setdefault(decision.park.key, []).append(token)
+        for tokens in by_conversation.values():
+            self._spawn_wake(tokens, kind, "", {}, label(tokens), resume=True)
+
     def _spawn_wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
-                    label: str) -> None:
+                    label: str, resume: bool = False) -> None:
         """Start one background wake for `tokens` (one conversation). Held in
         `_waking` while it runs, so no ticket starts and no tick starts it
-        again."""
+        again. `resume`: the deferrals are already settled and only stagr's
+        turn is owed (DP-518)."""
         self._waking.update(tokens)
-        run = asyncio.create_task(self._wake(tokens, kind, status, result, label))
+        run = asyncio.create_task(self._wake(tokens, kind, status, result, label, resume))
         self._wake_runs.add(run)
         run.add_done_callback(self._wake_runs.discard)
 
     async def _wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
-                    label: str) -> None:
-        """Settle stagr's deferrals `tokens` and post its reply to codr's channel."""
+                    label: str, resume: bool = False) -> None:
+        """Settle stagr's deferrals `tokens` (or, `resume`, run the turn they
+        still owe) and post its reply to codr's channel."""
+        events = (self.chat_system.stream_resume_continuations(tokens, kind=kind) if resume
+                  else self.chat_system.stream_resolve_deferrals(tokens, kind=kind, status=status, result=result))
         try:
             reply, parked = "", False
-            async for event in self.chat_system.stream_resolve_deferrals(
-                    tokens, kind=kind, status=status, result=result):
+            async for event in events:
                 if isinstance(event, PendingConfirmationEvent):
                     parked = True
                 elif isinstance(event, DoneEvent):
@@ -1096,6 +1173,24 @@ class CodrAgent(Agent):
         finally:
             self._waking.difference_update(tokens)
             self._mark_unsettled(tokens, kind)
+            self._note_owed(tokens, kind)
+
+    def _note_owed(self, tokens: List[str], kind: str) -> None:
+        """After a wake: back off each of `tokens` whose reply is still owed
+        (the turn failed), forget the rest (DP-518)."""
+        confirmations = getattr(self.chat_system, "confirmations", None)
+        if confirmations is None:
+            return
+        owed = {d.park.token for d in confirmations.owed_of_kind(kind)}
+        tick = float(self.schedule.get("interval") or 30)
+        for token in tokens:
+            if token not in owed:
+                self._resume_backoff.pop(token, None)
+                continue
+            failures = self._resume_backoff.get(token, (0, 0.0))[0] + 1
+            self._resume_backoff[token] = (failures, time.monotonic() + min(600.0, tick * 2 ** (failures - 1)))
+            logger.warning("codr agent: stagr's reply about %s did not complete (try %d); asking again later",
+                           token, failures)
 
     def _mark_unsettled(self, tokens: List[str], kind: str) -> None:
         """Remember each of `tokens` the wake left pending (DP-517). The
@@ -1261,7 +1356,8 @@ class CodrAgent(Agent):
         limit = raw_limit if raw_limit is not None else self.cfg["max_turn_seconds"]
         started = auto.get("started")
         started_ts = time.time() if started is None else float(started)
-        if time.time() - started_ts > float(limit):
+        # DP-518: time the model server was down does not count (`_outage`).
+        if time.time() - started_ts - float(auto.get("paused") or 0) > float(limit):
             return f"the attempt ran past {int(limit)} s", False
         reason = detect_loop(turn)
         if reason:
@@ -1272,13 +1368,19 @@ class CodrAgent(Agent):
         if current != sig:
             self._progress = (current, now)
         elif now - since > float(self.cfg["stall_seconds"]):
-            return f"nothing new for {int(self.cfg['stall_seconds'])} s", True
+            return _STALL.format(int(self.cfg["stall_seconds"])), True
         return None, False
 
     async def _watch(self, client: OpencodeClient, sid: str, msgs: List[Dict[str, Any]],
-                     start: int, auto: Dict[str, Any]) -> None:
-        reason, nudgeable = self._stuck_reason(msgs[start + 1:], auto)
+                     start: int, auto: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> None:
+        turn = msgs[start + 1:]
+        reason, nudgeable = self._stuck_reason(turn, auto)
         if not reason:
+            return
+        if reason == _STALL.format(int(self.cfg["stall_seconds"])) and await self._model_server_stall(turn, state):
+            # DP-518: the model server's stall, not codr's. Start the clock again.
+            self._progress = (progress_signature(turn), time.monotonic())
+            logger.info("codr agent: task %s waits on the model server; not counted as a stall", auto.get("task"))
             return
         # Held from the abort to the nudge being in the session: with the turn
         # stopped, a chat message would otherwise start a turn in between and
@@ -1311,6 +1413,68 @@ class CodrAgent(Agent):
         if task is not None:
             await self._note_attempt(client, task, auto, outcome, {"reason": reason})
 
+    async def _model_server_stall(self, turn: List[Dict[str, Any]], state: Optional[Dict[str, Any]]) -> bool:
+        """Whether a stall is the model server's (DP-518): opencode reports the
+        session retrying a failed request, or the turn waits on the model and
+        the server does not answer."""
+        if (state or {}).get("type") == "retry":
+            return True
+        return waiting_on_model(turn) and not await self._model_server_up()
+
+    async def _model_server_up(self) -> bool:
+        """Whether the model server codr uses answers: `GET <pool_url>/models`.
+        The :5001 router answers that from a server that is up and 503s when
+        none is (`services/inference-router`, `_serve`). No credentials: the
+        opencode session's basic auth must not go to the router."""
+        url = f"{str(self.cfg['pool_url']).rstrip('/')}/models"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
+                async with http.get(url) as resp:
+                    return resp.status == 200
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+            return False
+
+    async def _outage(self, client: OpencodeClient, sid: str, ticket: Optional[str], msgs: List[Dict[str, Any]],
+                      start: int, auto: Dict[str, Any], outage: str) -> None:
+        """codr's turn ended because the model server was not there (DP-518,
+        `provider_outage`). Not an attempt: no check runs and nothing is
+        recorded. The first tick that sees it posts it once and notes when it
+        began on the turn (`outage`, durable on the server like the rest of
+        `AUTO_FIELD`); each tick after asks the server, and once it answers,
+        the turn is closed as `inference_down` and a new one in the same
+        session tells codr to carry on, with the same attempt, nudges and
+        start, plus the time the server was down in `paused` (which the
+        overrun guard leaves out)."""
+        task = next(t for t in self._tasks() if t.id == auto.get("task"))
+        if ticket is not None:
+            await self._mirror(client, sid, ticket, msgs)
+        start_part = self._auto_part(msgs[start])
+        if not auto.get("outage"):
+            completed = ((_final_reply(msgs[start + 1:]).get("info") or {}).get("time") or {}).get("completed")
+            # opencode stamps in epoch ms; an outage cannot begin before the attempt did.
+            since = max(float(completed) / 1000 if completed else time.time(), float(auto.get("started") or 0))
+            await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "outage": {"since": since, "error": outage}}})
+            await self._post(f"codr ticket `{task.id}` attempt {auto.get('attempt')}: the model server did not "
+                             f"answer ({outage}). Not counted as an attempt; codr carries on when it answers.")
+            logger.warning("codr agent: task %s attempt %s stopped by a model server outage: %s",
+                           task.id, auto.get("attempt"), outage)
+            return
+        persona = self.chat_system.personas.get(self.persona_name)
+        lock = workspace_lock(self.directory)
+        if persona is None or lock.locked() or not await self._model_server_up():
+            return
+        async with lock:
+            since = float((auto.get("outage") or {}).get("since") or time.time())
+            meta = {k: v for k, v in auto.items() if k != "outage"}
+            meta["paused"] = float(auto.get("paused") or 0) + max(0.0, time.time() - since)
+            await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": "inference_down",
+                                                                "reason": outage}})
+            await self._prompt(client, sid, persona, (
+                f"[DERPR] Your turn stopped because the model server did not answer ({outage}). It answers "
+                f"again now. Carry on with ticket `{task.id}` where you left off; this is still attempt "
+                f"{auto.get('attempt')}, and the outage does not count against it."), meta)
+        logger.info("codr agent: model server back; task %s attempt %s carries on", task.id, auto.get("attempt"))
+
     async def _wait_idle(self, client: OpencodeClient, sid: str, limit: float = 20.0) -> None:
         deadline = time.monotonic() + limit
         while await client.is_busy(sid) and time.monotonic() < deadline:
@@ -1329,8 +1493,7 @@ class CodrAgent(Agent):
             # catch-up for a turn that ended while DERPR was down).
             await self._mirror(client, sid, ticket, msgs)
         task = next((t for t in self._tasks() if t.id == auto.get("task")), None)
-        final = next((m for m in reversed(msgs[start + 1:])
-                      if _role(m) == "assistant" and not is_compaction(m)), {})
+        final = _final_reply(msgs[start + 1:])
         reply = "\n".join(p.get("text", "") for p in final.get("parts", [])
                           if p.get("type") == "text" and not p.get("synthetic")).strip()
         error = ((final.get("info") or {}).get("error") or {})
