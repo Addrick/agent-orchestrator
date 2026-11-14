@@ -2962,8 +2962,8 @@ def test_migration_creates_parked_writes_table(legacy_mem_manager):
     assert {'token', 'created_at', 'status', 'user_identifier', 'persona_name',
             'channel', 'server_id', 'write_call', 'call_identity', 'audit_info',
             'confirmation_text', 'turn_tainted', 'parked_assistant_id',
-            'duplicate_refs', 'kind', 'resolved_at', 'resolution',
-            'resolution_reason'} == columns
+            'duplicate_refs', 'kind', 'continuation_owed', 'resolved_at',
+            'resolution', 'resolution_reason'} == columns
 
     cursor.execute("PRAGMA index_list(Parked_Writes)")
     names = {row['name'] for row in cursor.fetchall()}
@@ -3169,6 +3169,80 @@ def test_migration_kind_idempotent(pre_kind_mem_manager):
     assert set(loaded) == {"live", "job"}
     assert loaded["job"]["kind"] == "node_job"
     assert loaded["live"]["kind"] == "approval"
+
+
+# --- Parked_Writes continuation_owed migration (DP-518) ---
+#
+# `pre_kind_mem_manager` predates this column too: it is the production DB that
+# has been settling deferrals since DP-319/DP-345, with a live and a resolved row.
+
+
+def test_migration_adds_continuation_owed_and_owes_nothing_for_old_rows(pre_kind_mem_manager):
+    """The ALTER lands, and no row written before it reads as owing a
+    continuation: theirs ran, or were lost before the column existed."""
+    pre_kind_mem_manager.create_schema()
+
+    cursor = pre_kind_mem_manager._get_connection().cursor()
+    cursor.execute("PRAGMA table_info(Parked_Writes)")
+    assert 'continuation_owed' in {row['name'] for row in cursor.fetchall()}
+    cursor.execute("SELECT token, continuation_owed FROM Parked_Writes ORDER BY token")
+    assert {r['token']: r['continuation_owed'] for r in cursor.fetchall()} == {'live': 0, 'old': 0}
+    assert pre_kind_mem_manager.load_parked_writes(("resolved",), continuation_owed=True) == []
+    # Existing data preserved, indexes still there.
+    assert pre_kind_mem_manager.load_parked_writes(("pending",))[0]["write_call"]["name"] == "update_ticket"
+    cursor.execute("PRAGMA index_list(Parked_Writes)")
+    assert {'idx_parked_write_conversation', 'idx_parked_write_status'} <= {
+        row['name'] for row in cursor.fetchall()}
+
+
+def test_migration_makes_owed_continuations_usable(pre_kind_mem_manager):
+    """On the migrated DB a settled deferral can owe its continuation, keeps
+    the payload the continuation is rebuilt from, and closes cleanly."""
+    pre_kind_mem_manager.create_schema()
+    pre_kind_mem_manager.insert_parked_write(
+        token="CD-001", created_at=2000.0, user_identifier="u", persona_name="p",
+        channel="c", server_id=None,
+        write_call={"id": "c9", "name": "queue_codr_task", "arguments": {}},
+        call_identity="ident-cd", audit_info={"actions": []}, confirmation_text="",
+        turn_tainted=False, parked_assistant_id=7, duplicate_refs=[],
+        kind="codr_ticket",
+    )
+    assert pre_kind_mem_manager.claim_parked_write("CD-001")
+    assert pre_kind_mem_manager.finalize_parked_write(
+        "CD-001", "resolved", "passed", "settled", owe_continuation=True, turn_tainted=True)
+
+    (row,) = pre_kind_mem_manager.load_parked_writes(("resolved",), continuation_owed=True)
+    assert row["token"] == "CD-001" and row["resolution"] == "passed"
+    assert row["write_call"]["name"] == "queue_codr_task", "kept to rebuild the continuation"
+    assert row["turn_tainted"] == 1, "a taint added while settling survives"
+
+    assert pre_kind_mem_manager.close_parked_continuation("CD-001") is True
+    assert pre_kind_mem_manager.close_parked_continuation("CD-001") is False, "closed once"
+    assert pre_kind_mem_manager.load_parked_writes(("resolved",), continuation_owed=True) == []
+    cursor = pre_kind_mem_manager._get_connection().cursor()
+    cursor.execute("SELECT write_call, audit_info FROM Parked_Writes WHERE token = 'CD-001'")
+    assert tuple(cursor.fetchone()) == (None, None), "payload erased once nothing is owed"
+
+
+def test_a_plain_finalize_still_erases_the_payload_and_owes_nothing(mem_manager):
+    """An approval (or any finalize without the flag) behaves as before DP-518."""
+    _insert_park(mem_manager, token="a")
+    assert mem_manager.finalize_parked_write("a", "resolved", "approved")
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute("SELECT write_call, audit_info, continuation_owed FROM Parked_Writes WHERE token = 'a'")
+    assert tuple(cursor.fetchone()) == (None, None, 0)
+
+
+def test_migration_continuation_owed_idempotent(pre_kind_mem_manager):
+    """A second create_schema() keeps the column and an owed row."""
+    pre_kind_mem_manager.create_schema()
+    pre_kind_mem_manager.claim_parked_write("live")
+    pre_kind_mem_manager.finalize_parked_write("live", "resolved", "done", owe_continuation=True)
+
+    pre_kind_mem_manager.create_schema()
+
+    assert [r["token"] for r in pre_kind_mem_manager.load_parked_writes(
+        ("resolved",), continuation_owed=True)] == ["live"]
 
 
 def test_parked_write_status_check_rejects_a_bogus_state():
@@ -3686,3 +3760,24 @@ def test_unblocked_origins_and_last_activity(mem_manager):
     ]
     last = mem_manager.scope_last_activity(_scope(channel="legacy"))
     assert last is not None and now - last > timedelta(days=1)
+
+
+def test_an_owed_finalize_keeps_the_audit_blob_apply_extended(mem_manager):
+    """DP-518: `apply()` adds taint sources in memory (`add_taint_source`) after
+    the row was written. An owed row is rebuilt from the DB after a restart, so
+    the finalize stores the in-memory blob; before, only the boolean survived
+    (through MAX(turn_tainted)) and the resumed turn lost which tool tainted it."""
+    _insert_park(mem_manager, token="a")
+    audit = {"actions": [{"tool": "update_ticket"}], "tainted": True, "taint_sources": ["queue_codr_task"]}
+    assert mem_manager.finalize_parked_write("a", "resolved", "passed", owe_continuation=True,
+                                             turn_tainted=True, audit_info=audit)
+    (row,) = mem_manager.load_parked_writes(("resolved",), continuation_owed=True)
+    assert row["audit_info"]["taint_sources"] == ["queue_codr_task"] and row["turn_tainted"]
+
+
+def test_a_finalize_owing_nothing_erases_the_audit_blob_it_is_given(mem_manager):
+    _insert_park(mem_manager, token="a")
+    assert mem_manager.finalize_parked_write("a", "resolved", "approved", audit_info={"taint_sources": ["x"]})
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute("SELECT audit_info FROM Parked_Writes WHERE token = 'a'")
+    assert cursor.fetchone()[0] is None

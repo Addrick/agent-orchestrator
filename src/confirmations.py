@@ -24,8 +24,8 @@ from config.global_config import (
     PARK_ROW_RETENTION, PENDING_ACTION_TTL,
 )
 from src.deferral_kinds import (
-    DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET, declared_deferral,
-    without_declaration,
+    CONTINUATION_RETRIED_KINDS, DEFERRAL_KIND_APPROVAL, DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET,
+    declared_deferral, without_declaration,
 )
 from src.memory.memory_manager import (
     PARK_DB_CLAIMED, PARK_DB_EXPIRED, PARK_DB_INTERRUPTED, PARK_DB_LIVE,
@@ -37,7 +37,7 @@ from src.tools.definitions import get_tool_capabilities
 from src.tools.tool_loop import (
     PARK_STATUS_APPROVED, PARK_STATUS_AWAITING, PARK_STATUS_DENIED,
     PARK_STATUS_EXPIRED, PARK_STATUS_FAILED, PARK_STATUS_INTERRUPTED,
-    PARK_STATUS_QUARANTINED, awaiting_status, write_call_identity_hash,
+    PARK_STATUS_QUARANTINED, awaiting_status, is_awaiting_status, write_call_identity_hash,
 )
 from src.tools.tool_manager import ToolManager, tool_error
 from src.persona import MemoryMode
@@ -305,6 +305,11 @@ class Decision:
     # and summarized the wrong outcome, which is precisely what the
     # execute-then-patch ordering exists to prevent.
     patched: bool = True
+    # DP-518: already applied by an earlier settle whose continuation turn did
+    # not complete; only that turn is owed. `_stream_settle` never applies a
+    # settled decision again — its result is already in history, and for every
+    # kind that can be settled this way the work ran elsewhere.
+    settled: bool = False
 
     @property
     def status(self) -> str:
@@ -383,6 +388,12 @@ class ConfirmationManager:
         # nothing to survive a restart with anyway.
         self._resolved_fallback: Dict[Tuple[ConversationKey, str],
                                       Tuple[float, str]] = {}
+        # DP-518: settled deferrals whose continuation turn is owed and not
+        # running, by token (`settled=True` decisions). Durable as the row's
+        # `continuation_owed`; reloaded by `rebuild_from_store`. A continuation
+        # in flight is in neither this map nor any queue, so a poller cannot
+        # start a second one beside it.
+        self._owed: Dict[str, Decision] = {}
 
     # ---- store -----------------------------------------------------------
 
@@ -562,6 +573,79 @@ class ConfirmationManager:
         if kind == DEFERRAL_KIND_APPROVAL:
             return []
         return [p for p in list(self.pending.values()) if p.kind == kind]
+
+    # ---- owed continuations (DP-518) ---------------------------------------
+    #
+    # A deferral of a `CONTINUATION_RETRIED_KINDS` kind is settled (patched,
+    # row `resolved`) BEFORE its continuation turn runs, so a continuation that
+    # errored or died with the process used to leave nothing to retry. The row
+    # now says the turn is owed until one completes; the authority that polls
+    # the kind asks again through `ChatSystem.stream_settle_deferrals`.
+
+    def owed_of_kind(self, kind: str) -> List[Decision]:
+        """Settled deferrals of `kind` whose continuation is owed and not
+        running, oldest first."""
+        return [d for d in list(self._owed.values()) if d.park.kind == kind]
+
+    def take_owed(self, token: str, kind: str) -> Optional[Decision]:
+        """Claim an owed continuation to run it, or None. Synchronous, like
+        `take`, so two pollers cannot both win it."""
+        decision = self._owed.get(token)
+        if decision is None or decision.park.kind != kind:
+            return None
+        return self._owed.pop(token)
+
+    def owe_continuations(self, decisions: List[Decision]) -> None:
+        """These decisions' continuation did not complete: owed again. Only the
+        retried kinds; an approval in the same batch keeps today's semantics
+        (its reply is not retried, its write never re-runs)."""
+        for d in decisions:
+            if d.park.kind in CONTINUATION_RETRIED_KINDS:
+                d.settled = True
+                self._owed[d.park.token] = d
+
+    def close_continuations(self, decisions: List[Decision]) -> None:
+        """No continuation is owed for these any more: one completed, or the
+        settle decided none will run. Durable first."""
+        for d in decisions:
+            if d.park.kind in CONTINUATION_RETRIED_KINDS:
+                self.memory_manager.close_parked_continuation(d.park.token)
+                self._owed.pop(d.park.token, None)
+
+    def _restore_owed(self, row: Dict[str, Any]) -> bool:
+        """Reload one row that owed a continuation when the process stopped.
+        A row this cannot use is closed instead, so it is not re-read on every
+        boot; it has no continuation anyone can run."""
+        try:
+            park = ParkedWrite.from_row(row)
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error("Owed continuation %s is unreadable (%s); dropping it",
+                         row.get("token"), e)
+            park = None
+        if park is None or park.kind not in CONTINUATION_RETRIED_KINDS:
+            self.memory_manager.close_parked_continuation(str(row.get("token")))
+            return False
+        self._owed[park.token] = Decision(
+            park=park, approved=True, settled=True,
+            outcome_status=str(row.get("resolution") or ""),
+            patched=self._history_patched(park),
+        )
+        return True
+
+    def _history_patched(self, park: ParkedWrite) -> bool:
+        """Whether history holds this call's real outcome rather than its
+        `awaiting` placeholder — what `Decision.patched` recorded in the
+        process that settled it, read back from history after a restart."""
+        if park.parked_assistant_id is None or park.call_id is None:
+            return False
+        try:
+            msgs = json.loads(self.memory_manager.get_tool_context(park.parked_assistant_id) or "[]")
+            entry = next((m for m in msgs if m.get("role") == "tool"
+                          and m.get("tool_call_id") == park.call_id), None)
+            status = json.loads(entry["content"]).get("status") if entry else None
+        except (ValueError, TypeError, AttributeError, KeyError):
+            return False
+        return isinstance(status, str) and not is_awaiting_status(status)
 
     def lock_for(self, key: ConversationKey) -> asyncio.Lock:
         return self._locks.setdefault(key, asyncio.Lock())
@@ -743,7 +827,7 @@ class ConfirmationManager:
     def rebuild_from_store(self) -> Dict[str, int]:
         """Reload durable parks at boot; returns a counts summary.
 
-        Three populations, three different answers:
+        Four populations, four different answers:
 
         - `pending` and still inside its TTL — reinstated, resolvable exactly as
           before the restart.
@@ -753,6 +837,10 @@ class ConfirmationManager:
           `self.pending`, so a park it never loaded is a park it never expires,
           and the model would read `awaiting_human_approval` on every subsequent
           turn and wait forever for a result no code path can produce.
+        - `resolved` with `continuation_owed` (DP-518) — settled, its result in
+          history, but the continuation turn reporting it never completed.
+          Held in `_owed` for the kind's authority to ask again; nothing is
+          re-executed and history is not touched.
         - `claimed` — a decision was in flight when the process died. NOT
           re-executed: the write may or may not have run, and re-running an
           irreversible call on a guess is worse than either outcome. Terminated
@@ -782,12 +870,24 @@ class ConfirmationManager:
             if outcome is not None:
                 counts[outcome] += 1
 
-        if any(counts.values()):
+        # DP-518: settled deferrals whose continuation never completed. Not in
+        # `counts` (its keys are the live rows' fates, and callers compare it).
+        owed = 0
+        try:
+            for row in self.memory_manager.load_parked_writes(
+                    (PARK_DB_RESOLVED,), continuation_owed=True):
+                owed += self._restore_owed(row)
+        except Exception as e:
+            logger.error("Could not reload owed continuations at boot: %s", e,
+                         exc_info=True)
+
+        if any(counts.values()) or owed:
             logger.info(
                 "Parked writes reloaded: %d restored, %d expired, %d "
-                "interrupted by the restart, %d quarantined",
+                "interrupted by the restart, %d quarantined; %d continuation(s) "
+                "still owed",
                 counts["restored"], counts["expired"], counts["interrupted"],
-                counts["quarantined"],
+                counts["quarantined"], owed,
             )
         # Mark the clock as well as running the purge. `_last_purge` starts at
         # "never", and only `_purge_due` assigns it — so a boot purge that
@@ -1108,9 +1208,16 @@ class ConfirmationManager:
             # `resolved`, so the re-execution guard went blind on exactly the
             # turn it exists for, and the in-process fallback below was skipped
             # too. The next boot then reported a known outcome as `interrupted`.
+            #
+            # DP-518: a retried kind's row also records, in the same UPDATE,
+            # that its continuation turn is owed — `_stream_settle` runs that
+            # turn only after this, and closes the mark when one completes.
             finalized = self.memory_manager.finalize_parked_write(
                 park.token, PARK_DB_RESOLVED, decision.status,
                 decision.note or self._default_reason(decision),
+                owe_continuation=park.kind in CONTINUATION_RETRIED_KINDS,
+                turn_tainted=park.turn_tainted,
+                audit_info=park.audit_info,
             )
             if not finalized and decision.status in (PARK_STATUS_APPROVED,
                                                      PARK_STATUS_FAILED):
