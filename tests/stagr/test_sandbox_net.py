@@ -262,3 +262,14 @@ async def test_web_access_already_let_through_needs_no_approval(node, host, admi
     else:
         assert answer is None, "not yet admitted: park for approval"
     assert not any(c[2] == "allow" for c in node.calls if c[0] == EGRESS_VERB)
+
+
+@pytest.mark.parametrize("entry", ["GitHub.org", "github.org\r", "=Raw.github.org", "not a host"])
+async def test_an_entry_the_proxy_filter_drops_does_not_count_as_let_through(node, entry):
+    """egress-ctl's write_filter keeps only valid lowercase host names (and
+    `read -r` keeps a CRLF line's '\r'); an entry it drops is not admitted,
+    so the request still reaches Adam instead of being settled as a no-op."""
+    node.on[("stagr", "wan")] = True
+    node.approved["stagr"] = [entry]
+    host = entry.lstrip("=").strip().lower() if " " not in entry else "github.org"
+    assert await _handler(node)._request_web_access_settled(host=host) is None

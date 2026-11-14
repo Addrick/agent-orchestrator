@@ -223,15 +223,24 @@ class SandboxNet:
         if res.get("status") == "error":
             return None
         section: Optional[str] = None
-        for raw in str(res.get("stdout") or "").splitlines():
-            line = raw.strip().lower()
-            if line in ("default:", "approved:"):
-                section = line[:-1]
+        for raw in str(res.get("stdout") or "").split("\n"):
+            if raw in ("default:", "approved:"):
+                section = raw[:-1]
                 continue
+            # As write_filter reads the list: `read -r` trims only spaces and
+            # tabs (a CRLF line keeps its '\r'), and `valid_host` drops any
+            # entry that is not a lowercase host name. An entry the filter
+            # leaves out must not count as let through here, or the proxy
+            # keeps refusing a host whose request never reaches Adam.
+            line = raw.strip(" \t")
             if not line or section is None:
                 continue
-            if line.startswith("="):
-                if line[1:] == h:
+            exact = line.startswith("=")
+            name = line[1:] if exact else line
+            if len(name) > 253 or not HOST_RE.match(name):
+                continue
+            if exact:
+                if name == h:
                     return True
             elif section == "default" and (h == line or h.endswith("." + line)):
                 return True

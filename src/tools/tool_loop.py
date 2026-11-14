@@ -1191,11 +1191,12 @@ class ToolLoop:
             # prompting the operator for a no-op. The settler never acts.
             settled = await self._settle_ask_calls(ask_calls)
             write_calls = [c for c in ask_calls if id(c) not in settled]
+            # A settled read stays here: its answer enters history like any
+            # read's, so an untrusted one must taint the turn below.
             read_calls = [
                 c for c in admitted
                 if not is_write_tool(c["name"])
                 and not any(c is w for w in write_calls)
-                and id(c) not in settled
             ]
 
             # Refused calls ride in the executed batch so their error results
