@@ -219,7 +219,8 @@ async def stream_chat_completions(
         is_server_error = isinstance(e, APIStatusError) and e.status_code >= 500
         logger.error(f"{provider_label} API error: {e}", exc_info=not is_server_error)
         raise LLMCommunicationError(f"{provider_label} API returned an error: {e}",
-                                    api_payload=api_params, rate_limited=rate_limited) from e
+                                    api_payload=api_params, rate_limited=rate_limited,
+                                    status_code=e.status_code if isinstance(e, APIStatusError) else None) from e
     except Exception as e:
         logger.error(f"An unexpected {provider_label} error occurred: {e}", exc_info=True)
         raise LLMCommunicationError(f"An unexpected error occurred with the {provider_label} API.",

@@ -11,6 +11,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 from src.agents import codr_agent
 from src.agents.codr_agent import (
@@ -1183,3 +1185,489 @@ def test_codr_names_itself_to_the_inference_router():
     config = json.loads(workspace_files({**codr_agent.DEFAULTS})[".opencode/opencode.json"])
     headers = config["provider"]["kcpp-pool"]["options"]["headers"]
     assert headers == {"X-Inference-Requester": "codr"}
+
+
+# --- DP-517: a context compaction inside a task turn ----------------------------
+
+
+def _compaction(fake, sid):
+    """What opencode 1.19.3 writes when it compacts a running turn (shapes
+    copied from CD-028's session on the live box): a user message holding a
+    `compaction` part, the summary, and a synthetic "continue" user message."""
+    fake.add(sid, "user", [{"type": "compaction", "auto": True, "overflow": False}],
+             time={"created": 1}, summary={"diffs": []})
+    fake.add(sid, "assistant", [{"type": "text", "text": "## Objective\n- Deliver the ticket"}],
+             time={"created": 1, "completed": 2}, mode="compaction", agent="compaction",
+             summary=True, finish="stop")
+    fake.add(sid, "user", [{"type": "text", "synthetic": True, "metadata": {"compaction_continue": True},
+                            "text": "Continue if you have next steps, or stop and ask for clarification "
+                                    "if you are unsure how to proceed."}], time={"created": 2})
+
+
+def test_compaction_messages_are_inside_the_turn():
+    msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go",
+                                                  "metadata": {AUTO: {"task": "01-a", "attempt": 1}}}]},
+            {"info": {"role": "assistant", "time": {"completed": 2}, "finish": "tool-calls"}, "parts": []}]
+    _compaction(SimpleNamespace(add=lambda sid, role, parts, **info: msgs.append(
+        {"info": {"role": role, **info}, "parts": parts})), "s")
+    assert opencode.current_turn_start(msgs) == 0
+    assert opencode.turn_end(msgs, 0) == len(msgs)
+    assert not opencode.turn_finished(msgs, 0)            # the summary is not the turn's reply
+    assert opencode.open_task_turn(msgs) == 0 and opencode.auto_turn_running(msgs)
+
+
+@pytest.mark.parametrize("finish", ["unknown", None, "stop"])
+def test_a_turn_caught_mid_compaction_is_not_finished_whatever_its_last_step_says(finish):
+    """An overflow can end the step before a compaction on an error or an
+    unknown finish; while the compaction runs, the turn is not over."""
+    msgs = [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "go",
+                                                  "metadata": {AUTO: {"task": "01-a", "attempt": 1}}}]},
+            {"info": {"role": "assistant", "time": {"completed": 2}, "finish": finish}, "parts": []},
+            {"info": {"role": "user"}, "parts": [{"type": "compaction", "auto": True}]},
+            {"info": {"role": "assistant", "time": {"created": 3}, "summary": True, "mode": "compaction"},
+             "parts": []}]
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "user"}, "parts": [{"type": "text", "text": "Continue",
+                                                      "metadata": {"compaction_continue": True}}]})
+    assert not opencode.turn_finished(msgs, 0)
+    msgs.append({"info": {"role": "assistant", "time": {"completed": 5}, "finish": "stop"}, "parts": []})
+    assert opencode.turn_finished(msgs, 0)                     # codr's own reply after it
+
+
+async def test_a_compaction_mid_turn_does_not_end_the_attempt(fake, tmp_path):
+    """DP-517: CD-028's three attempts were each checked and failed minutes
+    after a compaction, while codr went on working for up to half an hour."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path)
+    await agent.deploy()                                       # start
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _compaction(fake, sid)
+    _tool_step(fake, sid, inp={"command": "pytest"})
+
+    await agent.deploy()                                       # still working: nothing checked
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert not any("__DERPR_EXIT=" in s for _, s in fake.scripts)
+
+    _reply(fake, sid, "all done")
+    await agent.deploy()
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "pass"
+    assert json.loads(row["outcome_payload"])["reply"] == "all done"   # codr's reply, not the summary
+    assert len(_auto_messages(fake, sid)) == 1
+
+
+async def test_a_compaction_that_pushed_the_start_out_of_the_window_is_still_found(fake, tmp_path):
+    """Before DP-517 the compaction's user messages kept the turn's real start
+    out of the 50-message window, so the agent lost the turn and started the
+    attempt again on top of it (CD-004, -007, -024, -025)."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, _ = _agent(tmp_path)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _compaction(fake, sid)
+    for i in range(60):
+        _tool_step(fake, sid, inp={"command": f"step {i}"})
+
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1                 # not started a second time
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+
+
+# --- DP-518: a model server outage is not an attempt ---------------------------
+
+# What opencode 1.19.3 writes on the assistant message once its own retries of
+# a failed provider request are spent: the AI SDK's APICallError, here the
+# :5001 router's 503 when no model server is up (shape read from opencode's
+# bundle; `isRetryable` is true for 408/409/429/5xx and a failed connection).
+OUTAGE = {"name": "APIError", "data": {
+    "message": "Service Unavailable", "statusCode": 503, "isRetryable": True,
+    "responseBody": '{"error": "no inference server is up"}'}}
+
+
+@pytest.fixture
+async def model_server():
+    """The router's `GET /v1/models`: 200 while `up`, else 503 as it answers
+    when no model server is up."""
+    state = SimpleNamespace(up=False, calls=0)
+
+    async def models(request):
+        state.calls += 1
+        if state.up:
+            return web.json_response({"data": [{"id": "local"}]})
+        return web.json_response({"error": "no inference server is up"}, status=503)
+    app = web.Application()
+    app.router.add_get("/v1/models", models)
+    server = TestServer(app)
+    await server.start_server()
+    state.url = str(server.make_url("/v1"))
+    yield state
+    await server.close()
+
+
+def _errored(fake, sid, error=OUTAGE):
+    """A reply opencode ended on an error after its retries, as it records it."""
+    fake.add(sid, "assistant", [{"type": "step-start"}], time={"created": 1, "completed": 2}, error=error)
+
+
+async def test_an_outage_uses_no_attempt_and_codr_carries_on_when_the_server_answers(fake, tmp_path, model_server):
+    _task(tmp_path, "01-a", text="max_attempts: 1\nBuild it.")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid)
+
+    await agent.deploy()                                       # the turn ended on the outage
+    await agent.deploy()                                       # still down
+    assert agent.memory_manager.rows == [], "no attempt recorded"
+    assert not [s for _, s in fake.scripts if "__DERPR_EXIT=" in s], "no check ran"
+    (note,) = [b for _, _, b in router.sent]
+    assert "did not answer" in note and "Not counted" in note and "503" in note
+    assert len(_auto_messages(fake, sid)) == 1, "nothing sent while the server is down"
+
+    model_server.up = True
+    await agent.deploy()                                       # back: carry on in the same session
+    first, resumed = _auto_messages(fake, sid)
+    assert first["parts"][0]["metadata"][AUTO]["result"] == "inference_down"
+    meta = resumed["parts"][0]["metadata"][AUTO]
+    assert (meta["task"], meta["attempt"], meta["nudges"]) == ("01-a", 1, 0)
+    assert meta["started"] == first["parts"][0]["metadata"][AUTO]["started"] and 0 <= meta["paused"] < 60
+    assert "carry on" in resumed["parts"][0]["text"].lower()
+
+    _reply(fake, sid)
+    await agent.deploy()
+    (row,) = agent.memory_manager.rows                         # the one attempt, used once
+    assert (row["outcome"], json.loads(row["action_payload"])["attempt"]) == ("pass", 1)
+
+
+async def test_a_request_the_server_refuses_still_ends_the_attempt(fake, tmp_path, model_server):
+    """A non-retryable APIError (a 400: context too long) is the server
+    answering, not an outage: the check runs and the attempt counts, so a
+    request that can never succeed cannot loop."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=False)
+    agent, _ = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid, {"name": "APIError",
+                         "data": {"message": "context too long", "statusCode": 400, "isRetryable": False}})
+    await agent.deploy()
+    (row,) = agent.memory_manager.rows
+    assert row["outcome"] == "fail" and "context too long" in json.loads(row["outcome_payload"])["turn_error"]
+    assert model_server.calls == 0
+
+
+async def test_a_stall_while_the_model_server_is_down_is_not_counted(fake, tmp_path, monkeypatch, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, stall_seconds=100, pool_url=model_server.url)
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    fake.add(sid, "assistant", [{"type": "step-start"}], time={"created": 1})   # waiting on the model
+    await agent.deploy()
+    clock[0] += 150
+    await agent.deploy()                                       # stalled, but the server is down
+    assert len(_auto_messages(fake, sid)) == 1 and not [c for c in fake.calls if c[1].endswith("/abort")]
+
+    model_server.up = True
+    clock[0] += 150
+    await agent.deploy()                                       # the server answers: codr's stall
+    assert "nothing new for 100 s" in _auto_messages(fake, sid)[1]["parts"][0]["text"]
+
+
+async def test_a_session_opencode_is_retrying_is_not_stalled(fake, tmp_path, monkeypatch):
+    """opencode reports the session `retry`ing a failed request: no probe needed,
+    the stall is the model server's."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, stall_seconds=100)
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    await agent.deploy()
+    clock[0] += 150
+    fake.status[sid] = {"type": "retry", "attempt": 2, "message": "Service Unavailable", "next": 0}
+
+    async def no_probe():
+        raise AssertionError("a retrying session needs no probe")
+    agent._model_server_up = no_probe
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1 and not [c for c in fake.calls if c[1].endswith("/abort")]
+
+
+# --- DP-518: stagr's owed reply is asked for again --------------------------------
+
+
+class _Owed:
+    """The ConfirmationManager calls the codr agent makes, holding one owed
+    `codr_ticket` continuation until a resume completes it."""
+
+    def __init__(self, token="CD-001"):
+        park = SimpleNamespace(token=token, key=("adam", "stagr"), kind="codr_ticket")
+        self.owed = [SimpleNamespace(park=park)]
+
+    def pending_of_kind(self, kind):
+        return []
+
+    def owed_of_kind(self, kind):
+        return [d for d in self.owed if d.park.kind == kind]
+
+
+async def test_an_owed_reply_is_asked_again_with_backoff_until_it_completes(fake, tmp_path, monkeypatch):
+    from src.generation_events import DoneEvent
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    owed = _Owed()
+    agent.chat_system.confirmations = owed
+    calls = []
+    outcome = {"done": False}
+
+    async def resume(fresh, *, kind, **settle):
+        assert not fresh
+        calls.append((tuple(settle["owed"]), kind))
+        if outcome["done"]:
+            owed.owed.clear()
+            yield DoneEvent(text="CD-001 passed; queued CD-002.", response_type=ResponseType.LLM_GENERATION)
+    agent.chat_system.stream_settle_deferrals = resume
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+
+    async def tick():
+        await agent.deploy()
+        for run in list(agent._wake_runs):
+            await run
+
+    await tick()                                               # first try: the server is still down
+    assert calls == [(("CD-001",), "codr_ticket")] and not router.sent
+    await tick()                                               # backing off
+    assert len(calls) == 1
+    clock[0] += 31
+    outcome["done"] = True
+    await tick()
+    assert len(calls) == 2
+    assert router.sent[-1][2] == "stagr [CD-001]: CD-001 passed; queued CD-002."
+    clock[0] += 1000
+    await tick()                                               # nothing owed: never again
+    assert len(calls) == 2
+
+
+# --- DP-518 review ------------------------------------------------------------
+
+
+async def test_an_outage_past_max_outage_seconds_ends_the_ticket(fake, tmp_path, model_server):
+    """DERPR's probe runs from its own host, not codr's: if it never sees the
+    server, the ticket ends rather than hold the whole queue for good."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, pool_url=model_server.url, max_outage_seconds=0)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid)
+    await agent.deploy()                                       # noted
+    assert agent.memory_manager.rows == []
+    await agent.deploy()                                       # past the limit, still down
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "outage_timeout"
+    assert "OUTAGE_TIMEOUT" in router.sent[-1][2] and "re-queue" in router.sent[-1][2]
+    assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["result"] == "outage_timeout"
+    assert codr_agent.queue_states(agent._tasks(), {"01-a": ["outage_timeout"]})["01-a"][0] == codr_agent.FAILED
+
+
+async def test_time_waiting_on_a_dead_model_server_does_not_time_the_attempt_out(
+        fake, tmp_path, monkeypatch, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, max_turn_seconds=100, stall_seconds=10_000, pool_url=model_server.url)
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    start = _auto_messages(fake, sid)[0]["parts"][0]
+    start["metadata"][AUTO]["started"] -= 200                  # past max_turn_seconds
+    fake.add(sid, "assistant", [{"type": "step-start"}], time={"created": 1})   # waiting on the model
+    await agent.deploy()
+    clock[0] += 50
+    await agent.deploy()                                       # still down: excused, the wait is paused time
+    assert not [c for c in fake.calls if c[1].endswith("/abort")]
+    assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["paused"] == 50
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+
+    model_server.up = True
+    await agent.deploy()                                       # the server answers: really out of time
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "timed_out"
+
+
+def _failed_compaction(fake, sid, error=OUTAGE):
+    fake.add(sid, "user", [{"type": "compaction", "auto": True}], time={"created": 2})
+    fake.add(sid, "assistant", [], time={"created": 3, "completed": 4}, mode="compaction", agent="compaction",
+             summary=True, error=error)
+
+
+async def test_an_outage_during_a_compaction_is_an_outage(fake, tmp_path, model_server):
+    """The compaction's summary is the newest message, so the turn never read
+    as finished and the stall guard counted the outage against codr."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _failed_compaction(fake, sid)
+    await agent.deploy()
+    assert agent.memory_manager.rows == [] and "Not counted" in router.sent[-1][2]
+    model_server.up = True
+    await agent.deploy()
+    assert "carry on" in _auto_messages(fake, sid)[1]["parts"][0]["text"].lower()
+
+
+async def test_a_compaction_refused_by_the_server_ends_the_attempt(fake, tmp_path, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=False)
+    agent, _ = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _failed_compaction(fake, sid, {"name": "APIError",
+                                   "data": {"message": "context too long", "statusCode": 400, "isRetryable": False}})
+    await agent.deploy()
+    (row,) = agent.memory_manager.rows
+    assert row["outcome"] == "fail" and "context too long" in json.loads(row["outcome_payload"])["turn_error"]
+
+
+async def test_the_carry_on_waits_for_a_chat_turn_started_meanwhile(fake, tmp_path, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid)
+    await agent.deploy()                                       # noted
+    model_server.up = True
+    fake.status[sid] = {"type": "busy"}                        # a chat turn runs in the session
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1
+    fake.status.pop(sid)
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 2
+
+
+class _Settle(_Owed):
+    """`_Owed` plus what giving up calls, and pending parks of the same kind."""
+
+    def __init__(self, token="CD-001", kind="codr_ticket", pending=()):
+        super().__init__(token)
+        self.owed[0].park.kind = kind
+        self.pending = [SimpleNamespace(token=t, kind=kind, key=("adam", "stagr")) for t in pending]
+        self.closed = []
+
+    def pending_of_kind(self, kind):
+        return [p for p in self.pending if p.kind == kind]
+
+    def take_owed(self, token, kind):
+        found = [d for d in self.owed if d.park.token == token]
+        self.owed = [d for d in self.owed if d.park.token != token]
+        return found[0] if found else None
+
+    def close_continuations(self, decisions):
+        self.closed += [d.park.token for d in decisions]
+
+
+async def _wake_tick(agent):
+    await agent.deploy()
+    for run in list(agent._wake_runs):
+        await run
+
+
+async def test_an_owed_reply_that_keeps_failing_is_given_up_on_after_a_day(fake, tmp_path, monkeypatch):
+    """A time limit, not a count: five tries on the backoff spanned under ten
+    minutes, so any longer outage dropped the reply DP-518 exists to keep."""
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+    calls = []
+
+    async def resume(fresh, *, kind, **_):
+        calls.append(kind)
+        return
+        yield  # pragma: no cover
+    agent.chat_system.stream_settle_deferrals = resume
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    for _ in range(12):                                        # two hours of failed tries, 10 min apart
+        await _wake_tick(agent)
+        clock[0] += 601
+    assert len(calls) == 12 and settle.closed == [] and not router.sent, "an outage is waited out"
+    clock[0] += 86400
+    await _wake_tick(agent)
+    assert settle.closed == ["CD-001"] and settle.owed == []
+    assert "kept failing for 24 h" in router.sent[-1][2]
+    await _wake_tick(agent)
+    assert len(calls) == 13, "never asked again"
+
+
+async def test_an_owed_reply_survives_a_half_hour_outage(fake, tmp_path, monkeypatch):
+    from src.generation_events import DoneEvent
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+
+    async def resume(fresh, *, kind, **_):
+        if clock[0] >= 1000.0 + 1800:                          # the server is back
+            settle.owed.clear()
+            yield DoneEvent(text="queued CD-002.", response_type=ResponseType.LLM_GENERATION)
+    agent.chat_system.stream_settle_deferrals = resume
+    while not router.sent and clock[0] < 1000.0 + 7200:
+        await _wake_tick(agent)
+        clock[0] += 30
+    assert router.sent and router.sent[-1][2] == "stagr [CD-001]: queued CD-002." and settle.closed == []
+
+
+async def test_an_owed_reply_that_fails_for_good_is_posted_once(fake, tmp_path):
+    from src.generation_events import ErrorEvent
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+
+    async def resume(fresh, *, kind, **_):
+        settle.owed.clear()                                    # ChatSystem closes a non-retryable failure
+        yield ErrorEvent(message="context too long", retryable=False)
+    agent.chat_system.stream_settle_deferrals = resume
+    await _wake_tick(agent)
+    await _wake_tick(agent)
+    (post,) = [b for _, _, b in router.sent]
+    assert "will not be asked again: context too long" in post
+
+
+async def test_an_owed_reply_folds_into_a_new_result_for_the_same_conversation(fake, tmp_path):
+    """One wake, one continuation: even an owed reply still backing off joins a
+    turn its conversation runs anyway."""
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = _Settle("idle-old", kind="codr_idle", pending=["idle-new"])
+    agent._resume_backoff["idle-old"] = (1, float("inf"))
+    calls = []
+
+    async def settle(fresh, *, kind, owed=(), note=None):
+        calls.append((sorted(fresh), list(owed), kind))
+        return
+        yield  # pragma: no cover
+    agent.chat_system.stream_settle_deferrals = settle
+    await _wake_tick(agent)
+    assert calls == [(["idle-new"], ["idle-old"], "codr_idle")]
+
+
+def test_a_refused_request_is_permanent_and_an_outage_is_not():
+    from src.llm_errors import LLMCommunicationError
+    assert LLMCommunicationError("bad", status_code=400).permanent
+    assert not any(LLMCommunicationError("x", status_code=c).permanent for c in (408, 409, 429, 500, 503))
+    assert not LLMCommunicationError("Cannot connect").permanent

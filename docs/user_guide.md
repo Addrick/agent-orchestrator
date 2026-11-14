@@ -41,10 +41,27 @@ Two consequences worth knowing:
 - **If several answers land close together, you get one reply covering all of
   them**, not one per answer.
 
-Today the only kind of answer that arrives this way is your own approve/deny.
-Long-running work started by a tool (installing a model on the inference host,
-dispatching a coding agent) still reports through its own status tool; those move
-onto this path as their tickets land.
+Answers that arrive this way today: your own approve/deny, a model install or
+cold-tier promotion finishing on the inference host, a codr ticket stagr queued
+reaching its final outcome, and codr becoming free after stagr found it busy (the
+last two are described under stagr below). A dispatched coding agent (fixr) still
+reports through its own path.
+
+- **A reply about a codr ticket, or about codr becoming free, is not lost to an
+  outage or a restart (DP-518).** stagr's reply to one of those answers is the
+  part that moves the work on (it queues the next ticket), so derpr keeps track
+  of whether that reply actually happened. If it did not — the model server was
+  down and the reply errored, or derpr restarted halfway through it — the codr
+  agent asks stagr for it again on a later tick, until one completes, and never
+  again after one has. It gives up, and tells you, once the reply has kept
+  failing for `max_reply_retry_seconds` (default 24 hours), or at once when the failure would repeat (the model server refused the request,
+  e.g. the context is too long). If another result for the same conversation
+  arrives meanwhile, stagr gets one turn covering both. The answer itself was already written into the
+  conversation the first time, so a second try does not repeat the work; stagr
+  only gets its turn. A model install's reply is not retried this way: nothing
+  polls for it once the node has reported, and the install's outcome is in the
+  conversation for your next message either way. Approvals are never retried: a
+  write you approved runs once, whatever happens to the reply after it.
 
 **Ambient logging:** Messages in configured channels (default: "general", "random", "development") are logged to the database under persona "ambient" without triggering any response. Useful for building conversational context.
 
@@ -776,7 +793,9 @@ waits, and DERPR posts that once too. A ticket whose project cannot be prepared 
 next ticket starts in its place. codr gets the ticket
 text, its worktree, and its notes file `memory/tickets/<ticket>.md` (below), in the
 ticket's own session (see **One ticket, one session** below). When
-the turn ends, DERPR runs the check in the worktree:
+the turn ends, DERPR runs the check in the worktree. A context compaction inside the
+turn (opencode summarizing the history when it fills up, then telling codr to go on)
+does not end it (DP-517): the check waits for codr's own final reply.
 
 - **pass**: DERPR merges the ticket's branch into the project's main (below), and a
   one-line result (ticket, attempt, PASS/FAIL, run time, where it merged) is posted
@@ -789,6 +808,24 @@ the turn ends, DERPR runs the check in the worktree:
   budget would repeat it); if attempts run out or the attempt was not retryable,
   the ticket is marked failed and the result is posted. To go on after timed_out
   or stuck, requeue or rename as a new ticket.
+- **the model server was down** (DP-518): when codr's turn ends because the model
+  server could not be reached or refused for being unavailable (opencode's own
+  retries, about five over a minute, ran out), that is not codr's work failing, so
+  no check runs and **no attempt is used up**. DERPR posts it once to codr's
+  channel, waits until the server answers again (it asks the server's model list
+  each tick), then tells codr in the same session that the server is back and to
+  carry on where it left off. The attempt keeps its number, and the time the
+  server was down does not count against the ticket's `max_seconds`. If you chat
+  with codr in that session meanwhile, the carry-on waits until your turn has
+  finished. A context compaction that fails on the outage counts the same way. An error the
+  server returns for the request itself (a bad request, the context too long) is
+  not an outage: the turn ends and its check runs as usual.
+  **The wait has a limit**, `max_outage_seconds` (default two hours). DERPR asks
+  the server from its own host, which is not codr's, so it could keep missing a
+  server codr can reach; rather than hold the whole queue, past the limit the
+  attempt ends `outage_timeout`. That ends the ticket, like `stuck`: the result
+  is posted, stagr is told, and the next ticket can start. Requeue the ticket
+  once the server is back.
 
 Every attempt is recorded in the agent action log (ticket, attempt, outcome, run
 time, and codr's final reply), and as one line in codr's notes file for the ticket.
@@ -905,6 +942,13 @@ channel. Running past the ticket's `max_seconds` (or `max_turn_seconds` by defau
 stops right away, records the attempt as `timed_out`, and posts the reason, with no nudge: the
 attempt is out of time. Either `stuck` or `timed_out` ends the ticket immediately with no further attempts.
 
+A stall that is the model server's, not codr's, does not count (DP-518): while
+opencode is retrying a failed request, or while codr's turn is waiting on the model
+(no tool running) and the server does not answer its model list, the stall clock
+starts again instead of stopping the turn. The same wait does not count toward
+`max_seconds` either: it is added to the attempt's paused time, so an outage
+near the end of an attempt does not time it out.
+
 **More than one model server.** codr can hand subtasks to a `pool` subagent
 (opencode's `task` tool, in the background if it wants to keep working). codr and
 its subagents all go through the `:5001` router (see "More than one server behind
@@ -962,6 +1006,8 @@ Settings, per instance in `agents.json` under `codr`:
 - `persona` (default `codr`): which opencode persona the agent drives.
 - `max_attempts` (default `3`) per task.
 - `max_turn_seconds` (default `604800`, one week; default per-attempt limit when a ticket sets no `max_seconds:`), `stall_seconds` (default `900`).
+- `max_outage_seconds` (default `7200`): how long an attempt waits for the model server to answer again before it ends `outage_timeout` (DP-518).
+- `max_reply_retry_seconds` (default `86400`): how long stagr's reply about a ticket or about codr being free is asked for again while it keeps failing (DP-518). Tries back off from 30 s to every 10 minutes; a derpr restart starts the period again.
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but
@@ -1045,7 +1091,12 @@ only thing that talks to both:
   what a task needs, check the environment, or debug a test that fails offline,
   without a round trip through codr. It is refused while codr is starting or
   running a turn (any session in codr's workspace busy), and after a task turn
-  ends until its check has run (the next tick), and while it runs, codr
+  ends until its check has run (the next tick). A refusal is not a dead end
+  (DP-517): the call (and a `copy_to_codr` refused the same way) waits
+  instead, and the codr agent wakes stagr in the same conversation
+  on the first tick codr is idle, before it starts another ticket, so stagr can
+  run it again then. However many calls a turn had refused, stagr gets one
+  wake. While a `codr_shell` command runs, codr
   starts nothing: the environment changes only between tasks, so a result still
   measures codr. codr's box is offline and can be rebuilt from a backup, so the
   worst a command there can do is cost a restore. A message you send codr while
@@ -1092,14 +1143,24 @@ only thing that talks to both:
   stagr in the conversation it queued the ticket from, on its next tick. stagr
   gets one turn with the result (the outcome, the attempts, where it merged, the
   last check output or reason) and is told what to do with it: after a pass, queue the
-  next ticket if you agreed one; after a failure, report and wait for you. A
+  next ticket if you agreed one; after a failure, find out why (codr's box is
+  free by then) and, when the fix stays inside the work you already agreed (its
+  own check was wrong, or the same scope needs another go), queue the corrected
+  ticket; it reports and waits for you only when the next step needs your
+  decision (changing the scope, dropping the work, something it cannot fix).
+  With `queue_codr_task` under ask, that corrected ticket still parks for your
+  approval. A
   failed check attempt that codr will retry does not wake it. stagr's reply is saved in
   that conversation and also posted to codr's channel, under codr's result line,
   as `stagr [CD-NNN]: <reply>`; if the turn parked an approval (with
   `queue_codr_task` under ask, that is the next ticket), the post says so, and
   you approve it in stagr's channel. A ticket you copied into the queue by hand
   wakes no one. stagr waits up to 14 days for a ticket to end; past that the
-  wait expires and it is not woken. **While stagr's turn runs, codr starts no
+  wait expires and it is not woken. If stagr's turn about the result fails (the
+  model server is down) or derpr restarts during it, stagr is asked again on a
+  later tick until one turn completes (DP-518, see **Results that arrive later**
+  above); a wake about codr being free is asked again only on a tick that sees
+  codr free. **While stagr's turn runs, codr starts no
   ticket**, so a ticket already waiting in the queue starts only after stagr has
   had its say: it can prepare codr's box (`codr_shell`, `copy_to_codr`) or step
   in (delete the next ticket's folder, say) before codr picks it up.
@@ -1949,8 +2010,8 @@ approval: [Preparing codr's work](#preparing-codrs-work-stagr-the-setup-box-and-
 | `request_network` | ask: yes · allow: no | Ask to turn the setup box's LAN or WAN on, with a reason |
 | `stagr_read_file` | no | Read a text file in the setup box's workdir as numbered lines (`offset`, `limit`) |
 | `stagr_edit_file` | no | Replace one exact, unique piece of text in a setup-box file (or create a new file) and return the diff |
-| `codr_shell` | no | Run bash in codr's workspace; refused while codr is working, and codr waits while it runs |
-| `codr_read_file` / `codr_edit_file` | no | The same two, in codr's workspace, under `codr_shell`'s rule: refused while codr is working |
+| `codr_shell` | no | Run bash in codr's workspace; while codr is working it waits, and stagr is woken when codr is idle (DP-517); codr waits while it runs |
+| `codr_read_file` / `codr_edit_file` | no | The same two, in codr's workspace, under `codr_shell`'s rule: while codr is working they wait, and stagr is woken when codr is idle |
 | `copy_to_codr` | no | Copy a setup-box file or folder to a new path in codr's workspace (`.git` left behind unless `keep_git`) |
 | `copy_from_codr` | ask: yes · allow: no | Copy a file or folder from codr's workspace to a new path on the setup box (same `.git` rule) |
 | `queue_codr_task` | ask: yes · allow: no | Queue a planned codr ticket (title, project, depends_on, spec, plan, packages, check, max_attempts, max_seconds); DERPR gives it the next `CD-NNN` and the reply names it. stagr is woken with the ticket's final outcome (DP-493) |
