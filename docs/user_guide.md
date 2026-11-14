@@ -53,7 +53,10 @@ reports through its own path.
   of whether that reply actually happened. If it did not — the model server was
   down and the reply errored, or derpr restarted halfway through it — the codr
   agent asks stagr for it again on a later tick, until one completes, and never
-  again after one has. The answer itself was already written into the
+  again after one has. It gives up, and tells you, after five failed tries, or
+  at once when the failure would repeat (the model server refused the request,
+  e.g. the context is too long). If another result for the same conversation
+  arrives meanwhile, stagr gets one turn covering both. The answer itself was already written into the
   conversation the first time, so a second try does not repeat the work; stagr
   only gets its turn. A model install's reply is not retried this way: nothing
   polls for it once the node has reported, and the install's outcome is in the
@@ -812,9 +815,17 @@ does not end it (DP-517): the check waits for codr's own final reply.
   channel, waits until the server answers again (it asks the server's model list
   each tick), then tells codr in the same session that the server is back and to
   carry on where it left off. The attempt keeps its number, and the time the
-  server was down does not count against the ticket's `max_seconds`. An error the
+  server was down does not count against the ticket's `max_seconds`. If you chat
+  with codr in that session meanwhile, the carry-on waits until your turn has
+  finished. A context compaction that fails on the outage counts the same way. An error the
   server returns for the request itself (a bad request, the context too long) is
   not an outage: the turn ends and its check runs as usual.
+  **The wait has a limit**, `max_outage_seconds` (default two hours). DERPR asks
+  the server from its own host, which is not codr's, so it could keep missing a
+  server codr can reach; rather than hold the whole queue, past the limit the
+  attempt ends `outage_timeout`. That ends the ticket, like `stuck`: the result
+  is posted, stagr is told, and the next ticket can start. Requeue the ticket
+  once the server is back.
 
 Every attempt is recorded in the agent action log (ticket, attempt, outcome, run
 time, and codr's final reply), and as one line in codr's notes file for the ticket.
@@ -934,7 +945,9 @@ attempt is out of time. Either `stuck` or `timed_out` ends the ticket immediatel
 A stall that is the model server's, not codr's, does not count (DP-518): while
 opencode is retrying a failed request, or while codr's turn is waiting on the model
 (no tool running) and the server does not answer its model list, the stall clock
-starts again instead of stopping the turn.
+starts again instead of stopping the turn. The same wait does not count toward
+`max_seconds` either: it is added to the attempt's paused time, so an outage
+near the end of an attempt does not time it out.
 
 **More than one model server.** codr can hand subtasks to a `pool` subagent
 (opencode's `task` tool, in the background if it wants to keep working). codr and
@@ -993,6 +1006,7 @@ Settings, per instance in `agents.json` under `codr`:
 - `persona` (default `codr`): which opencode persona the agent drives.
 - `max_attempts` (default `3`) per task.
 - `max_turn_seconds` (default `604800`, one week; default per-attempt limit when a ticket sets no `max_seconds:`), `stall_seconds` (default `900`).
+- `max_outage_seconds` (default `7200`): how long an attempt waits for the model server to answer again before it ends `outage_timeout` (DP-518).
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but

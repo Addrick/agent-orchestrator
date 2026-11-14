@@ -382,3 +382,55 @@ async def test_an_approval_whose_reply_errors_is_never_owed(mocked_chat_system):
     assert _owed_row(mem_manager, park.token) == ("resolved", 0, None)
     assert chat_system.confirmations.owed_of_kind("approval") == []
     assert _restart(chat_system).owed_of_kind("approval") == []
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_the_server_refuses_is_not_owed(mocked_chat_system):
+    """DP-518 review: a refused request (a 400, context too long) fails the
+    same way on every try. It is closed, not owed, so it is not re-run every
+    backoff for the row's lifetime."""
+    from src.chat_system import ErrorEvent
+    from src.engine import LLMCommunicationError
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    _tool(chat_system)
+    await _turn(chat_system)
+
+    _engine_fails(chat_system, LLMCommunicationError("context too long", status_code=400))
+    events = await _drain(chat_system.stream_resolve_deferral(
+        "CD-001", kind=DEFERRAL_KIND_CODR_TICKET, status="passed", result={"state": "passed"}))
+    (error,) = [e for e in events if isinstance(e, ErrorEvent)]
+    assert not error.retryable
+    assert chat_system.confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == []
+    assert _owed_row(mem_manager, "CD-001") == ("resolved", 0, None)
+    assert _restart(chat_system).owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == []
+
+
+@pytest.mark.asyncio
+async def test_an_owed_reply_and_a_new_result_of_one_conversation_get_one_continuation(mocked_chat_system):
+    """DP-518 review: the retry of an owed reply and a fresh result for the
+    same conversation used to start two wakes, so stagr ran two turns, each
+    told half of what happened."""
+    from src.engine import LLMCommunicationError
+    chat_system, mem_manager = mocked_chat_system
+    _allowed(chat_system)
+    _tool(chat_system, "CD-001")
+    await _turn(chat_system)
+    _engine_fails(chat_system, LLMCommunicationError("Cannot connect to the model server"))
+    await _drain(chat_system.stream_resolve_deferral(
+        "CD-001", kind=DEFERRAL_KIND_CODR_TICKET, status="passed", result={"state": "passed"}))
+    _tool(chat_system, "CD-002")
+    await _turn(chat_system)
+    assert [d.park.token for d in chat_system.confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET)] == ["CD-001"]
+
+    _set_engine(chat_system, [_text("CD-001 and CD-002 are done.")])   # a second turn would find no reply
+    calls_before = chat_system.text_engine.generate_response.call_count
+    events = await _drain(chat_system.stream_settle_deferrals(
+        {"CD-002": ("failed", {"state": "failed"})}, kind=DEFERRAL_KIND_CODR_TICKET, owed=["CD-001"]))
+
+    assert [e.text for e in events if isinstance(e, DoneEvent)] == ["CD-001 and CD-002 are done."]
+    assert chat_system.text_engine.generate_response.call_count == calls_before + 1
+    sent = json.dumps(chat_system.text_engine.generate_response.call_args.args[1])
+    assert "codr_ticket): passed" in sent and "codr_ticket): failed" in sent
+    assert chat_system.confirmations.owed_of_kind(DEFERRAL_KIND_CODR_TICKET) == []
+    assert chat_system.confirmations.pending_of_kind(DEFERRAL_KIND_CODR_TICKET) == []

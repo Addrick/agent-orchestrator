@@ -44,7 +44,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -54,7 +54,7 @@ from src.chat_system import ChatSystem
 from src.clients.notification import HourlyLimiter, NotificationRouter, post_as_persona
 from src.deferral_kinds import DEFERRAL_KIND_CODR_IDLE, DEFERRAL_KIND_CODR_TICKET
 from src.engine.providers.local import REQUESTER_HEADER, requester_header
-from src.generation_events import DoneEvent, PendingConfirmationEvent
+from src.generation_events import DoneEvent, ErrorEvent, PendingConfirmationEvent
 # The ticket format's one home, shared with its writer, stagr's
 # `queue_codr_task` (DP-489); `src.stagr` sits below `src.agents`.
 from src.stagr.codr_ticket import ATTEMPT_ACTION, HEADER_KEYS, PROJECT_RE, attempt_context, parse_header, parse_positive_int
@@ -71,6 +71,7 @@ NOTIFY_TOOL = "notify_adam"
 RELAY_ACTION = "notify_relay"
 NOTICE_ACTION = "ticket_notice"
 REPEAT_LIMIT = 3            # identical tool calls / reasoning steps in a row
+RESUME_TRIES = 5            # DP-518: tries at an owed stagr reply before it is given up on
 _STALL_PREFIX = "nothing new for "
 _STALL = _STALL_PREFIX + "{} s"   # the stall guard's reason, formatted with stall_seconds
 # Stored in the action log, whose payloads are capped at 4,000 chars.
@@ -102,6 +103,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_attempts": 3,
     "max_turn_seconds": 604800,
     "stall_seconds": 900,
+    "max_outage_seconds": 7200,     # DP-518: a model server outage longer than this ends the ticket
     "check_timeout_seconds": 600,
     "notify_per_hour": 20,
     "start_tasks": True,
@@ -331,6 +333,24 @@ def _final_reply(turn: List[Dict[str, Any]]) -> Dict[str, Any]:
     return next((m for m in reversed(turn) if _role(m) == "assistant" and not is_compaction(m)), {})
 
 
+def failed_compaction(turn: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The turn's newest assistant message when it is a compaction summary
+    that ended on an error, else {}. `turn_finished` reads a compaction as
+    "the turn goes on after it" (DP-517); one that errored does not, so with
+    the session idle the turn has ended there (DP-518)."""
+    newest = next((m for m in reversed(turn) if _role(m) == "assistant"), {})
+    info = newest.get("info") or {}
+    if is_compaction(newest) and info.get("error") and (info.get("time") or {}).get("completed"):
+        return newest
+    return {}
+
+
+def _ending_message(turn: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The message whose error, if any, ended the turn: a failed compaction
+    when that is the newest step, else the final reply."""
+    return failed_compaction(turn) or _final_reply(turn)
+
+
 def provider_outage(turn: List[Dict[str, Any]]) -> Optional[str]:
     """Why the turn ended, when it ended because the model server was not
     there (DP-518), else None. `turn` is the turn's messages after the user
@@ -345,8 +365,9 @@ def provider_outage(turn: List[Dict[str, Any]]) -> Optional[str]:
     :5001 router answers 503 when no model server is up. That is the outage.
     A non-retryable APIError (a 400: bad request, context too long) is the
     server answering, and `MessageAbortedError` is DERPR's own abort, so both
-    end the attempt as before."""
-    error = (_final_reply(turn).get("info") or {}).get("error") or {}
+    end the attempt as before. A compaction that failed this way is the same
+    outage (`failed_compaction`)."""
+    error = (_ending_message(turn).get("info") or {}).get("error") or {}
     data = error.get("data") or {}
     if error.get("name") != "APIError" or data.get("isRetryable") is not True:
         return None
@@ -940,7 +961,10 @@ class CodrAgent(Agent):
         auto = open_auto(msgs[start]) or {}
         # A later turn (a chat message sent between ticks) means this one ended.
         end = turn_end(msgs, start)
-        if end < len(msgs) or turn_finished(msgs, start):
+        # DP-518: a compaction that errored with the session idle ended the turn too.
+        compaction_died = (state.get("type", "idle") == "idle"
+                           and bool(failed_compaction(msgs[start + 1:end])))
+        if end < len(msgs) or turn_finished(msgs, start) or compaction_died:
             outage = provider_outage(msgs[start + 1:end])
             task = None if outage is None else next(
                 (t for t in self._tasks() if t.id == auto.get("task")), None)
@@ -1078,122 +1102,156 @@ class CodrAgent(Agent):
         `queue_codr_task` declares a `codr_ticket` deferral under the ticket
         ID, so the park row holds stagr's conversation. Each tick, every such
         park whose ticket is passed, failed, blocked or removed is settled in
-        the background: `stream_resolve_deferral` claims it (exactly once,
-        durable across a restart) and runs one continuation turn in that
+        the background (`_wake_conversations`): claimed exactly once, durable
+        across a restart, and reported by one continuation turn in that
         conversation, whose reply is posted after the ticket's result line.
         Polled rather than called from `_record`, so a restart between the
         attempt being logged and the wake loses nothing."""
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return
-        self._resume_owed(DEFERRAL_KIND_CODR_TICKET, lambda tokens: f"stagr [{', '.join(tokens)}]")
-        waiting = [p.token for p in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_TICKET)
+        fresh: Dict[str, Tuple[str, Any]] = {}
+        keys: Dict[str, Any] = {}
+        waiting = [p for p in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_TICKET)
                    if p.token not in self._waking and p.token not in self._unsettled]
-        if not waiting:
-            return
-        tasks, skipped = load_tickets(global_config.CODR_TASKS_DIR, int(self.cfg["max_attempts"]))
-        attempts = self._all_attempts()
-        outcomes = {tid: [str(a.get("outcome")) for a in rows] for tid, rows in attempts.items()}
-        states = queue_states(tasks, outcomes)
-        for tid in waiting:
-            if tid in skipped:
-                continue        # still in the queue, unreadable until fixed: not removed
-            state, why = states.get(tid) or ((PASSED, "") if "pass" in outcomes.get(tid, []) else (REMOVED, ""))
-            if state not in FINAL_STATES:
-                continue
-            self._spawn_wake([tid], DEFERRAL_KIND_CODR_TICKET, state,
-                             wake_result(tid, state, why, attempts.get(tid, [])), f"stagr [{tid}]")
+        if waiting:
+            tasks, skipped = load_tickets(global_config.CODR_TASKS_DIR, int(self.cfg["max_attempts"]))
+            attempts = self._all_attempts()
+            outcomes = {tid: [str(a.get("outcome")) for a in rows] for tid, rows in attempts.items()}
+            states = queue_states(tasks, outcomes)
+            for park in waiting:
+                tid = park.token
+                if tid in skipped:
+                    continue        # still in the queue, unreadable until fixed: not removed
+                state, why = states.get(tid) or ((PASSED, "") if "pass" in outcomes.get(tid, []) else (REMOVED, ""))
+                if state in FINAL_STATES:
+                    fresh[tid] = (state, wake_result(tid, state, why, attempts.get(tid, [])))
+                    keys[tid] = park.key
+        self._wake_conversations(DEFERRAL_KIND_CODR_TICKET, fresh, keys,
+                                 lambda tokens: f"stagr [{', '.join(tokens)}]")
 
     def _wake_idle_waiters(self) -> None:
         """Wake each stagr conversation with a call that found codr busy
-        (DP-517, `codr_idle`). Called only on a tick that saw codr idle. One
-        wake per conversation, settling all of its waiting calls as one batch
-        (`stream_resolve_deferrals`), so a turn that had several refused gets
-        one continuation, not one per call."""
+        (DP-517, `codr_idle`). Called only on a tick that saw codr idle, so a
+        codr_idle reply still owed from an earlier try (DP-518) is asked
+        again only here too: its result says codr is free."""
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return
-        # DP-518: a codr_idle reply owed from an earlier try is asked again
-        # only here, on a tick that saw codr idle: its result says codr is free.
-        self._resume_owed(DEFERRAL_KIND_CODR_IDLE, lambda _tokens: "stagr")
-        by_conversation: Dict[Any, List[str]] = {}
-        for park in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE):
-            if park.token not in self._waking and park.token not in self._unsettled:
-                by_conversation.setdefault(park.key, []).append(park.token)
-        for tokens in by_conversation.values():
-            self._spawn_wake(tokens, DEFERRAL_KIND_CODR_IDLE, "idle", dict(IDLE_WAKE_RESULT), "stagr")
+        waiting = [p for p in confirmations.pending_of_kind(DEFERRAL_KIND_CODR_IDLE)
+                   if p.token not in self._waking and p.token not in self._unsettled]
+        self._wake_conversations(DEFERRAL_KIND_CODR_IDLE,
+                                 {p.token: ("idle", dict(IDLE_WAKE_RESULT)) for p in waiting},
+                                 {p.token: p.key for p in waiting}, lambda _tokens: "stagr")
 
-    def _resume_owed(self, kind: str, label: Callable[[List[str]], str]) -> None:
-        """Ask stagr again for each reply of `kind` it still owes (DP-518): its
-        deferral was settled, but the turn reporting it errored (the model
-        server was down) or was cut off by a restart. One run per
-        conversation, through the same `_spawn_wake` as a first wake, so no
-        ticket starts while it runs. A token whose last try failed waits
-        (`_resume_backoff`: one tick, doubling to 10 minutes), so a long
-        outage neither floods the log nor holds the queue on every tick."""
+    def _wake_conversations(self, kind: str, fresh: Dict[str, Tuple[str, Any]], keys: Dict[str, Any],
+                            label: Callable[[List[str]], str]) -> None:
+        """One wake per stagr conversation, settling its `fresh` results
+        ({token: (status, result)}, conversation in `keys`) and the replies of
+        `kind` it still owes (DP-518: the turn reporting them errored or was
+        cut off by a restart) as ONE batch with one continuation. Separate
+        wakes of one conversation each ran a turn, and each was told only
+        part of what happened (DP-517 folded only one wake's own calls).
+
+        An owed token whose last try failed waits (`_resume_backoff`: one
+        tick, doubling to 10 minutes), so a long outage neither floods the
+        log nor holds the queue on every tick, unless its conversation has a
+        fresh result: that turn runs anyway, and reports both."""
         now = time.monotonic()
-        by_conversation: Dict[Any, List[str]] = {}
+        groups: Dict[Any, Tuple[Dict[str, Tuple[str, Any]], List[str]]] = {}
+        for token, value in fresh.items():
+            groups.setdefault(keys[token], ({}, []))[0][token] = value
         for decision in self.chat_system.confirmations.owed_of_kind(kind):
-            token = decision.park.token
-            if token in self._waking or self._resume_backoff.get(token, (0, 0.0))[1] > now:
+            token, key = decision.park.token, decision.park.key
+            if token in self._waking:
                 continue
-            by_conversation.setdefault(decision.park.key, []).append(token)
-        for tokens in by_conversation.values():
-            self._spawn_wake(tokens, kind, "", {}, label(tokens), resume=True)
+            if self._resume_backoff.get(token, (0, 0.0))[1] > now and key not in groups:
+                continue
+            groups.setdefault(key, ({}, []))[1].append(token)
+        for batch, owed in groups.values():
+            self._spawn_wake(batch, owed, kind, label(list(batch) + owed))
 
-    def _spawn_wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
-                    label: str, resume: bool = False) -> None:
-        """Start one background wake for `tokens` (one conversation). Held in
-        `_waking` while it runs, so no ticket starts and no tick starts it
-        again. `resume`: the deferrals are already settled and only stagr's
-        turn is owed (DP-518)."""
-        self._waking.update(tokens)
-        run = asyncio.create_task(self._wake(tokens, kind, status, result, label, resume))
+    def _spawn_wake(self, fresh: Dict[str, Tuple[str, Any]], owed: List[str], kind: str, label: str) -> None:
+        """Start one background wake for one conversation. Its tokens are
+        held in `_waking` while it runs, so no ticket starts and no tick
+        starts it again."""
+        self._waking.update(fresh)
+        self._waking.update(owed)
+        run = asyncio.create_task(self._wake(fresh, owed, kind, label))
         self._wake_runs.add(run)
         run.add_done_callback(self._wake_runs.discard)
 
-    async def _wake(self, tokens: List[str], kind: str, status: str, result: Dict[str, Any],
-                    label: str, resume: bool = False) -> None:
-        """Settle stagr's deferrals `tokens` (or, `resume`, run the turn they
-        still owe) and post its reply to codr's channel."""
-        events = (self.chat_system.stream_resume_continuations(tokens, kind=kind) if resume
-                  else self.chat_system.stream_resolve_deferrals(tokens, kind=kind, status=status, result=result))
+    async def _wake(self, fresh: Dict[str, Tuple[str, Any]], owed: List[str], kind: str, label: str) -> None:
+        """Settle one conversation's `fresh` deferrals and run the turn it
+        owes for `owed` (`ChatSystem.stream_settle_deferrals`), and post
+        stagr's reply to codr's channel."""
+        tokens = list(fresh) + list(owed)
+        error: Optional[ErrorEvent] = None
+        given_up: List[str] = []
         try:
-            reply, parked = "", False
-            async for event in events:
-                if isinstance(event, PendingConfirmationEvent):
-                    parked = True
-                elif isinstance(event, DoneEvent):
-                    reply = event.text or ""
-            if not reply.strip():
-                return
-            line = f"{label}: {reply.strip()}"
-            if parked:
-                line += "\n(stagr parked an action for your approval in its channel)"
-            await self._post(line)
+            reply, parked, error = await self._stagr_turn(
+                self.chat_system.stream_settle_deferrals(fresh, kind=kind, owed=owed))
+            if reply.strip():
+                line = f"{label}: {reply.strip()}"
+                if parked:
+                    line += "\n(stagr parked an action for your approval in its channel)"
+                await self._post(line)
         except Exception:  # noqa: BLE001 — a failed wake must not stop the agent
             logger.exception("codr agent: waking stagr for %s failed", ", ".join(tokens))
         finally:
             self._waking.difference_update(tokens)
             self._mark_unsettled(tokens, kind)
-            self._note_owed(tokens, kind)
+            given_up = self._note_owed(tokens, kind)
+        if error is not None and not error.retryable:
+            # ChatSystem closed the mark: the same turn would fail the same way.
+            await self._post(f"{label}: stagr's reply failed and will not be asked again: {error.message}")
+        elif given_up:
+            await self._post(f"{label}: stagr's reply failed {RESUME_TRIES} times and will not be asked "
+                             "again. The result is in stagr's conversation for its next turn.")
 
-    def _note_owed(self, tokens: List[str], kind: str) -> None:
+    @staticmethod
+    async def _stagr_turn(events: AsyncIterator[Any]) -> Tuple[str, bool, Optional[ErrorEvent]]:
+        """(reply, whether it parked an approval, its error) from a wake's events."""
+        reply, parked, error = "", False, None
+        async for event in events:
+            if isinstance(event, PendingConfirmationEvent):
+                parked = True
+            elif isinstance(event, DoneEvent):
+                reply = event.text or ""
+            elif isinstance(event, ErrorEvent):
+                error = event
+        return reply, parked, error
+
+    def _note_owed(self, tokens: List[str], kind: str) -> List[str]:
         """After a wake: back off each of `tokens` whose reply is still owed
-        (the turn failed), forget the rest (DP-518)."""
+        (the turn failed), forget the rest (DP-518). A reply that has failed
+        `RESUME_TRIES` times is given up on (the mark closed, durable) and
+        returned: something that fails that often is not an outage the
+        backoff waits out, and each try runs a whole stagr turn, which may
+        act on codr's box before it fails, while no ticket can start."""
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
-            return
+            return []
         owed = {d.park.token for d in confirmations.owed_of_kind(kind)}
         tick = float(self.schedule.get("interval") or 30)
+        given_up: List[str] = []
         for token in tokens:
             if token not in owed:
                 self._resume_backoff.pop(token, None)
                 continue
             failures = self._resume_backoff.get(token, (0, 0.0))[0] + 1
+            if failures >= RESUME_TRIES:
+                self._resume_backoff.pop(token, None)
+                decision = confirmations.take_owed(token, kind)
+                if decision is not None:
+                    confirmations.close_continuations([decision])
+                given_up.append(token)
+                logger.error("codr agent: stagr's reply about %s failed %d times; giving up", token, failures)
+                continue
             self._resume_backoff[token] = (failures, time.monotonic() + min(600.0, tick * 2 ** (failures - 1)))
-            logger.warning("codr agent: stagr's reply about %s did not complete (try %d); asking again later",
-                           token, failures)
+            logger.warning("codr agent: stagr's reply about %s did not complete (try %d of %d); asking again later",
+                           token, failures, RESUME_TRIES)
+        return given_up
 
     def _mark_unsettled(self, tokens: List[str], kind: str) -> None:
         """Remember each of `tokens` the wake left pending (DP-517). The
@@ -1380,10 +1438,20 @@ class CodrAgent(Agent):
         reason, nudgeable = self._stuck_reason(turn, auto)
         if not reason:
             return
-        if reason.startswith(_STALL_PREFIX) and await self._model_server_stall(turn, state):
-            # DP-518: the model server's stall, not codr's. Start the clock again.
-            self._progress = (progress_signature(turn), time.monotonic())
-            logger.info("codr agent: task %s waits on the model server; not counted as a stall", auto.get("task"))
+        if (reason.startswith(_STALL_PREFIX) or not nudgeable) and await self._model_server_stall(turn, state):
+            # DP-518: the model server's wait, not codr's: neither a stall nor
+            # time the attempt used. The span since the last progress goes
+            # into `paused`, which the overrun guard leaves out, and the stall
+            # clock starts again.
+            now, (sig, since), current = time.monotonic(), self._progress, progress_signature(turn)
+            # Only a span this process watched with no progress (not one from
+            # before a restart, or one the turn moved in).
+            waited = now - since if sig == current and since > 0 else 0.0
+            self._progress = (current, now)
+            if waited >= 1.0:
+                await client.patch_part(self._auto_part(msgs[start]),
+                                        **{AUTO_FIELD: {**auto, "paused": float(auto.get("paused") or 0) + waited}})
+            logger.info("codr agent: task %s waits on the model server; not counted (%s)", auto.get("task"), reason)
             return
         # Held from the abort to the nudge being in the session: with the turn
         # stopped, a chat message would otherwise start a turn in between and
@@ -1452,7 +1520,7 @@ class CodrAgent(Agent):
             await self._mirror(client, sid, ticket, msgs)
         start_part = self._auto_part(msgs[start])
         if not auto.get("outage"):
-            completed = ((_final_reply(msgs[start + 1:]).get("info") or {}).get("time") or {}).get("completed")
+            completed = ((_ending_message(msgs[start + 1:]).get("info") or {}).get("time") or {}).get("completed")
             # opencode stamps in epoch ms; an outage cannot begin before the attempt did.
             since = max(float(completed) / 1000 if completed else time.time(), float(auto.get("started") or 0))
             await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "outage": {"since": since, "error": outage}}})
@@ -1461,12 +1529,22 @@ class CodrAgent(Agent):
             logger.warning("codr agent: task %s attempt %s stopped by a model server outage: %s",
                            task.id, auto.get("attempt"), outage)
             return
+        since = float((auto.get("outage") or {}).get("since") or time.time())
         persona = self.chat_system.personas.get(self.persona_name)
         lock = workspace_lock(self.directory)
-        if persona is None or lock.locked() or not await self._model_server_up():
+        if persona is None or lock.locked():
+            return
+        if not await self._model_server_up():
+            limit = float(self.cfg["max_outage_seconds"])
+            if time.time() - since > limit:
+                await self._give_up_outage(client, start_part, auto, outage, task, limit)
             return
         async with lock:
-            since = float((auto.get("outage") or {}).get("since") or time.time())
+            # A chat message Adam sent meanwhile runs a turn of its own (chat
+            # takes this lock only to start one): carry on once it is done, so
+            # the prompt is a turn of its own and not delivered into his.
+            if await client.is_busy(sid):
+                return
             meta = {k: v for k, v in auto.items() if k != "outage"}
             meta["paused"] = float(auto.get("paused") or 0) + max(0.0, time.time() - since)
             await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": "inference_down",
@@ -1476,6 +1554,22 @@ class CodrAgent(Agent):
                 f"again now. Carry on with ticket `{task.id}` where you left off; this is still attempt "
                 f"{auto.get('attempt')}, and the outage does not count against it."), meta)
         logger.info("codr agent: model server back; task %s attempt %s carries on", task.id, auto.get("attempt"))
+
+    async def _give_up_outage(self, client: OpencodeClient, start_part: Dict[str, Any], auto: Dict[str, Any],
+                              outage: str, task: CodrTask, limit: float) -> None:
+        """The model server has not answered DERPR's probe for `limit` s
+        (`max_outage_seconds`). The probe runs from DERPR's host, not codr's,
+        so it may never see a server codr can reach; waiting on it without end
+        would hold the whole queue. The attempt ends `outage_timeout`, which
+        like any non-`fail` outcome ends the ticket for good: Adam is told
+        (`_record`), stagr is woken, and the queue moves on. Re-queue the
+        ticket to try it again."""
+        reason = (f"the model server did not answer DERPR for {int(limit) // 60} min ({outage}); "
+                  "re-queue the ticket once it is back")
+        await client.patch_part(start_part, **{AUTO_FIELD: {**auto, "result": "outage_timeout", "reason": reason}})
+        await self._record(auto, "outage_timeout", {"reason": reason}, task)
+        await self._note_attempt(client, task, auto, "outage_timeout", {"reason": reason})
+        logger.error("codr agent: task %s gave up after a %d s model server outage", task.id, int(limit))
 
     async def _wait_idle(self, client: OpencodeClient, sid: str, limit: float = 20.0) -> None:
         deadline = time.monotonic() + limit
@@ -1498,7 +1592,7 @@ class CodrAgent(Agent):
         final = _final_reply(msgs[start + 1:])
         reply = "\n".join(p.get("text", "") for p in final.get("parts", [])
                           if p.get("type") == "text" and not p.get("synthetic")).strip()
-        error = ((final.get("info") or {}).get("error") or {})
+        error = ((_ending_message(msgs[start + 1:]).get("info") or {}).get("error") or {})
         detail: Dict[str, Any] = {"reply": reply[:600]}
         if task is None:
             outcome, detail["reason"] = "aborted", f"task {auto.get('task')!r} is no longer in the queue"

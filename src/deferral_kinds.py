@@ -65,14 +65,14 @@ DEFERRAL_KIND_CODR_TICKET = "codr_ticket"
 #: idle, before it starts another ticket, so stagr can run the call again.
 #: The token is minted by the refusing handler (`codr-idle-<hex>`); every one
 #: pending is settled on that tick, one batch per conversation
-#: (`ChatSystem.stream_resolve_deferrals`), so a turn's several refusals get
+#: (`ChatSystem.stream_settle_deferrals`), so a turn's several refusals get
 #: one continuation.
 DEFERRAL_KIND_CODR_IDLE = "codr_idle"
 
 #: The kinds whose continuation turn is owed until one completes (DP-518).
 #: Settling one of these marks its row `continuation_owed`, and a continuation
 #: that errors, is cut off, or dies with the process leaves the mark, so the
-#: kind's authority asks again (`ChatSystem.stream_resume_continuations`) until
+#: kind's authority asks again (`ChatSystem.stream_settle_deferrals`) until
 #: one turn completes — the codr agent, which polls each tick anyway. These are
 #: the kinds whose continuation moves the work on: stagr queues the next ticket
 #: or reruns the refused call in it, and nobody else would.

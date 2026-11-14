@@ -361,7 +361,8 @@ class TextEngine:
                         continue
                     logger.warning(f"Rate limit (429) hit for model '{model_name}'. Aborting retries.")
                     raise
-                if attempt >= EMPTY_RESPONSE_RETRIES:
+                if attempt >= EMPTY_RESPONSE_RETRIES or e.permanent:
+                    # DP-518: a refused request (a 4xx) is refused again.
                     raise
                 logger.warning(f"LLM communication error (Attempt {attempt + 1}). Retrying... Error: {e}")
 

@@ -2919,7 +2919,8 @@ class MemoryManager:
                               reason: Optional[str] = None,
                               now: Optional[float] = None, *,
                               owe_continuation: bool = False,
-                              turn_tainted: bool = False) -> bool:
+                              turn_tainted: bool = False,
+                              audit_info: Optional[Dict[str, Any]] = None) -> bool:
         """Move a park to a terminal state and erase its payload columns.
 
         The row is kept rather than deleted: a *resolved* park is what lets the
@@ -2940,12 +2941,17 @@ class MemoryManager:
         `close_parked_continuation`: a continuation re-run after a restart is
         rebuilt from them (`ParkedWrite.from_row`). Only a non-approval kind
         sets it, whose call already ran elsewhere and is never executed from
-        this row. `turn_tainted` is raised (never lowered) with it, so a taint
-        `apply()` added in memory survives into that re-run.
+        this row. `turn_tainted` is raised (never lowered) with it, and
+        `audit_info`, when given, replaces the stored blob, so a taint
+        `apply()` added in memory (`add_taint_source`: the flag AND which tool
+        it came from) survives into that re-run. Both are ignored when no
+        continuation is owed: the payload is erased regardless.
         """
         if status not in PARK_DB_TERMINAL:
             raise ValueError(f"Not a terminal park status: {status}")
         owed = 1 if owe_continuation and status == PARK_DB_RESOLVED else 0
+        audit_json = (json.dumps(audit_info, default=str)
+                      if owed and isinstance(audit_info, dict) else None)
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -2955,12 +2961,12 @@ class MemoryManager:
                        SET status = ?, resolved_at = ?, resolution = ?,
                            resolution_reason = ?,
                            write_call = CASE WHEN ? THEN write_call END,
-                           audit_info = CASE WHEN ? THEN audit_info END,
+                           audit_info = CASE WHEN ? THEN COALESCE(?, audit_info) END,
                            confirmation_text = '', continuation_owed = ?,
                            turn_tainted = MAX(turn_tainted, ?)
                        WHERE token = ? AND status IN (?, ?)""",
                     (status, time.time() if now is None else now,
-                     resolution, reason, owed, owed, owed,
+                     resolution, reason, owed, owed, audit_json, owed,
                      1 if owed and turn_tainted else 0, token,
                      PARK_DB_PENDING, PARK_DB_CLAIMED),
                 )

@@ -152,7 +152,8 @@ async def stream_anthropic(
         is_server_error = isinstance(status_code, int) and status_code >= 500
         logger.error(f"Anthropic API error: {e}", exc_info=not is_server_error)
         raise LLMCommunicationError(f"Anthropic API returned an error: {e}", api_payload=api_params,
-                                    rate_limited=rate_limited) from e
+                                    rate_limited=rate_limited,
+                                    status_code=status_code if isinstance(status_code, int) else None) from e
     except Exception as e:
         logger.error(f"An unexpected Anthropic error occurred: {e}", exc_info=True)
         raise LLMCommunicationError("An unexpected error occurred with the Anthropic API.",

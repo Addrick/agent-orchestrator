@@ -63,15 +63,15 @@ def _wired(tmp_path, *tickets, reply="Queued CD-002 next.", confirm=False):
     agent, router = _agent(tmp_path)
     resolved = []
 
-    async def resolve(tokens, *, kind, status, result, note=None):
-        resolved.extend((token, kind, status, result) for token in tokens)
+    async def resolve(fresh, *, kind, owed=(), note=None):
+        resolved.extend((token, kind, status, result) for token, (status, result) in fresh.items())
         if confirm:
             yield PendingConfirmationEvent(text="", write_calls=[], persona_name="stagr", token="t",
                                            audit_info={})
         yield DoneEvent(text=reply, response_type=ResponseType.LLM_GENERATION)
 
     agent.chat_system.confirmations = FakeConfirmations(*tickets)
-    agent.chat_system.stream_resolve_deferrals = resolve
+    agent.chat_system.stream_settle_deferrals = resolve
     return agent, router, resolved
 
 
@@ -201,7 +201,7 @@ async def test_a_failing_resume_does_not_stop_the_agent(tmp_path):
         raise RuntimeError("model down")
         yield  # pragma: no cover
 
-    agent.chat_system.stream_resolve_deferrals = boom
+    agent.chat_system.stream_settle_deferrals = boom
     await _tick(agent)
 
     assert router.sent == [] and not agent._waking
@@ -359,10 +359,10 @@ async def test_each_conversation_gets_its_own_wake(fake, tmp_path):
         "codr-idle-b", kind=DEFERRAL_KIND_CODR_IDLE, key=("adam", "other")).parks
     calls = []
 
-    async def resolve(tokens, *, kind, status, result, note=None):
-        calls.append(list(tokens))
+    async def resolve(fresh, *, kind, owed=(), note=None):
+        calls.append(list(fresh))
         yield DoneEvent(text="ok", response_type=ResponseType.LLM_GENERATION)
-    agent.chat_system.stream_resolve_deferrals = resolve
+    agent.chat_system.stream_settle_deferrals = resolve
 
     await _settle(agent)
 
@@ -388,11 +388,11 @@ async def test_a_park_the_resolve_restores_never_blocks_the_queue(fake, tmp_path
     agent, _, _ = _idle_wired(tmp_path, "codr-idle-a")
     tries = []
 
-    async def restore(tokens, *, kind, status, result, note=None):
-        tries.append(list(tokens))              # restored: the fake store still lists it
+    async def restore(fresh, *, kind, owed=(), note=None):
+        tries.append(list(fresh))              # restored: the fake store still lists it
         return
         yield  # pragma: no cover
-    agent.chat_system.stream_resolve_deferrals = restore
+    agent.chat_system.stream_settle_deferrals = restore
 
     await _settle(agent)
     await _settle(agent)
@@ -438,13 +438,13 @@ async def test_no_ticket_starts_before_the_waiting_call_has_had_its_turn(fake, t
 
     confirmations = agent.chat_system.confirmations
 
-    async def resolve(tokens, *, kind, status, result, note=None):
-        resolved.extend(tokens)
-        confirmations.parks = [p for p in confirmations.parks if p.token not in tokens]   # claimed, like take()
+    async def resolve(fresh, *, kind, owed=(), note=None):
+        resolved.extend(fresh)
+        confirmations.parks = [p for p in confirmations.parks if p.token not in fresh]   # claimed, like take()
         await gate.wait()                                      # stagr's turn is still running
         yield DoneEvent(text="ok", response_type=ResponseType.LLM_GENERATION)
 
-    agent.chat_system.stream_resolve_deferrals = resolve
+    agent.chat_system.stream_settle_deferrals = resolve
     await agent.deploy()
     await asyncio.sleep(0)
     await agent.deploy()                                       # the next tick, mid-turn

@@ -1429,12 +1429,13 @@ async def test_an_owed_reply_is_asked_again_with_backoff_until_it_completes(fake
     calls = []
     outcome = {"done": False}
 
-    async def resume(tokens, *, kind):
-        calls.append((tuple(tokens), kind))
+    async def resume(fresh, *, kind, **settle):
+        assert not fresh
+        calls.append((tuple(settle["owed"]), kind))
         if outcome["done"]:
             owed.owed.clear()
             yield DoneEvent(text="CD-001 passed; queued CD-002.", response_type=ResponseType.LLM_GENERATION)
-    agent.chat_system.stream_resume_continuations = resume
+    agent.chat_system.stream_settle_deferrals = resume
     clock = [1000.0]
     monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
 
@@ -1455,3 +1456,193 @@ async def test_an_owed_reply_is_asked_again_with_backoff_until_it_completes(fake
     clock[0] += 1000
     await tick()                                               # nothing owed: never again
     assert len(calls) == 2
+
+
+# --- DP-518 review ------------------------------------------------------------
+
+
+async def test_an_outage_past_max_outage_seconds_ends_the_ticket(fake, tmp_path, model_server):
+    """DERPR's probe runs from its own host, not codr's: if it never sees the
+    server, the ticket ends rather than hold the whole queue for good."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, pool_url=model_server.url, max_outage_seconds=0)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid)
+    await agent.deploy()                                       # noted
+    assert agent.memory_manager.rows == []
+    await agent.deploy()                                       # past the limit, still down
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "outage_timeout"
+    assert "OUTAGE_TIMEOUT" in router.sent[-1][2] and "re-queue" in router.sent[-1][2]
+    assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["result"] == "outage_timeout"
+    assert codr_agent.queue_states(agent._tasks(), {"01-a": ["outage_timeout"]})["01-a"][0] == codr_agent.FAILED
+
+
+async def test_time_waiting_on_a_dead_model_server_does_not_time_the_attempt_out(
+        fake, tmp_path, monkeypatch, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, max_turn_seconds=100, stall_seconds=10_000, pool_url=model_server.url)
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    start = _auto_messages(fake, sid)[0]["parts"][0]
+    start["metadata"][AUTO]["started"] -= 200                  # past max_turn_seconds
+    fake.add(sid, "assistant", [{"type": "step-start"}], time={"created": 1})   # waiting on the model
+    await agent.deploy()
+    clock[0] += 50
+    await agent.deploy()                                       # still down: excused, the wait is paused time
+    assert not [c for c in fake.calls if c[1].endswith("/abort")]
+    assert _auto_messages(fake, sid)[0]["parts"][0]["metadata"][AUTO]["paused"] == 50
+    assert not [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+
+    model_server.up = True
+    await agent.deploy()                                       # the server answers: really out of time
+    (row,) = [r for r in agent.memory_manager.rows if r["action_type"] == codr_agent.ATTEMPT_ACTION]
+    assert row["outcome"] == "timed_out"
+
+
+def _failed_compaction(fake, sid, error=OUTAGE):
+    fake.add(sid, "user", [{"type": "compaction", "auto": True}], time={"created": 2})
+    fake.add(sid, "assistant", [], time={"created": 3, "completed": 4}, mode="compaction", agent="compaction",
+             summary=True, error=error)
+
+
+async def test_an_outage_during_a_compaction_is_an_outage(fake, tmp_path, model_server):
+    """The compaction's summary is the newest message, so the turn never read
+    as finished and the stall guard counted the outage against codr."""
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=True)
+    agent, router = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _failed_compaction(fake, sid)
+    await agent.deploy()
+    assert agent.memory_manager.rows == [] and "Not counted" in router.sent[-1][2]
+    model_server.up = True
+    await agent.deploy()
+    assert "carry on" in _auto_messages(fake, sid)[1]["parts"][0]["text"].lower()
+
+
+async def test_a_compaction_refused_by_the_server_ends_the_attempt(fake, tmp_path, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell(check_passes=False)
+    agent, _ = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _tool_step(fake, sid)
+    _failed_compaction(fake, sid, {"name": "APIError",
+                                   "data": {"message": "context too long", "statusCode": 400, "isRetryable": False}})
+    await agent.deploy()
+    (row,) = agent.memory_manager.rows
+    assert row["outcome"] == "fail" and "context too long" in json.loads(row["outcome_payload"])["turn_error"]
+
+
+async def test_the_carry_on_waits_for_a_chat_turn_started_meanwhile(fake, tmp_path, model_server):
+    _task(tmp_path, "01-a")
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, pool_url=model_server.url)
+    await agent.deploy()
+    sid = _session(fake, "01-a")
+    _errored(fake, sid)
+    await agent.deploy()                                       # noted
+    model_server.up = True
+    fake.status[sid] = {"type": "busy"}                        # a chat turn runs in the session
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 1
+    fake.status.pop(sid)
+    await agent.deploy()
+    assert len(_auto_messages(fake, sid)) == 2
+
+
+class _Settle(_Owed):
+    """`_Owed` plus what giving up calls, and pending parks of the same kind."""
+
+    def __init__(self, token="CD-001", kind="codr_ticket", pending=()):
+        super().__init__(token)
+        self.owed[0].park.kind = kind
+        self.pending = [SimpleNamespace(token=t, kind=kind, key=("adam", "stagr")) for t in pending]
+        self.closed = []
+
+    def pending_of_kind(self, kind):
+        return [p for p in self.pending if p.kind == kind]
+
+    def take_owed(self, token, kind):
+        found = [d for d in self.owed if d.park.token == token]
+        self.owed = [d for d in self.owed if d.park.token != token]
+        return found[0] if found else None
+
+    def close_continuations(self, decisions):
+        self.closed += [d.park.token for d in decisions]
+
+
+async def _wake_tick(agent):
+    await agent.deploy()
+    for run in list(agent._wake_runs):
+        await run
+
+
+async def test_an_owed_reply_that_keeps_failing_is_given_up_on(fake, tmp_path, monkeypatch):
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+    calls = []
+
+    async def resume(fresh, *, kind, **_):
+        calls.append(kind)
+        return
+        yield  # pragma: no cover
+    agent.chat_system.stream_settle_deferrals = resume
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+    for _ in range(codr_agent.RESUME_TRIES + 2):
+        await _wake_tick(agent)
+        clock[0] += 1000
+    assert len(calls) == codr_agent.RESUME_TRIES
+    assert settle.closed == ["CD-001"] and settle.owed == []
+    assert f"failed {codr_agent.RESUME_TRIES} times" in router.sent[-1][2]
+
+
+async def test_an_owed_reply_that_fails_for_good_is_posted_once(fake, tmp_path):
+    from src.generation_events import ErrorEvent
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+
+    async def resume(fresh, *, kind, **_):
+        settle.owed.clear()                                    # ChatSystem closes a non-retryable failure
+        yield ErrorEvent(message="context too long", retryable=False)
+    agent.chat_system.stream_settle_deferrals = resume
+    await _wake_tick(agent)
+    await _wake_tick(agent)
+    (post,) = [b for _, _, b in router.sent]
+    assert "will not be asked again: context too long" in post
+
+
+async def test_an_owed_reply_folds_into_a_new_result_for_the_same_conversation(fake, tmp_path):
+    """One wake, one continuation: even an owed reply still backing off joins a
+    turn its conversation runs anyway."""
+    fake.shell_output = _shell()
+    agent, _ = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = _Settle("idle-old", kind="codr_idle", pending=["idle-new"])
+    agent._resume_backoff["idle-old"] = (1, float("inf"))
+    calls = []
+
+    async def settle(fresh, *, kind, owed=(), note=None):
+        calls.append((sorted(fresh), list(owed), kind))
+        return
+        yield  # pragma: no cover
+    agent.chat_system.stream_settle_deferrals = settle
+    await _wake_tick(agent)
+    assert calls == [(["idle-new"], ["idle-old"], "codr_idle")]
+
+
+def test_a_refused_request_is_permanent_and_an_outage_is_not():
+    from src.llm_errors import LLMCommunicationError
+    assert LLMCommunicationError("bad", status_code=400).permanent
+    assert not any(LLMCommunicationError("x", status_code=c).permanent for c in (408, 409, 429, 500, 503))
+    assert not LLMCommunicationError("Cannot connect").permanent

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import (
     Any, AsyncGenerator, AsyncIterator, Callable, Coroutine, Dict, FrozenSet, List, Optional,
-    Set, Tuple, Union,
+    Sequence, Set, Tuple, Union,
 )
 
 from config.global_config import (
@@ -539,7 +539,7 @@ class ChatSystem:
                     f"[err {err_id}] prepare_request failed for "
                     f"{user_identifier}: {e}", exc_info=True,
                 )
-                yield ErrorEvent(message=err_msg)
+                yield ErrorEvent(message=err_msg, retryable=False)
                 return
 
             if continuation is None:
@@ -1295,14 +1295,36 @@ class ChatSystem:
         does (`_claim_deferral`). A park from another conversation than the
         first claimed is restored, not settled: its decision would sit in a
         queue no drain of this conversation reads."""
-        claimed = [p for p in (self._claim_deferral(t, kind) for t in tokens) if p is not None]
+        async with aclosing(self.stream_settle_deferrals(
+                {t: (status, result) for t in tokens}, kind=kind, note=note)) as agen:
+            async for ev in agen:
+                yield ev
+
+    async def stream_settle_deferrals(
+            self, fresh: Dict[str, Tuple[str, Any]], *, kind: str,
+            owed: Sequence[str] = (), note: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Settle one conversation's deferrals of `kind` as ONE batch with ONE
+        continuation (DP-517, DP-518): `fresh` maps each pending token to its
+        own (status, result), claimed as `stream_resolve_deferral` does;
+        `owed` names settled ones whose continuation is still owed
+        (`stream_resume_continuations`). Folding both is the point: settled
+        separately, a retry and a new result of one conversation each ran a
+        turn, and the second turn was told only half of what happened.
+
+        A decision from another conversation than the first is put back:
+        a fresh one restored pending, an owed one owed again."""
         decisions = [Decision(park=p, approved=True, note=note,
-                              result=copy.deepcopy(result), outcome_status=status)
-                     for p in claimed]
+                              result=copy.deepcopy(fresh[p.token][1]), outcome_status=fresh[p.token][0])
+                     for p in (self._claim_deferral(t, kind) for t in fresh) if p is not None]
+        decisions += [d for d in (self.confirmations.take_owed(t, kind) for t in owed) if d is not None]
 
         def put_back(d: Decision) -> None:
-            self.confirmations.restore(d.park)
-            logger.error("deferral %s (%s): not in the batch's conversation; left pending",
+            if d.settled:
+                self.confirmations.owe_continuations([d])
+            else:
+                self.confirmations.restore(d.park)
+            logger.error("deferral %s (%s): not in the batch's conversation; put back",
                          d.park.token, kind)
 
         async with aclosing(self._stream_settle_batch(decisions, put_back)) as agen:
@@ -1325,9 +1347,7 @@ class ChatSystem:
         Only `CONTINUATION_RETRIED_KINDS` are ever owed, so this cannot reach
         an approval. One conversation per call, like `stream_resolve_deferrals`:
         a token from another one is put back, owed as before."""
-        owed = [d for d in (self.confirmations.take_owed(t, kind) for t in tokens) if d is not None]
-        async with aclosing(self._stream_settle_batch(
-                owed, lambda d: self.confirmations.owe_continuations([d]))) as agen:
+        async with aclosing(self.stream_settle_deferrals({}, kind=kind, owed=tokens)) as agen:
             async for ev in agen:
                 yield ev
 
@@ -1524,7 +1544,9 @@ class ChatSystem:
         stops reading at it cannot leave a finished turn owed. Anything else —
         an `ErrorEvent` (the model server down), an exception, a cancel, the
         process dying — leaves it owed, and the kind's authority asks again
-        (`stream_resume_continuations`). What can repeat is only a turn that
+        (`stream_resume_continuations`), except an `ErrorEvent` that is not
+        `retryable`: that turn would fail the same way again, so it closes
+        the mark too. What can repeat is only a turn that
         did not finish; its saved steps (DP-444) are in the history the next
         try reads."""
         completed = False
@@ -1545,6 +1567,14 @@ class ChatSystem:
                     if isinstance(ev, DoneEvent) and not completed:
                         completed = True
                         self.confirmations.close_continuations(applied)
+                    elif isinstance(ev, ErrorEvent) and not ev.retryable and not completed:
+                        # The same turn would fail the same way (a refused
+                        # request, DERPR's own bug): asking again only
+                        # repeats it, every backoff, for the row's lifetime.
+                        completed = True
+                        self.confirmations.close_continuations(applied)
+                        logger.error("continuation for %s failed for good; not owed again: %s",
+                                     ", ".join(d.park.token for d in applied), ev.message)
                     yield ev
         finally:
             if not completed:

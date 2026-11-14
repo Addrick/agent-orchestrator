@@ -19,10 +19,22 @@ class LLMCommunicationError(Exception):
             call, when one was built — used by orchestration for dump_history.
         rate_limited: True for HTTP 429 / quota errors; routing uses this to
             trigger model fallback instead of burning the retry budget.
+        status_code: the provider's HTTP status, when it answered with one.
     """
 
     def __init__(self, message: str, api_payload: Optional[Dict[str, Any]] = None,
-                 rate_limited: bool = False):
+                 rate_limited: bool = False, status_code: Optional[int] = None):
         super().__init__(message)
         self.api_payload = api_payload
         self.rate_limited = rate_limited
+        self.status_code = status_code
+
+    @property
+    def permanent(self) -> bool:
+        """The provider answered and refused the request itself (a 4xx other
+        than 408, 409 and 429: bad request, context too long, auth): sending
+        the same request again gets the same answer (DP-518). The AI SDK's
+        `isRetryable` draws the same line. A failure with no status (no
+        connection, a timeout, an empty reply) is not permanent."""
+        code = self.status_code
+        return code is not None and 400 <= code < 500 and code not in (408, 409, 429)

@@ -3760,3 +3760,24 @@ def test_unblocked_origins_and_last_activity(mem_manager):
     ]
     last = mem_manager.scope_last_activity(_scope(channel="legacy"))
     assert last is not None and now - last > timedelta(days=1)
+
+
+def test_an_owed_finalize_keeps_the_audit_blob_apply_extended(mem_manager):
+    """DP-518: `apply()` adds taint sources in memory (`add_taint_source`) after
+    the row was written. An owed row is rebuilt from the DB after a restart, so
+    the finalize stores the in-memory blob; before, only the boolean survived
+    (through MAX(turn_tainted)) and the resumed turn lost which tool tainted it."""
+    _insert_park(mem_manager, token="a")
+    audit = {"actions": [{"tool": "update_ticket"}], "tainted": True, "taint_sources": ["queue_codr_task"]}
+    assert mem_manager.finalize_parked_write("a", "resolved", "passed", owe_continuation=True,
+                                             turn_tainted=True, audit_info=audit)
+    (row,) = mem_manager.load_parked_writes(("resolved",), continuation_owed=True)
+    assert row["audit_info"]["taint_sources"] == ["queue_codr_task"] and row["turn_tainted"]
+
+
+def test_a_finalize_owing_nothing_erases_the_audit_blob_it_is_given(mem_manager):
+    _insert_park(mem_manager, token="a")
+    assert mem_manager.finalize_parked_write("a", "resolved", "approved", audit_info={"taint_sources": ["x"]})
+    cursor = mem_manager._get_connection().cursor()
+    cursor.execute("SELECT audit_info FROM Parked_Writes WHERE token = 'a'")
+    assert cursor.fetchone()[0] is None

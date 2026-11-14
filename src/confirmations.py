@@ -580,7 +580,7 @@ class ConfirmationManager:
     # row `resolved`) BEFORE its continuation turn runs, so a continuation that
     # errored or died with the process used to leave nothing to retry. The row
     # now says the turn is owed until one completes; the authority that polls
-    # the kind asks again through `ChatSystem.stream_resume_continuations`.
+    # the kind asks again through `ChatSystem.stream_settle_deferrals`.
 
     def owed_of_kind(self, kind: str) -> List[Decision]:
         """Settled deferrals of `kind` whose continuation is owed and not
@@ -1217,6 +1217,7 @@ class ConfirmationManager:
                 decision.note or self._default_reason(decision),
                 owe_continuation=park.kind in CONTINUATION_RETRIED_KINDS,
                 turn_tainted=park.turn_tainted,
+                audit_info=park.audit_info,
             )
             if not finalized and decision.status in (PARK_STATUS_APPROVED,
                                                      PARK_STATUS_FAILED):

@@ -207,6 +207,11 @@ class DoneEvent:
 class ErrorEvent:
     """Terminal event for stream_response when generation fails."""
     message: str
+    #: Whether running the same turn again could succeed (DP-518). False when
+    #: the provider refused the request itself (`LLMCommunicationError.permanent`)
+    #: or DERPR's own code failed building or running it: a retried
+    #: continuation gives up on those rather than repeat them.
+    retryable: bool = True
 
 
 @dataclass
