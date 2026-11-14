@@ -71,7 +71,6 @@ NOTIFY_TOOL = "notify_adam"
 RELAY_ACTION = "notify_relay"
 NOTICE_ACTION = "ticket_notice"
 REPEAT_LIMIT = 3            # identical tool calls / reasoning steps in a row
-RESUME_TRIES = 5            # DP-518: tries at an owed stagr reply before it is given up on
 _STALL_PREFIX = "nothing new for "
 _STALL = _STALL_PREFIX + "{} s"   # the stall guard's reason, formatted with stall_seconds
 # Stored in the action log, whose payloads are capped at 4,000 chars.
@@ -104,6 +103,7 @@ DEFAULTS: Dict[str, Any] = {
     "max_turn_seconds": 604800,
     "stall_seconds": 900,
     "max_outage_seconds": 7200,     # DP-518: a model server outage longer than this ends the ticket
+    "max_reply_retry_seconds": 86400,   # DP-518: how long an owed stagr reply is asked for again
     "check_timeout_seconds": 600,
     "notify_per_hour": 20,
     "start_tasks": True,
@@ -865,6 +865,7 @@ class CodrAgent(Agent):
         # DP-518: owed continuations whose last try failed: token -> (failures,
         # monotonic time of the next try). In memory: a restart tries at once.
         self._resume_backoff: Dict[str, Tuple[int, float]] = {}
+        self._resume_since: Dict[str, float] = {}   # token -> monotonic time of its first failed try
 
     # -- plumbing
 
@@ -1206,7 +1207,8 @@ class CodrAgent(Agent):
             # ChatSystem closed the mark: the same turn would fail the same way.
             await self._post(f"{label}: stagr's reply failed and will not be asked again: {error.message}")
         elif given_up:
-            await self._post(f"{label}: stagr's reply failed {RESUME_TRIES} times and will not be asked "
+            hours = float(self.cfg["max_reply_retry_seconds"]) / 3600
+            await self._post(f"{label}: stagr's reply kept failing for {hours:g} h and will not be asked "
                              "again. The result is in stagr's conversation for its next turn.")
 
     @staticmethod
@@ -1224,11 +1226,15 @@ class CodrAgent(Agent):
 
     def _note_owed(self, tokens: List[str], kind: str) -> List[str]:
         """After a wake: back off each of `tokens` whose reply is still owed
-        (the turn failed), forget the rest (DP-518). A reply that has failed
-        `RESUME_TRIES` times is given up on (the mark closed, durable) and
-        returned: something that fails that often is not an outage the
-        backoff waits out, and each try runs a whole stagr turn, which may
-        act on codr's box before it fails, while no ticket can start."""
+        (the turn failed), forget the rest (DP-518). A reply still failing
+        `max_reply_retry_seconds` (24 h) after its first failed try is given
+        up on (the mark closed, durable) and returned. A time limit, not a
+        count: what still reaches here is an outage-type failure (a failure
+        that would repeat closes the mark itself, `ErrorEvent.retryable`), and
+        five tries on this backoff spanned under ten minutes, far shorter
+        than the outages the retry exists for (codr waits two hours). In
+        memory: a restart starts the 24 h again, bounded by the row's
+        retention."""
         confirmations = getattr(self.chat_system, "confirmations", None)
         if confirmations is None:
             return []
@@ -1238,19 +1244,24 @@ class CodrAgent(Agent):
         for token in tokens:
             if token not in owed:
                 self._resume_backoff.pop(token, None)
+                self._resume_since.pop(token, None)
                 continue
+            now = time.monotonic()
             failures = self._resume_backoff.get(token, (0, 0.0))[0] + 1
-            if failures >= RESUME_TRIES:
+            since = self._resume_since.setdefault(token, now)
+            if now - since >= float(self.cfg["max_reply_retry_seconds"]):
                 self._resume_backoff.pop(token, None)
+                self._resume_since.pop(token, None)
                 decision = confirmations.take_owed(token, kind)
                 if decision is not None:
                     confirmations.close_continuations([decision])
                 given_up.append(token)
-                logger.error("codr agent: stagr's reply about %s failed %d times; giving up", token, failures)
+                logger.error("codr agent: stagr's reply about %s failed for %.0f s (%d tries); giving up",
+                             token, now - since, failures)
                 continue
-            self._resume_backoff[token] = (failures, time.monotonic() + min(600.0, tick * 2 ** (failures - 1)))
-            logger.warning("codr agent: stagr's reply about %s did not complete (try %d of %d); asking again later",
-                           token, failures, RESUME_TRIES)
+            self._resume_backoff[token] = (failures, now + min(600.0, tick * 2 ** (failures - 1)))
+            logger.warning("codr agent: stagr's reply about %s did not complete (try %d); asking again later",
+                           token, failures)
         return given_up
 
     def _mark_unsettled(self, tokens: List[str], kind: str) -> None:

@@ -1586,7 +1586,9 @@ async def _wake_tick(agent):
         await run
 
 
-async def test_an_owed_reply_that_keeps_failing_is_given_up_on(fake, tmp_path, monkeypatch):
+async def test_an_owed_reply_that_keeps_failing_is_given_up_on_after_a_day(fake, tmp_path, monkeypatch):
+    """A time limit, not a count: five tries on the backoff spanned under ten
+    minutes, so any longer outage dropped the reply DP-518 exists to keep."""
     fake.shell_output = _shell()
     agent, router = _agent(tmp_path, start_tasks=False)
     agent.chat_system.confirmations = settle = _Settle()
@@ -1599,12 +1601,35 @@ async def test_an_owed_reply_that_keeps_failing_is_given_up_on(fake, tmp_path, m
     agent.chat_system.stream_settle_deferrals = resume
     clock = [1000.0]
     monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
-    for _ in range(codr_agent.RESUME_TRIES + 2):
+    for _ in range(12):                                        # two hours of failed tries, 10 min apart
         await _wake_tick(agent)
-        clock[0] += 1000
-    assert len(calls) == codr_agent.RESUME_TRIES
+        clock[0] += 601
+    assert len(calls) == 12 and settle.closed == [] and not router.sent, "an outage is waited out"
+    clock[0] += 86400
+    await _wake_tick(agent)
     assert settle.closed == ["CD-001"] and settle.owed == []
-    assert f"failed {codr_agent.RESUME_TRIES} times" in router.sent[-1][2]
+    assert "kept failing for 24 h" in router.sent[-1][2]
+    await _wake_tick(agent)
+    assert len(calls) == 13, "never asked again"
+
+
+async def test_an_owed_reply_survives_a_half_hour_outage(fake, tmp_path, monkeypatch):
+    from src.generation_events import DoneEvent
+    fake.shell_output = _shell()
+    agent, router = _agent(tmp_path, start_tasks=False)
+    agent.chat_system.confirmations = settle = _Settle()
+    clock = [1000.0]
+    monkeypatch.setattr(codr_agent.time, "monotonic", lambda: clock[0])
+
+    async def resume(fresh, *, kind, **_):
+        if clock[0] >= 1000.0 + 1800:                          # the server is back
+            settle.owed.clear()
+            yield DoneEvent(text="queued CD-002.", response_type=ResponseType.LLM_GENERATION)
+    agent.chat_system.stream_settle_deferrals = resume
+    while not router.sent and clock[0] < 1000.0 + 7200:
+        await _wake_tick(agent)
+        clock[0] += 30
+    assert router.sent and router.sent[-1][2] == "stagr [CD-001]: queued CD-002." and settle.closed == []
 
 
 async def test_an_owed_reply_that_fails_for_good_is_posted_once(fake, tmp_path):

@@ -53,8 +53,8 @@ reports through its own path.
   of whether that reply actually happened. If it did not — the model server was
   down and the reply errored, or derpr restarted halfway through it — the codr
   agent asks stagr for it again on a later tick, until one completes, and never
-  again after one has. It gives up, and tells you, after five failed tries, or
-  at once when the failure would repeat (the model server refused the request,
+  again after one has. It gives up, and tells you, once the reply has kept
+  failing for `max_reply_retry_seconds` (default 24 hours), or at once when the failure would repeat (the model server refused the request,
   e.g. the context is too long). If another result for the same conversation
   arrives meanwhile, stagr gets one turn covering both. The answer itself was already written into the
   conversation the first time, so a second try does not repeat the work; stagr
@@ -1007,6 +1007,7 @@ Settings, per instance in `agents.json` under `codr`:
 - `max_attempts` (default `3`) per task.
 - `max_turn_seconds` (default `604800`, one week; default per-attempt limit when a ticket sets no `max_seconds:`), `stall_seconds` (default `900`).
 - `max_outage_seconds` (default `7200`): how long an attempt waits for the model server to answer again before it ends `outage_timeout` (DP-518).
+- `max_reply_retry_seconds` (default `86400`): how long stagr's reply about a ticket or about codr being free is asked for again while it keeps failing (DP-518). Tries back off from 30 s to every 10 minutes; a derpr restart starts the period again.
 - `check_timeout_seconds` (default `600`): how long one task's check may run.
 - `notify_per_hour` (default `20`; meant never to be hit unless something is broken).
 - `start_tasks` (default `true`): `false` keeps the watcher and relay running but
