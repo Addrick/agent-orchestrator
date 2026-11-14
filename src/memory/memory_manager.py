@@ -225,10 +225,14 @@ class MemoryManager:
                 raise
 
     def close(self) -> None:
-        if self._conn:
-            self._conn.close()
-            self._conn = None
-            logger.info(f"Database connection to '{self.db_path}' closed.")
+        # Under the lock every query holds: a fire-and-forget sweep thread
+        # (`ConfirmationManager` -> `purge_parked_writes`) may be mid-query,
+        # and closing the connection under it segfaults the process (DP-520).
+        with self._lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
+                logger.info(f"Database connection to '{self.db_path}' closed.")
 
     def create_schema(self) -> None:
         with self._lock:
