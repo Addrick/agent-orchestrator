@@ -1181,10 +1181,18 @@ class ToolLoop:
             # a deferral its result declares still parks (`_execute_calls` ->
             # `_settled_call`, DP-493). A call refused for a bound argument
             # (DP-475) is answered in the executed batch, never parked.
-            write_calls = [
+            ask_calls = [
                 c for c in admitted if _needs_approval(persona, c["name"])
                 and _bind_refusal(c["name"], c.get("arguments") or {}) is None
             ]
+            # DP-514: a call whose tool's settler can answer it now (what it
+            # asks for already holds, or cannot work) is answered in the
+            # executed batch too, with the settler's read, instead of
+            # prompting the operator for a no-op. The settler never acts.
+            settled = await self._settle_ask_calls(ask_calls)
+            write_calls = [c for c in ask_calls if id(c) not in settled]
+            # A settled read stays here: its answer enters history like any
+            # read's, so an untrusted one must taint the turn below.
             read_calls = [
                 c for c in admitted
                 if not is_write_tool(c["name"])
@@ -1199,6 +1207,7 @@ class ToolLoop:
                 conversation_history, group_id=group_id, offered=offered,
                 turn_tainted=turn_tainted,
                 taint_sources=taint_sources,
+                settled=settled,
             ):
                 yield tool_ev
 
@@ -1617,6 +1626,23 @@ class ToolLoop:
         text = (done_text or "".join(parts)).strip()
         return (text or None), payload
 
+    async def _settle_ask_calls(
+        self, calls: List[Dict[str, Any]],
+    ) -> Dict[int, Dict[str, Any]]:
+        """DP-514: `id(call)` -> the settler's answer, for each call under ask
+        that `ToolManager.settle` can answer without an approval prompt."""
+        answers = await asyncio.gather(*(
+            self.tool_manager.settle(c["name"], c.get("arguments") or {})
+            for c in calls
+        ))
+        settled = {id(c): a for c, a in zip(calls, answers) if a is not None}
+        if settled:
+            logger.info(
+                "tool-loop: answered %d call(s) under ask without parking: %s",
+                len(settled), [c["name"] for c in calls if id(c) in settled],
+            )
+        return settled
+
     async def _execute_calls(
         self,
         calls: List[Dict[str, Any]],
@@ -1626,6 +1652,7 @@ class ToolLoop:
         offered: AbstractSet[str],
         turn_tainted: bool = False,
         taint_sources: Optional[List[str]] = None,
+        settled: Optional[Dict[int, Dict[str, Any]]] = None,
     ) -> AsyncIterator[LoopEvent]:
         """Execute a batch of tool calls, yielding start/result events
         and appending results to the shared conversation history. Calls in
@@ -1638,7 +1665,10 @@ class ToolLoop:
 
         `offered` is required, not defaulted (DP-404): a call outside it is
         answered with the refusal without reaching the tool manager, and
-        `execute_tool` itself re-checks the same set for the rest."""
+        `execute_tool` itself re-checks the same set for the rest. A call in
+        `settled` (keyed by `id(call)`, DP-514) is answered with its
+        settler's result and never reaches its handler."""
+        settled = settled or {}
         # Resolve identity + emit all starts before any execution.
         resolved: List[Dict[str, Any]] = []
         for call_item in calls:
@@ -1653,10 +1683,12 @@ class ToolLoop:
                 group_id=group_id,
             )
 
-        async def _run_one(name: str, args: Dict[str, Any]) -> Any:
+        async def _run_one(call_item: Dict[str, Any], name: str, args: Dict[str, Any]) -> Any:
             refused = _refusal(name, args, offered)
             if refused is not None:
                 return refused
+            if id(call_item) in settled:
+                return settled[id(call_item)]
             try:
                 return await self.tool_manager.execute_tool(name, offered, **args)
             except Exception as e:
@@ -1666,7 +1698,8 @@ class ToolLoop:
                 return {"error": f"Tool execution failed: {e}"}
 
         tasks = [
-            asyncio.ensure_future(_run_one(r["name"], r["args"])) for r in resolved
+            asyncio.ensure_future(_run_one(c, r["name"], r["args"]))
+            for c, r in zip(calls, resolved)
         ]
         try:
             results = await asyncio.gather(*tasks)

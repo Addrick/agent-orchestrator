@@ -59,6 +59,7 @@ def _manager():
     m = MagicMock()
     m.execute_tool = AsyncMock(return_value={"result": "secret bytes"})
     m.enrich_audit_action = AsyncMock(return_value=None)
+    m.settle = AsyncMock(return_value=None)
     return m
 
 

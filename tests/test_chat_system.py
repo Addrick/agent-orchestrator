@@ -49,6 +49,7 @@ def chat_system_with_mocks():
     route_stream_through_generate_response(text_engine)
     mock_tool_manager = AsyncMock()
     mock_tool_manager.get_tool_definitions = MagicMock(return_value=[])
+    mock_tool_manager.settle = AsyncMock(return_value=None)
 
     # Bare turn text: these tests assert message content, not DP-431's
     # stamps (covered in tests/test_prompt_timestamps.py).
