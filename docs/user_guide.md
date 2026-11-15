@@ -1677,6 +1677,27 @@ Tools are capabilities the LLM can invoke during a conversation. Available tools
 | `web_search` | Read | Search the web via DuckDuckGo. Params: `query`, `max_results` (default 5). |
 | `pubmed_search` | Read | Search PubMed via NCBI E-utilities (DP-501). Params: `query` (PubMed syntax: `[tiab]`, `[au]`, `[dp]`, `[pt]` tags, AND/OR/NOT), `max_results` (default 5, capped by `PUBMED_SEARCH_LIMIT_MAX`, default 20), `sort` (`relevance` or `date`). Each hit: PMID, title, first 6 authors, journal, year, DOI, abstract (cut at `PUBMED_ABSTRACT_MAX_CHARS`, default 3000, and flagged `abstract_truncated`), and `full_text_url` when the free PMC full text exists. Needs no account; set `NCBI_API_KEY` in `.env` to raise NCBI's limit from 3 to 10 requests/s, and optionally `NCBI_EMAIL`. |
 | `google_grounding_search` | Special | Enables Google's native search grounding. Gemini models only. |
+| `run_python` | Read | Run a short Python 3 script and get its output back (DP-522): arithmetic, statistics, dates, unit conversion, checking a formula. Params: `code` (at most 32 KB; `print` what you want back), `timeout_seconds` (default 30, at most 120). Returns `exit_code` and `output` (stdout and stderr together, the middle of very long output cut); `exit_code` 124 means it hit the time limit. Any persona can be given it, and it runs without an approval prompt — see below for why that is safe. Needs `STAGR_SERVER_URL`; with it unset the tool answers with an error. |
+
+#### `run_python`: where the code runs, and why it needs no approval (DP-522)
+
+The script runs on stagr's setup VM, but never as stagr: each call is a fresh, throwaway
+process under a separate `compute` user with **no network at all** (not LAN, not WAN,
+whatever stagr's switches say — it has only a loopback interface), no view of `/home`, a
+read-only system, its own empty `/tmp` that is deleted when the call ends, 512 MB of memory,
+one CPU and a hard time limit. Nothing it writes survives the call, and nothing it reads can
+leave the box, which is why it can run unapproved: the worst a bad script can do is waste its
+own time limit. Two calls run at a time across all personas; a third waits its turn.
+
+What it has: Python 3 and its standard library (`math`, `statistics`, `fractions`,
+`decimal`, `datetime`, `itertools`, `json`, `re`, …), plus whatever Python packages are
+installed system-wide on stagr's box. It cannot install packages or fetch anything.
+
+Not a vault: the script's text passes through stagr's box on its way in, so do not put a
+secret in one.
+
+Prefer it over doing arithmetic in the model's head: give a persona `run_python` in its
+`enabled_tools` and it can check its own numbers.
 
 ### Zammad Tools (requires `service_bindings: ["zammad"]`)
 
