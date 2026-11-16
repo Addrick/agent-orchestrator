@@ -8,9 +8,12 @@ interface Props {
 /** Channel rail (DP-136 6b). Lists the persona's channels grouped by source,
  *  switches the active channel (re-scopes the transcript), and creates a new
  *  web_ui channel (materializes on the first submit). The active channel is
- *  driven by `store.activeChannel`, not local position. */
+ *  driven by `store.activeChannel`, not local position.
+ *
+ *  DP-523: under a merged memory mode every channel shows the same
+ *  conversation, so the rail says so and offers no switch or new channel. */
 export function Channels({ store }: Props) {
-  const { channels, activeChannel, switchChannel, newChannel } = store
+  const { channels, activeChannel, channelsMerged, switchChannel, newChannel, persona } = store
   const [filter, setFilter] = useState('')
 
   const onNew = () => {
@@ -35,10 +38,17 @@ export function Channels({ store }: Props) {
       <div className="chead">
         <span>Channels</span>
         <span className="grow" />
-        <button className="ibtn" title="new channel" onClick={onNew}>
-          +
-        </button>
+        {!channelsMerged && (
+          <button className="ibtn" title="new channel" onClick={onNew}>
+            +
+          </button>
+        )}
       </div>
+      {channelsMerged && (
+        <div className="chanmerged">
+          {persona?.memory_mode} memory: every channel shows one merged conversation
+        </div>
+      )}
       <div className="searchwrap">
         <input
           className="search"
@@ -57,6 +67,7 @@ export function Channels({ store }: Props) {
                 className={
                   'chanitem' + (it.channel === activeChannel ? ' active' : '')
                 }
+                disabled={channelsMerged}
                 onClick={() => void switchChannel(it.channel)}
               >
                 <div className="av">{it.label.slice(0, 2).toUpperCase()}</div>
@@ -71,9 +82,11 @@ export function Channels({ store }: Props) {
             ))}
           </div>
         ))}
-        <button className="newchan" onClick={onNew}>
-          + new web_ui channel
-        </button>
+        {!channelsMerged && (
+          <button className="newchan" onClick={onNew}>
+            + new web_ui channel
+          </button>
+        )}
       </div>
     </div>
   )

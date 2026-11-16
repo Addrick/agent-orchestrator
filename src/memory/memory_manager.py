@@ -1158,6 +1158,17 @@ class MemoryManager:
             return None
         return dict(row)
 
+    def latest_portal_row_id(self, persona_name: str, user_identifier: str,
+                             channel: str) -> Optional[int]:
+        """`interaction_id` of a portal session's latest visible row (any
+        role) — the row a retry archives or answers (DP-523). None for an
+        empty session."""
+        with self._lock:
+            row = self._latest_visible_row(
+                self._get_connection().cursor(), persona_name, user_identifier, channel,
+            )
+        return int(row['interaction_id']) if row else None
+
     def set_tool_context(self, interaction_id: int,
                          tool_context: Optional[str]) -> bool:
         """Write a row's `tool_context` column, leaving its content untouched.

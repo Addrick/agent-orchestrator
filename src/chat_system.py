@@ -413,6 +413,7 @@ class ChatSystem:
             continuation: Optional[_ContinuationState] = None,
             origin: Optional[Origin] = None,
             continue_turn: Optional[ContinueTurn] = None,
+            retry_row_id: Optional[int] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
@@ -499,6 +500,22 @@ class ChatSystem:
             )
             if target is None:
                 yield ErrorEvent(message=refusal)
+                return
+
+        # DP-523: a retry overwrites (or answers) this channel's latest row,
+        # but a merged-memory persona's screen can end on another channel's
+        # row. Refuse the mismatch, as continue does, rather than stream a
+        # reply into a row the operator cannot see. None = no check
+        # (non-portal callers).
+        if is_retry and continuation is None and retry_row_id is not None:
+            latest_id = self.memory_manager.latest_portal_row_id(
+                persona_name, user_identifier, channel,
+            )
+            if latest_id != retry_row_id:
+                yield ErrorEvent(message=(
+                    "Nothing to regenerate: the message on screen is not this "
+                    "channel's latest message."
+                ))
                 return
 
         ctx = RequestContext(
@@ -1051,6 +1068,7 @@ class ChatSystem:
             client_messages: Optional[List[Dict[str, Any]]] = None,
             origin: Optional[Origin] = None,
             continue_turn: Optional[ContinueTurn] = None,
+            retry_row_id: Optional[int] = None,
     ) -> AsyncIterator[GenerationEvent]:
         """Portal-facing streaming entry. Yields TokenEvent /
         ToolCallStartEvent / ToolCallResultEvent / DoneEvent / ErrorEvent.
@@ -1078,6 +1096,7 @@ class ChatSystem:
             client_messages=client_messages,
             origin=origin,
             continue_turn=continue_turn,
+            retry_row_id=retry_row_id,
         )) as agen:
             async for ev in agen:
                 yield ev

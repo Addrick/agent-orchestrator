@@ -1853,6 +1853,15 @@ class KoboldEngineAdapter:
                     row_id=row_id if isinstance(row_id, int) and not isinstance(row_id, bool) else None,
                 )
 
+            # DP-523: the row a retry means to replace (or answer) — the last
+            # one on the portal's screen. Refused in the kernel when it is not
+            # the row the retry would overwrite. Absent = no check.
+            raw_retry_id = data.get("derpr_retry_id")
+            retry_row_id: Optional[int] = (
+                raw_retry_id if is_retry and isinstance(raw_retry_id, int)
+                and not isinstance(raw_retry_id, bool) else None
+            )
+
             # DP-487: one running turn per conversation. Checked before the
             # stale-view guard, which would also refuse (the running turn has
             # saved its user row) but with an answer the portal cannot act on:
@@ -1906,6 +1915,7 @@ class KoboldEngineAdapter:
                     message=user_text,
                     is_retry=is_retry,
                     continue_turn=continue_turn,
+                    retry_row_id=retry_row_id,
                     local_inference_config=local_inference_config,
                     client_messages=msgs_in or None,
                     origin=origin,
@@ -1994,6 +2004,7 @@ class KoboldEngineAdapter:
                     message=user_text,
                     is_retry=is_retry,
                     continue_turn=continue_turn,
+                    retry_row_id=retry_row_id,
                     local_inference_config=local_inference_config,
                     client_messages=None,  # Explicitly None to force DB history rebuild
                     origin=origin,
