@@ -188,6 +188,32 @@ def test_get_server_history_isolates_by_persona(mem_manager):
     assert history[0]['content'] == "Msg A"
 
 
+def test_close_waits_for_a_query_in_flight_on_another_thread(mem_manager):
+    """DP-520: a fire-and-forget sweep thread (ConfirmationManager ->
+    purge_parked_writes) can be mid-query when the owner closes the manager.
+    Closing the sqlite connection under it segfaulted the CI worker, so close()
+    must wait for the lock every query holds."""
+    mem_manager._get_connection()
+    in_query, release = concurrent.futures.Future(), concurrent.futures.Future()
+
+    def query():
+        with mem_manager._lock:  # what every query holds around its cursor
+            in_query.set_result(True)
+            release.result(timeout=5)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        sweep = pool.submit(query)
+        in_query.result(timeout=5)
+        closing = pool.submit(mem_manager.close)
+        time.sleep(0.2)
+        assert not closing.done(), "close() ran while a query held the connection"
+        assert mem_manager._conn is not None
+        release.set_result(True)
+        closing.result(timeout=5)
+        sweep.result(timeout=5)
+    assert mem_manager._conn is None
+
+
 # --- Schema Migration Tests ---
 
 @pytest.fixture
