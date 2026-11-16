@@ -537,6 +537,27 @@ def test_queued_chat_blocks_a_new_background_job():
     assert router.admit_background(NOW) is None
 
 
+def test_a_job_queues_only_when_another_job_is_all_that_is_in_its_way():
+    """DP-524: refusing Hindsight's second concurrent call got the R9700 marked down in its pool."""
+    router = ir.Router([box("r9700", strata=True)], MOVE, QUIET)
+    assert router.background_queue(NOW) is False  # free: it is admitted, not queued
+    router.primary.background = asyncio.Event()
+    assert router.background_queue(NOW) is True
+    router.waiting = 1  # chat queued
+    assert router.background_queue(NOW) is False
+
+
+@pytest.mark.parametrize("kw", [
+    {"inflight": 1},
+    {"last_active": NOW - 1},  # inside the hold-off
+    {"healthy": False},
+])
+def test_a_job_never_queues_behind_chat(kw):
+    router = ir.Router([box("r9700", strata=True, **kw)], MOVE, QUIET)
+    router.primary.background = asyncio.Event()
+    assert router.background_queue(NOW) is False
+
+
 def test_background_work_stays_off_boxes_not_named_for_it():
     """dt21's :5001 is Adam's own Strata; only the boxes configured for it take Hindsight."""
     router = ir.Router([box("r9700", strata=True, inflight=1), box("dt21", strata=True)], MOVE, QUIET)
@@ -767,6 +788,62 @@ async def test_a_background_job_is_refused_at_once_while_chat_runs():
         assert len(engine.requests) == 1  # the probe never reached the box
         chat_writer.close()
         engine.release.set()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_background_jobs_run_one_after_another_not_503():
+    """DP-524: Hindsight sends two calls at once; the second waits for the first, then runs."""
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        first = asyncio.ensure_future(h.fetch_bg(HS_JOB))
+        await asyncio.wait_for(engine.started.wait(), 5)
+        second = asyncio.ensure_future(h.fetch_bg(HS_JOB))
+        await _until(lambda: h.router.background_counts["queued"] == 1)
+        assert len(engine.requests) == 1  # one request at a time on the box
+        assert [job.kind for job in h.router.held] == ["background"]  # the statusline shows it waiting
+        engine.hold = False
+        engine.release.set()
+        assert (await asyncio.wait_for(first, 5)).startswith(b"HTTP/1.1 200 OK")
+        assert (await asyncio.wait_for(second, 5)).startswith(b"HTTP/1.1 200 OK")
+        assert len(engine.requests) == 2
+        assert h.router.background_counts["refused"] == 0
+        assert h.router.held == []
+
+
+@pytest.mark.asyncio
+async def test_chat_refuses_queued_background_jobs_too():
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        first_reader, first_writer = await h.open_bg(HS_JOB)
+        await asyncio.wait_for(engine.started.wait(), 5)
+        second = asyncio.ensure_future(h.fetch_bg(HS_JOB))
+        await _until(lambda: h.router.background_counts["queued"] == 1)
+        engine.hold = False
+        chat = asyncio.ensure_future(h.fetch(body("user turn")))
+        assert (await asyncio.wait_for(first_reader.read(), 5)).startswith(b"HTTP/1.1 503")  # preempted
+        assert (await asyncio.wait_for(second, 5)).startswith(b"HTTP/1.1 503")  # refused, never ran
+        assert (await asyncio.wait_for(chat, 5)).startswith(b"HTTP/1.1 200 OK")
+        assert len(engine.requests) == 2  # the first job and the chat
+        first_writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_job_whose_client_leaves_never_reaches_the_box():
+    engine = JsonEngine()
+    engine.hold = True
+    async with BackgroundHarness({"r9700": engine}) as h:
+        first = asyncio.ensure_future(h.fetch_bg(HS_JOB))
+        await asyncio.wait_for(engine.started.wait(), 5)
+        _, second_writer = await h.open_bg(HS_JOB)
+        await _until(lambda: h.router.held)
+        second_writer.close()
+        await _until(lambda: not h.router.held)
+        engine.release.set()
+        assert (await asyncio.wait_for(first, 5)).startswith(b"HTTP/1.1 200 OK")
+        await asyncio.sleep(0.05)
+        assert len(engine.requests) == 1
 
 
 @pytest.mark.asyncio

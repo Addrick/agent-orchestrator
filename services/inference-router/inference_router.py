@@ -9,8 +9,8 @@ not both. This router does both, using only the request's own messages, so clien
 no session header and no configuration.
 
 Background work (DP-405B): Hindsight reaches the router on a second port. A job there runs
-only on an idle Strata box with no chat for a hold-off, is refused with a 503 otherwise (its
-nginx pool hands it to another worker), and is preempted -- its upstream closed, which Strata
+only on an idle Strata box with no chat for a hold-off, waits behind another job (DP-524), is
+refused with a 503 when chat is in the way (its nginx pool hands it to another worker), and is preempted -- its upstream closed, which Strata
 turns into a cancel -- the moment a chat request wants the box. Its reply is held whole and
 sent on only when complete, so a cut-off job is always a 5xx, never a short 200.
 
@@ -25,7 +25,7 @@ import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Iterable, Literal, Optional, Sequence, Union
 from urllib.parse import urlsplit
 
 log = logging.getLogger("inference_router")
@@ -217,25 +217,38 @@ class Router:
         unknown = self.background_names - {b.name for b in self.backends}
         if unknown:  # a typo here would silently send every Hindsight job elsewhere
             raise ValueError(f"background boxes {sorted(unknown)} are not in ROUTER_BACKENDS")
-        self.background_counts = {"admitted": 0, "refused": 0, "preempted": 0, "incomplete": 0}
+        self.background_counts = {"admitted": 0, "refused": 0, "queued": 0, "preempted": 0, "incomplete": 0}
         self.expected_model: Optional[str] = None  # the primary's, kept while it is down
         self.changed = asyncio.Event()  # replaced on each wake; waiters resume in arrival order
         self.waiting = 0
         self.held: list[Job] = []  # chat requests waiting in _hold, oldest first (DP-499 statusline)
 
-    def admit_background(self, now: float) -> Optional[Backend]:
-        """A box a background job may start on now, or None: then it is refused, never held.
+    def _chat_free(self, backend: Backend, now: float) -> bool:
+        """Whether chat leaves this box to background work: none in flight, and none for the hold-off."""
+        return (backend.name in self.background_names and backend.healthy and backend.strata and backend.idle
+                and now - backend.last_active >= self.holdoff_s)
 
-        Refusing at once is what keeps Hindsight's startup probe and its nginx pool fast: a
-        held job would sit on a pool slot that another worker could have served.
-        """
+    def admit_background(self, now: float) -> Optional[Backend]:
+        """A box a background job may start on now, or None (see background_queue)."""
         if self.waiting:  # chat is queued: it gets the next free box
             return None
         for backend in self.backends:
-            if (backend.name in self.background_names and backend.healthy and backend.strata and backend.idle
-                    and backend.background is None and now - backend.last_active >= self.holdoff_s):
+            if self._chat_free(backend, now) and backend.background is None:
                 return backend
         return None
+
+    def background_queue(self, now: float) -> bool:
+        """Whether a job that cannot start now should wait rather than be refused (DP-524).
+
+        Only another background job may be in its way. Strata runs one request at a time, so
+        Hindsight's concurrent calls have to queue somewhere, and a 503 for this case made nginx
+        mark the R9700 down: with no other live worker, every retry failed in seconds and the
+        task dropped the call that was running. Chat still means an immediate 503, so Hindsight's
+        pool can try elsewhere and no job sits in the router while someone is chatting.
+        """
+        if self.waiting:
+            return False
+        return any(self._chat_free(b, now) and b.background is not None for b in self.backends)
 
     def preempt(self, backend: Backend) -> None:
         """Chat wants this box: stop its background job, if one runs and is not already stopping."""
@@ -592,7 +605,7 @@ async def relay(
 class Server:
     def __init__(self, router: Router, background: bool = False) -> None:
         self.router = router
-        self.background = background  # the listener Hindsight's pool reaches: preemptible, never held
+        self.background = background  # the listener Hindsight's pool reaches: preemptible, never held behind chat
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -660,18 +673,51 @@ class Server:
                 self.router.held.remove(job)
             gone.cancel()
 
+    async def _queue_background(
+        self, reader: asyncio.StreamReader, requester: str, prompt_chars: int,
+    ) -> Union[Backend, None, Literal[False]]:
+        """The box to run on; None to refuse; False if the client left while queued (DP-524).
+
+        Waits on the same wake-ups as _hold, so jobs start oldest first. Returns with no await
+        between the admit and the caller claiming the box, so two woken jobs cannot both take it.
+        """
+        router = self.router
+        backend = router.admit_background(time.monotonic())
+        if backend is not None or not router.background_queue(time.monotonic()):
+            return backend
+        router.background_counts["queued"] += 1
+        job = Job(requester, "background", time.monotonic(), prompt_chars)
+        router.held.append(job)
+        gone = asyncio.ensure_future(_client_closed(reader))
+        try:
+            while True:
+                changed = asyncio.ensure_future(router.changed.wait())
+                await asyncio.wait({gone, changed}, return_when=asyncio.FIRST_COMPLETED)
+                changed.cancel()
+                if gone.done():
+                    return False
+                now = time.monotonic()
+                backend = router.admit_background(now)
+                if backend is not None or not router.background_queue(now):
+                    return backend
+        finally:
+            router.held.remove(job)
+            gone.cancel()
+
     async def _background(
         self, lines: list[bytes], body: bytes, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         requester: str = BACKGROUND_REQUESTER,
     ) -> None:
-        """Run a Hindsight job if a box is free of chat; refuse it at once otherwise.
+        """Run a Hindsight job if a box is free of chat: at once, or after the jobs ahead of it.
 
-        The reply is read whole before anything is sent, so the only outcomes are the box's own
-        complete answer or a 5xx: a preempt or a cut-off reply can never reach Hindsight as a 200
-        it would read as a document with no facts.
+        Refused at once when chat is in the way. The reply is read whole before anything is sent,
+        so the only outcomes are the box's own complete answer or a 5xx: a preempt or a cut-off
+        reply can never reach Hindsight as a 200 it would read as a document with no facts.
         """
         router = self.router
-        backend = router.admit_background(time.monotonic())
+        backend = await self._queue_background(reader, requester, len(body))
+        if backend is False:  # Hindsight hung up while queued; no box ever saw it
+            return
         if backend is None:
             router.background_counts["refused"] += 1
             _respond(writer, b"503 Service Unavailable", {"error": "busy with chat; try another worker"})

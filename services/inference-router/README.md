@@ -44,8 +44,15 @@ Hindsight's nginx pool (`hindsight-kobold-proxy`, CT100 `/opt/configs/hindsight/
 
 - A job runs only on a background box that is **running Strata** (its `/metrics` has an `engine` block; kcpp's
   cancel-on-disconnect is unverified), has no chat in flight or queued, runs no other job, and has had no chat for
-  the hold-off. Otherwise: **503 at once, never held.** nginx then gives the job to the next worker, and Hindsight's
-  startup LLM probe (fail-open, capped at 10 s in 1.2.0) is never slowed by the router.
+  the hold-off. When chat is in the way: **503 at once, never held behind chat.** nginx then gives the job to the
+  next worker, and Hindsight's startup LLM probe (fail-open, capped at 10 s in 1.2.0) is never slowed by chat.
+- **Jobs queue behind jobs (DP-524).** When the only thing in the way is another background job, the new one waits
+  in the router (`Router.held`, kind `background`; counted in `queued`) and starts when the box frees up, oldest
+  first. Chat arriving while jobs wait refuses them with a 503 as above. Before DP-524 the second of Hindsight's
+  concurrent calls (`HINDSIGHT_API_LLM_MAX_CONCURRENT=2`) got a 503. With the farm off, nginx tried the 11 dead
+  slots, counted the 503s against `max_fails` and marked `:5007` down. Every retry then failed within seconds, the
+  task failed, and Hindsight dropped the call that was running on Strata, which showed up as a `cancel` about 10 s in
+  (2026-11-15).
 - **Chat preempts.** A chat request routed to a box that is running a job closes that job's upstream (Strata
   stops within its 0.5 s disconnect watch, verified on CT102 2026-11-04), the job gets a 503, and the chat goes in.
 - The job's reply is read **whole** before anything is sent. A reply that fails its framing (`Content-Length`,
@@ -111,10 +118,12 @@ engine's error, though an HTML error page from an older conf still counts as a s
 save-on-stop / restore-on-start units are a separate install: `services/strata/README.md`.
 
 Background work also needs, in `kobold-lb.conf`'s `kobold_pool`, a
-`server 10.0.0.70:5007 max_fails=2 fail_timeout=60s;` line, and in its `location /` the line
+`server 10.0.0.70:5007 max_fails=0;` line, and in its `location /` the line
 `proxy_next_upstream error timeout http_502 http_503 non_idempotent;`. That way a refused or preempted
 job (503) or a schema failure (502) goes to the next worker. Without `non_idempotent`, nginx never re-sends
-a POST. Then run `docker restart hindsight-kobold-proxy`.
+a POST. Keep `max_fails=0` on that line: nginx counts each 503 it retries as a failure, so with `max_fails=2` two
+chat refusals took the R9700 out of the pool for 60 s (DP-524). The router already says busy, and a stopped CT is
+caught per request by `proxy_connect_timeout`. Then run `docker restart hindsight-kobold-proxy`.
 
 Update the router: copy the file, `docker restart inference-router`.
 
