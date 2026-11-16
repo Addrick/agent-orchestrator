@@ -57,6 +57,9 @@ export interface ChatRequest {
   derpr_think_open?: boolean
   // The row being continued; the engine refuses if it would extend another.
   derpr_continue_id?: number
+  // DP-523: the row a retry replaces (or answers) — the last one on screen.
+  // The engine refuses if it would overwrite another.
+  derpr_retry_id?: number
   // DP-447 stale-view guard: the interaction_id this screen ends on (null for
   // an empty conversation). The engine refuses the turn with 409 on mismatch.
   derpr_expected_last_id?: number | null

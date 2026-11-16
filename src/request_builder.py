@@ -50,6 +50,15 @@ MAX_CONVERSATION_TAINTS = 10000
 _PROMPT_STAMP = re.compile(r"^\[[A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] ")
 
 
+#: DP-523: memory modes whose history scope spans every portal channel. The
+#: portal is one user (`portal`) with no server, so `fetch_raw_history`'s
+#: personal and server scopes cover all of its channels, as the global one
+#: does. The portal's channel rail reads this (as `channels_merge`) instead
+#: of keeping its own copy; `tests/test_retry_row_guard.py` pins it to the
+#: dispatch.
+PORTAL_MERGED_MODES = frozenset({MemoryMode.GLOBAL, MemoryMode.PERSONAL, MemoryMode.SERVER_WIDE})
+
+
 def _stamped(content: str, ts: Any) -> str:
     """`content` behind its turn's `prompt_stamp` (DP-431). A row with no
     readable stored time passes through bare rather than being stamped "now",

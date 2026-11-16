@@ -59,6 +59,13 @@ const readSavedChannel = (persona: string) =>
     typeof r === 'string' && r ? r : 'web_ui',
   )
 
+// DP-523: every portal channel shows one merged conversation for this persona
+// (the engine's `channels_merge`, from its memory mode). Picking a channel
+// there changes nothing visible, and a retry from a channel other than the
+// newest row's would be refused.
+export const channelsMerge = (p: { channels_merge?: boolean } | null | undefined) =>
+  !!p?.channels_merge
+
 // A transient row representing the in-flight assistant turn (not yet persisted).
 export interface StreamState {
   active: boolean
@@ -99,6 +106,19 @@ function lastPersistedId(chunks: Chunk[]): number | null {
   for (let i = chunks.length - 1; i >= 0; i--) {
     const id = chunks[i].interaction_id
     if (!chunks[i].ephemeral && id != null) return id
+  }
+  return null
+}
+
+// DP-523: the row a retry replaces or answers — the last one with text or
+// thinking, matching the engine's retry lookup (`_latest_visible_row`). A
+// reply that shows only tool cards is skipped: retrying it answers the user
+// turn before it with a fresh reply. null for a conversation with none.
+function retryTargetId(chunks: Chunk[]): number | null {
+  for (let i = chunks.length - 1; i >= 0; i--) {
+    const c = chunks[i]
+    if (c.ephemeral || c.interaction_id == null) continue
+    if (c.content.trim() || (c.reasoning ?? '').trim()) return c.interaction_id
   }
   return null
 }
@@ -434,15 +454,28 @@ export function usePortalStore() {
     return () => clearInterval(t)
   }, [activeChannel])
 
+  // DP-523: switchChannel is built below; refreshPersona needs it to pin a
+  // persona whose memory mode was just changed to a merged one.
+  const switchChannelRef = useRef<((channel: string) => Promise<void>) | null>(null)
+  // DP-523: a merged-memory persona stays on web_ui — the other channels show
+  // the same conversation. Never mid-stream: switching blanks the view under
+  // the reply being written, so a stream's end re-checks instead.
+  const pinMergedChannel = useCallback((p: Persona | null) => {
+    if (streamingRef.current || !p || p.name !== activePersonaRef.current) return
+    if (channelsMerge(p) && activeChannelRef.current !== 'web_ui') {
+      void switchChannelRef.current?.('web_ui')
+    }
+  }, [])
   const refreshPersona = useCallback(async (p: string) => {
     try {
       const persObj = await api.getPersona(p)
       setPersona(persObj)
       setOffline(api.usingMock())
+      pinMergedChannel(persObj)
     } catch {
       setBanner(UNREACHABLE)
     }
-  }, [])
+  }, [pinMergedChannel])
 
   const refreshChannels = useCallback(async (p: string) => {
     try {
@@ -501,6 +534,7 @@ export function usePortalStore() {
         // channel list has been deleted (or a "+ new channel" that was never
         // sent to, so it never materialized in the DB) — fall back to web_ui and
         // re-fetch rather than stranding the user on an empty phantom channel.
+        // DP-523: so does any saved channel of a merged-memory persona.
         let resolvedChan = wantChan
         let resolvedChunks = cs
         // DP-509: a channel clicked while this batch was in flight owns the
@@ -515,7 +549,8 @@ export function usePortalStore() {
         if (
           !moved &&
           wantChan !== 'web_ui' &&
-          !chanList.some((g) => g.items.some((it) => it.channel === wantChan))
+          (channelsMerge(persObj) ||
+            !chanList.some((g) => g.items.some((it) => it.channel === wantChan)))
         ) {
           resolvedChan = 'web_ui'
           setActiveChannel('web_ui')
@@ -763,6 +798,11 @@ export function usePortalStore() {
     [persona, ltmOn, refreshTranscript, cancelLtmPreview, loadLtmBlock],
   )
 
+  useEffect(() => {
+    switchChannelRef.current = switchChannel
+  }, [switchChannel])
+  const channelsMerged = channelsMerge(persona)
+
   // "+ new channel" — just point the active channel at a fresh tag. No row
   // exists yet, so the transcript comes back empty; the channel materializes
   // in the DB (and the channel list) on the first submit.
@@ -908,6 +948,8 @@ export function usePortalStore() {
         })
         setResolvingConfirm(false)
         abortRef.current = null
+        // DP-523: a memory-mode change made while this turn streamed.
+        pinMergedChannel(personaRef.current)
       },
       // DP-447: refused before anything was written — show the conversation
       // as it really is and hand a typed message back to the composer.
@@ -924,7 +966,8 @@ export function usePortalStore() {
           personaName === activePersonaRef.current && channel === activeChannelRef.current)
       },
     }),
-    [refreshTranscript, refreshChannels, flushTokens, scheduleFlush, resetTokenBuf],
+    [refreshTranscript, refreshChannels, flushTokens, scheduleFlush, resetTokenBuf,
+      pinMergedChannel],
   )
 
   // ---- re-attach to a running turn (DP-487) --------------------------
@@ -1087,6 +1130,7 @@ export function usePortalStore() {
           derpr_continue: cont ? true : undefined,
           derpr_think_open: cont?.thinkOpen,
           derpr_continue_id: continued?.interaction_id ?? undefined,
+          derpr_retry_id: retry ? retryTargetId(shown) ?? undefined : undefined,
           derpr_expected_last_id: lastPersistedId(shown),
           model: persona.name,
           channel: activeChannel,
@@ -1365,6 +1409,7 @@ export function usePortalStore() {
     tools,
     channels,
     activeChannel,
+    channelsMerged,
     chunks,
     ltmBlock,
     ltmOn,

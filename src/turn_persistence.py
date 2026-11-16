@@ -22,6 +22,7 @@ from config.global_config import (
 )
 from src.generation_events import ResponseType
 from src.memory.backend.base import MemoryBackend, RetainRefused
+from src.memory.errors import RetryTargetMismatch
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import block_document_id, scope_from_row, split_block
 from src.memory.scope_tags import build_scope_tags
@@ -127,8 +128,13 @@ class TurnPersistence:
             server_id: Optional[str],
             platform_message_id: Optional[str],
             timestamp: datetime,
+            retry_row_id: Optional[int] = None,
     ) -> Tuple[Optional[int], Optional[int]]:
         """Log the new user turn or archive prior assistant for retry.
+
+        `retry_row_id` (DP-523) is the row the portal's screen means; a retry
+        whose target is another row raises `RetryTargetMismatch` with nothing
+        written, for the caller to refuse the turn.
 
         Returns `(user_interaction_id, retry_assistant_id)`. Exactly one of
         the two will be set on success: retries archive the prior assistant
@@ -140,7 +146,10 @@ class TurnPersistence:
                     persona_name=persona_name,
                     user_identifier=user_identifier,
                     channel=channel,
+                    expected_row_id=retry_row_id,
                 )
+            except RetryTargetMismatch:
+                raise
             except Exception as e:
                 logger.error(f"handle_portal_retry failed: {e}", exc_info=True)
                 retry_assistant_id = None

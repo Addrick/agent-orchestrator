@@ -82,6 +82,10 @@ export interface Persona {
   history_messages: number
   thinking_level: string | null
   memory_mode: string
+  // DP-523: every portal channel shows one merged conversation under this
+  // memory mode, so the channel rail offers no switch. Optional: older engines
+  // omit it.
+  channels_merge?: boolean
   long_term_memory: boolean
   max_context_tokens: number
   // per-persona tool-call budget; null = global MAX_TOOL_CALLS (DP-428)

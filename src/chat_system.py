@@ -20,6 +20,7 @@ from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.confirmations import ConfirmationManager, ConversationKey, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
+from src.memory.errors import RetryTargetMismatch
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope, scope_from_row
 from src.engine import TextEngine
@@ -413,6 +414,7 @@ class ChatSystem:
             continuation: Optional[_ContinuationState] = None,
             origin: Optional[Origin] = None,
             continue_turn: Optional[ContinueTurn] = None,
+            retry_row_id: Optional[int] = None,
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Shared streaming kernel — single source of truth for the request
         pipeline. Yields TokenEvent for each text delta, terminal DoneEvent
@@ -498,7 +500,8 @@ class ChatSystem:
                 persona, persona_name, user_identifier, channel, continue_turn,
             )
             if target is None:
-                yield ErrorEvent(message=refusal)
+                # A refusal of this request as sent: repeating it cannot help.
+                yield ErrorEvent(message=refusal, retryable=False)
                 return
 
         ctx = RequestContext(
@@ -553,13 +556,24 @@ class ChatSystem:
                     user_interaction_id = None
                     retry_assistant_id: Optional[int] = target.row_id
                 else:
-                    user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
-                        is_retry=is_retry, persona_name=persona_name,
-                        user_identifier=user_identifier, channel=channel,
-                        user_display_name=user_display_name, message=message,
-                        server_id=server_id, platform_message_id=platform_message_id,
-                        timestamp=user_ts,
-                    )
+                    try:
+                        user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
+                            is_retry=is_retry, persona_name=persona_name,
+                            user_identifier=user_identifier, channel=channel,
+                            user_display_name=user_display_name, message=message,
+                            server_id=server_id, platform_message_id=platform_message_id,
+                            timestamp=user_ts, retry_row_id=retry_row_id,
+                        )
+                    except RetryTargetMismatch:
+                        # DP-523: a retry writes this channel's latest row, but
+                        # a merged-memory persona's screen can end on another
+                        # channel's. Refused before generating, as continue
+                        # refuses a row the screen does not end on.
+                        yield ErrorEvent(message=(
+                            "Nothing to regenerate: the message on screen is not "
+                            "this channel's latest message."
+                        ), retryable=False)
+                        return
 
                 # DP-113 / DP-495: retain through the backend boundary, a block
                 # at a time. This turn joins the queue; it is sent with the
@@ -1051,6 +1065,7 @@ class ChatSystem:
             client_messages: Optional[List[Dict[str, Any]]] = None,
             origin: Optional[Origin] = None,
             continue_turn: Optional[ContinueTurn] = None,
+            retry_row_id: Optional[int] = None,
     ) -> AsyncIterator[GenerationEvent]:
         """Portal-facing streaming entry. Yields TokenEvent /
         ToolCallStartEvent / ToolCallResultEvent / DoneEvent / ErrorEvent.
@@ -1078,6 +1093,7 @@ class ChatSystem:
             client_messages=client_messages,
             origin=origin,
             continue_turn=continue_turn,
+            retry_row_id=retry_row_id,
         )) as agen:
             async for ev in agen:
                 yield ev
