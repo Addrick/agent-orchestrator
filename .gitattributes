@@ -16,6 +16,7 @@ services/pve/derpr-egress         text eol=lf
 # DP-456/DP-465: the egress container's files and host derpr's LAN switch, same reason.
 services/egress/**                text eol=lf
 services/sandbox-net/**           text eol=lf
+services/compute-sandbox/**       text eol=lf
 
 # DP-405B: CT102's Strata script and systemd units, pushed to the CT from a checkout.
 services/strata/**                text eol=lf

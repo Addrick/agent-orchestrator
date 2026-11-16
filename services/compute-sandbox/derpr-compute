@@ -1,0 +1,38 @@
+#!/bin/bash
+# derpr-compute SECONDS — run the Python 3 script on stdin as user `compute`,
+# in a throwaway systemd unit with no network (DP-522, `run_python`).
+#
+# Installed root-owned at /usr/local/bin/derpr-compute on stagr-vm (VM201) and
+# run by derpr through `sudo -n` from stagr's opencode shell. Every guard lives
+# here, not in derpr's argv: the unit has only a loopback interface
+# (PrivateNetwork) and may open no IP socket at all, so stagr's LAN/WAN
+# switches never reach it. /run is an empty tmpfs: AF_UNIX stays allowed (Python's
+# socketpair needs it), and /run holds the sockets of resolved (DNS), avahi
+# (mDNS onto the LAN), D-Bus, the journal and sshd -- each a way out or a
+# place to leave state (found live, DP-522). It cannot see /home, writes nowhere but its own
+# private /tmp (gone when the unit ends), and is capped in memory, CPU, tasks,
+# file size and time. Exit 124 = the time limit; 2 = a bad argument.
+set -euo pipefail
+
+seconds=${1:-}
+if ! [[ $seconds =~ ^[0-9]+$ ]] || (( seconds < 1 || seconds > 120 )); then
+    echo "derpr-compute: SECONDS must be 1-120" >&2
+    exit 2
+fi
+
+exec systemd-run --quiet --collect --pipe --wait --service-type=exec \
+    --uid=compute --gid=compute \
+    -p RuntimeMaxSec=$((seconds + 5)) \
+    -p MemoryMax=512M -p MemorySwapMax=0 -p CPUQuota=100% -p TasksMax=32 \
+    -p LimitFSIZE=64M -p LimitNOFILE=256 -p LimitCORE=0 \
+    -p PrivateNetwork=yes -p IPAddressDeny=any -p RestrictAddressFamilies=AF_UNIX \
+    -p TemporaryFileSystem=/run:ro \
+    -p PrivateTmp=yes -p ProtectHome=yes -p ProtectSystem=strict -p PrivateDevices=yes \
+    -p PrivateIPC=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes \
+    -p ProtectKernelLogs=yes -p ProtectControlGroups=yes -p ProtectProc=invisible \
+    -p ProtectClock=yes -p ProtectHostname=yes \
+    -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
+    -p RestrictNamespaces=yes -p RestrictRealtime=yes -p CapabilityBoundingSet= \
+    -p SystemCallArchitectures=native -p SystemCallFilter=@system-service \
+    -p WorkingDirectory=/tmp -p Environment=HOME=/tmp -p Environment=PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/timeout --kill-after=2 "$seconds" /usr/bin/python3 -I -

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from src.clients.service_integration import ServiceIntegration
 from src.proxmox.ssh import SSHRunner
+from src.stagr.compute import ComputeToolHandler
 from src.stagr.handler import StagrToolHandler
 
 if TYPE_CHECKING:
@@ -26,6 +27,9 @@ class StagrIntegration(ServiceIntegration):
         # The memory manager is how queue_codr_task sees the ticket IDs the
         # codr agent has already attempted (DP-489); without it, it refuses.
         self._handler = StagrToolHandler(runner, memory_manager=memory_manager)
+        # run_python (DP-522) runs on stagr's box but is a core tool: any
+        # persona may enable it without the stagr binding.
+        self._compute = ComputeToolHandler()
 
     @property
     def name(self) -> str:
@@ -33,3 +37,4 @@ class StagrIntegration(ServiceIntegration):
 
     def register_tools(self, tool_manager: "ToolManager") -> None:
         self._handler.register(tool_manager)
+        self._compute.register(tool_manager)

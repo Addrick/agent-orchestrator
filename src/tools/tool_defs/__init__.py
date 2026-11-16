@@ -18,6 +18,7 @@ from src.tools.tool_defs.stagr import STAGR_TOOLS
 from src.tools.tool_defs.mcp import MCP_TOOLS
 from src.tools.tool_defs.proposals import PROPOSAL_TOOLS
 from src.tools.tool_defs.notify import NOTIFY_TOOLS
+from src.tools.tool_defs.compute import COMPUTE_TOOLS
 
 __all__ = [
     "SEARCH_TOOLS",
@@ -32,4 +33,5 @@ __all__ = [
     "MCP_TOOLS",
     "PROPOSAL_TOOLS",
     "NOTIFY_TOOLS",
+    "COMPUTE_TOOLS",
 ]
