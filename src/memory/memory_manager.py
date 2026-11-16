@@ -21,6 +21,7 @@ from config.global_config import (
 from src.deferral_kinds import DEFERRAL_KIND_APPROVAL
 from src.generation_events import split_think_text
 from src.memory.backend.base import MemoryHit, Experience, MentalModel, ReflectResult
+from src.memory.errors import RetryTargetMismatch
 from src.memory.retain_blocks import RetainScope
 from src.security.scrubber import get_scrubber
 from src.utils.timeutil import to_utc
@@ -1047,7 +1048,8 @@ class MemoryManager:
                 return False
 
     def handle_portal_retry(self, persona_name: str, user_identifier: str,
-                            channel: str) -> Optional[int]:
+                            channel: str,
+                            expected_row_id: Optional[int] = None) -> Optional[int]:
         """Archive the most recent assistant turn for this portal session.
 
         Finds the latest assistant row matching (persona, user_identifier, channel),
@@ -1068,6 +1070,12 @@ class MemoryManager:
         in the UI) and then retrying that user turn would archive + overwrite
         the still-suppressed assistant row — landing the regenerated response
         in an invisible row, so it appears to vanish after streaming.
+
+        `expected_row_id` (DP-523) is the row the caller's screen means — the
+        last one with text or thinking. Raises `RetryTargetMismatch`, before
+        anything is archived, when the latest visible row is a different one:
+        a merged-memory persona's screen can end on another channel's row.
+        Checked inside the same lock as the archive. None = no check.
         """
         with self._lock:
             conn = self._get_connection()
@@ -1076,6 +1084,10 @@ class MemoryManager:
             # if a user turn is newer (or the trailing assistant was deleted),
             # there is nothing to regenerate in place.
             row = self._latest_visible_row(cursor, persona_name, user_identifier, channel)
+            if expected_row_id is not None and (
+                    row is None or int(row['interaction_id']) != expected_row_id):
+                raise RetryTargetMismatch(
+                    expected_row_id, int(row['interaction_id']) if row else None)
             if not row or row['author_role'] != 'assistant':
                 return None
 
@@ -1157,17 +1169,6 @@ class MemoryManager:
         if not row or row['author_role'] != 'assistant':
             return None
         return dict(row)
-
-    def latest_portal_row_id(self, persona_name: str, user_identifier: str,
-                             channel: str) -> Optional[int]:
-        """`interaction_id` of a portal session's latest visible row (any
-        role) — the row a retry archives or answers (DP-523). None for an
-        empty session."""
-        with self._lock:
-            row = self._latest_visible_row(
-                self._get_connection().cursor(), persona_name, user_identifier, channel,
-            )
-        return int(row['interaction_id']) if row else None
 
     def set_tool_context(self, interaction_id: int,
                          tool_context: Optional[str]) -> bool:

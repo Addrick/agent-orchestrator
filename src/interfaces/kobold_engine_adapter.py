@@ -15,7 +15,7 @@ import re
 import secrets
 import time
 
-from src.request_builder import AssembledRequest, ContinueTurn
+from src.request_builder import PORTAL_MERGED_MODES, AssembledRequest, ContinueTurn
 
 # On Windows, mimetypes seeds from the registry, where `.js` is frequently
 # mapped to `text/plain`. Starlette's StaticFiles uses mimetypes.guess_type, so
@@ -749,6 +749,9 @@ class KoboldEngineAdapter:
             "history_messages": p.get_base_history_messages(),
             "thinking_level": p.get_thinking_level(),
             "memory_mode": p.get_memory_mode().name,
+            # DP-523: every portal channel shows one merged conversation, so
+            # the channel rail offers no switch.
+            "channels_merge": p.get_memory_mode() in PORTAL_MERGED_MODES,
             "max_context_tokens": p.get_max_context_tokens(),
             # None = the global MAX_TOOL_CALLS (DP-428).
             "max_tool_calls": p.get_max_tool_calls(),

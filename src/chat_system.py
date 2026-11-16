@@ -20,6 +20,7 @@ from src.embedding_service import EmbeddingService
 from src.clients.service_integration import ServiceIntegration
 from src.confirmations import ConfirmationManager, ConversationKey, Decision, ParkedWrite
 from src.memory.backend.base import MemoryBackend
+from src.memory.errors import RetryTargetMismatch
 from src.memory.memory_manager import MemoryManager
 from src.memory.retain_blocks import RetainScope, legacy_window, retain_scope, scope_from_row
 from src.engine import TextEngine
@@ -499,23 +500,8 @@ class ChatSystem:
                 persona, persona_name, user_identifier, channel, continue_turn,
             )
             if target is None:
-                yield ErrorEvent(message=refusal)
-                return
-
-        # DP-523: a retry overwrites (or answers) this channel's latest row,
-        # but a merged-memory persona's screen can end on another channel's
-        # row. Refuse the mismatch, as continue does, rather than stream a
-        # reply into a row the operator cannot see. None = no check
-        # (non-portal callers).
-        if is_retry and continuation is None and retry_row_id is not None:
-            latest_id = self.memory_manager.latest_portal_row_id(
-                persona_name, user_identifier, channel,
-            )
-            if latest_id != retry_row_id:
-                yield ErrorEvent(message=(
-                    "Nothing to regenerate: the message on screen is not this "
-                    "channel's latest message."
-                ))
+                # A refusal of this request as sent: repeating it cannot help.
+                yield ErrorEvent(message=refusal, retryable=False)
                 return
 
         ctx = RequestContext(
@@ -570,13 +556,24 @@ class ChatSystem:
                     user_interaction_id = None
                     retry_assistant_id: Optional[int] = target.row_id
                 else:
-                    user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
-                        is_retry=is_retry, persona_name=persona_name,
-                        user_identifier=user_identifier, channel=channel,
-                        user_display_name=user_display_name, message=message,
-                        server_id=server_id, platform_message_id=platform_message_id,
-                        timestamp=user_ts,
-                    )
+                    try:
+                        user_interaction_id, retry_assistant_id = self.turn_persistence.log_user_turn(
+                            is_retry=is_retry, persona_name=persona_name,
+                            user_identifier=user_identifier, channel=channel,
+                            user_display_name=user_display_name, message=message,
+                            server_id=server_id, platform_message_id=platform_message_id,
+                            timestamp=user_ts, retry_row_id=retry_row_id,
+                        )
+                    except RetryTargetMismatch:
+                        # DP-523: a retry writes this channel's latest row, but
+                        # a merged-memory persona's screen can end on another
+                        # channel's. Refused before generating, as continue
+                        # refuses a row the screen does not end on.
+                        yield ErrorEvent(message=(
+                            "Nothing to regenerate: the message on screen is not "
+                            "this channel's latest message."
+                        ), retryable=False)
+                        return
 
                 # DP-113 / DP-495: retain through the backend boundary, a block
                 # at a time. This turn joins the queue; it is sent with the

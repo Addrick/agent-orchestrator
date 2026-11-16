@@ -1684,6 +1684,7 @@ async def test_stream_response_is_retry_archives_via_handle_portal_retry(
         persona_name="test_persona",
         user_identifier="portal",
         channel="web_ui",
+        expected_row_id=None,  # DP-523: no derpr_retry_id = no target check
     )
     # Retry forwards the regenerated turn's tool_context (None here — this turn
     # used no tools — which correctly clears any stale tools on the row) and
