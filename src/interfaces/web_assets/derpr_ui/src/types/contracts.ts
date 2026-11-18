@@ -30,6 +30,9 @@ export interface Chunk {
   tool_context: ToolContext[] | null
   has_versions: boolean
   ephemeral_chunk_id?: string // present ONLY on the parked ephemeral chunk
+  // DP-526: when the row was saved, ISO UTC; null on ephemeral. Display only.
+  // Optional: older engines omit it.
+  ts?: string | null
 }
 
 export interface TranscriptResponse {
@@ -189,6 +192,8 @@ export interface ChannelItem {
   label: string
   source: ChannelSource
   preview: string
+  // DP-526: the channel's newest message, ISO UTC; null with no history
+  lastTs?: string | null
 }
 export interface ChannelGroup {
   group: string

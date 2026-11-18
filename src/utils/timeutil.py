@@ -8,7 +8,7 @@ that comes up in UTC cannot make two times disagree.
 """
 
 from datetime import datetime, timezone
-from typing import Union
+from typing import Optional, Union
 from zoneinfo import ZoneInfo
 
 from config import global_config
@@ -33,6 +33,23 @@ def to_local(ts: Union[datetime, str, bytes]) -> datetime:
     if isinstance(ts, str):
         ts = datetime.fromisoformat(ts)
     return to_utc(ts).astimezone(ZoneInfo(global_config.LOCAL_TZ))
+
+
+def iso_utc(ts: Union[datetime, str, bytes, None]) -> Optional[str]:
+    """A stored timestamp as ISO-8601 UTC text (`...+00:00`), for an API that
+    hands it to a client to render in the viewer's zone (DP-526: portal
+    message and channel times). None when absent or unreadable — a bad row
+    must not break the response it rides on."""
+    if ts is None:
+        return None
+    try:
+        if isinstance(ts, bytes):
+            ts = ts.decode('utf-8')
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts)
+        return to_utc(ts).isoformat()
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def prompt_stamp(ts: Union[datetime, str, bytes]) -> str:

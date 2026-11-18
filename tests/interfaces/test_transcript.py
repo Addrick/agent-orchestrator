@@ -328,3 +328,20 @@ def test_parse_tool_context_structured_without_role_still_passes_through():
     structured = [{"call_id": "c", "tool_name": "t", "arguments": {},
                    "result": None, "error": None}]
     assert _parse_tool_context(structured) == structured
+
+
+def test_transcript_chunk_carries_saved_time_as_utc_iso():
+    """DP-526: each chunk carries its row's save time for the portal to show;
+    a naive stored value (pre-DP-413) reads as UTC, a parked write has none."""
+    from datetime import datetime
+    rows = [
+        {"author_role": "user", "content": "hi", "interaction_id": 1,
+         "timestamp": "2026-11-18 14:05:00"},
+        {"author_role": "assistant", "content": "yo", "interaction_id": 2,
+         "timestamp": datetime(2026, 11, 18, 14, 6)},
+        {"author_role": "user", "content": "no time", "interaction_id": 3},
+    ]
+    chunks = build_transcript(
+        rows, pending=[{"ephemeral_chunk_id": "e1", "content": "park"}])["chunks"]
+    assert [c["ts"] for c in chunks] == [
+        "2026-11-18T14:05:00+00:00", "2026-11-18T14:06:00+00:00", None, None]

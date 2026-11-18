@@ -63,6 +63,7 @@ from src.stagr.codr_ticket import ticket_titles
 from src.generation_params import CHAT_TEMPLATE_THINKING
 from src.personas.store import save_personas_to_file
 from src.tool_policy import declares_irreversible, default_tool_state
+from src.utils.timeutil import iso_utc
 from src.interfaces._persona_patch import (
     _KNOWN_PATCH_KEYS_ENGINE as _KNOWN_PATCH_KEYS,
     apply_persona_patch_body,
@@ -962,7 +963,8 @@ class KoboldEngineAdapter:
                     "server_id": r.get("server_id"),
                     "source": _channel_source(r.get("channel") or ""),
                     "count": r.get("count", 0),
-                    "last_ts": r.get("last_ts"),
+                    # DP-526: normalized — pre-DP-413 rows store naive text
+                    "last_ts": iso_utc(r.get("last_ts")),
                     "label": labels.get(r.get("channel") or ""),
                 }
                 for r in rows

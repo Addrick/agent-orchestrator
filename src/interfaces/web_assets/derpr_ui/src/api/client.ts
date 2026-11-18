@@ -250,6 +250,7 @@ export function getChannels(activePersona: string): Promise<ChannelGroup[]> {
           label: c.label || c.channel,
           source: src,
           preview: c.count ? `${c.count} msgs` : 'no history yet',
+          lastTs: c.last_ts,
         }
         const list = bySource.get(src) ?? []
         list.push(item)

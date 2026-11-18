@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { PortalStore } from '../state/store'
+import { fmtWhen, fmtWhenFull } from '../state/util'
 
 interface Props {
   store: PortalStore
@@ -76,7 +77,15 @@ export function Channels({ store }: Props) {
                     <span className="nm" title={it.channel}>{it.label}</span>
                     <span className={'src ' + it.source}>{it.source}</span>
                   </div>
-                  <div className="pv">{it.preview}</div>
+                  <div className="pv">
+                    {it.preview}
+                    {it.lastTs && (
+                      <span title={'last message ' + fmtWhenFull(it.lastTs)}>
+                        {' · '}
+                        {fmtWhen(it.lastTs)}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </button>
             ))}
