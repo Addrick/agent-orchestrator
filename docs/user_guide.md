@@ -1117,7 +1117,10 @@ only thing that talks to both:
   Its prompt (DP-525) caps every report to you at five short lines (outcome, why if
   it failed, what is next) with detail in a named file, sizes a ticket as one
   roadmap feature built end to end, and keeps checks to the ticket's own claims,
-  with the full test suite run once per sprint. **The live prompt is the copy in
+  with the full test suite run once per sprint. It also keeps each turn to what you
+  asked: a question gets an answer, not an audit; a pass is not re-verified (DERPR
+  already checked and merged it); a failed check is a quick fix-the-check-or-requeue,
+  investigated only when the same failure comes back. **The live prompt is the copy in
   the instance's `data/personas.json`**: a change to the shipped file reaches a
   running instance only when it is copied there too.
 - **A shell in codr's box, between tasks**: `codr_shell` runs bash in codr's
