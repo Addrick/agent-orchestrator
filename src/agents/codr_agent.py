@@ -777,6 +777,18 @@ def parse_check(output: str) -> Tuple[bool, str]:
     return bool(match and match.group(1) == "0"), body
 
 
+VERDICT_CHARS = 200
+
+
+def check_verdict(tail: str) -> str:
+    """The check's own one-line verdict for the result line (DP-525): its last
+    line with the word `FAIL` (`FAIL: claim b`, unittest's `FAIL: test_x`; not
+    its `FAILED (failures=1)` summary), else its last non-empty line, cut short."""
+    lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    found = next((ln for ln in reversed(lines) if re.search(r"\bFAIL\b", ln)), lines[-1] if lines else "")
+    return found if len(found) <= VERDICT_CHARS else found[:VERDICT_CHARS - 1] + "…"
+
+
 # --- waking stagr (DP-493) ----------------------------------------------------
 
 _WAKE_INSTRUCTION = {
@@ -1683,21 +1695,37 @@ class CodrAgent(Agent):
             contexts=[("task", task_id)])
         self._finalize_action(action_id, outcome, self._fit_payload(detail))
         total = task.max_attempts if task else "?"
-        line = (f"codr task `{task_id}` attempt {auto.get('attempt')}/{total}: **{outcome.upper()}** "
+        title = f" ({task.title})" if task and task.title else ""
+        line = (f"codr task `{task_id}`{title} attempt {auto.get('attempt')}/{total}: **{outcome.upper()}** "
                 f"({seconds // 60} min)")
         if detail.get("merged") and task:
             line += f", merged into `{task.project_name}` {detail.get('main_branch')}"
-        if detail.get("reason"):
-            line += f": {detail['reason']}"
+        why = detail.get("reason") or ("" if outcome == "pass" else check_verdict(str(detail.get("check_tail") or "")))
+        if why:
+            line += f": {why}"
         if self._dropped:
             line += f" ({self._dropped} notify_adam message(s) dropped by the rate limit)"
             self._dropped = 0
         if self._undelivered:
             line += f" ({self._undelivered} notify_adam message(s) failed to post)"
             self._undelivered = 0
+        if task is not None:
+            line += "\n" + self._project_progress(task.project_name)
         await self._post(line)
         self._channel_note(task_id, auto, line, detail)
         logger.info("codr agent: task %s attempt %s -> %s", task_id, auto.get("attempt"), outcome)
+
+    def _project_progress(self, project: str) -> str:
+        """Where `project` stands, for the result line (DP-525): its queued
+        tickets passed, ended for good, and still to run."""
+        tasks = [t for t in self._tasks() if t.project_name == project]
+        states = queue_states(tasks, {tid: [str(a.get("outcome")) for a in rows]
+                                      for tid, rows in self._all_attempts().items()})
+        counts = {"passed": 0, "failed": 0, "queued": 0}
+        for t in tasks:
+            state = states[t.id][0]
+            counts["passed" if state == PASSED else "failed" if state in (FAILED, BLOCKED) else "queued"] += 1
+        return f"`{project}`: " + " · ".join(f"{n} {k}" for k, n in counts.items())
 
     def _channel_note(self, task_id: str, auto: Dict[str, Any], line: str, detail: Dict[str, Any]) -> None:
         """The attempt's result in the ticket's channel (DP-484), under the

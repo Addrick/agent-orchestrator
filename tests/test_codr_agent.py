@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestServer
 
 from src.agents import codr_agent
 from src.agents.codr_agent import (
-    CodrAgent, detect_loop, load_tasks, parse_check, sync_script, validate_mcp, workspace_files,
+    CodrAgent, check_verdict, detect_loop, load_tasks, parse_check, sync_script, validate_mcp, workspace_files,
 )
 from src.engine.providers import opencode
 from src.generation_events import ResponseType
@@ -393,6 +393,7 @@ async def test_a_finished_turn_is_checked_recorded_and_posted_once(fake, tmp_pat
     ((channel, recipient, body),) = router.sent
     assert (channel, recipient) == ("discord_channel", "123")
     assert "`01-a` attempt 1/3: **PASS**" in body
+    assert body.endswith(": 1 passed · 0 failed · 0 queued")    # DP-525: where the project stands
     assert "done, tests pass" not in body      # the final reply is not posted; notify_adam is codr's voice
     assert "done, tests pass" in json.loads(row["outcome_payload"])["reply"]   # kept in the attempt record
 
@@ -417,7 +418,20 @@ async def test_a_failed_check_retries_with_its_output_until_attempts_run_out(fak
 
     await agent.deploy()                                       # out of attempts
     assert len(_auto_messages(fake, sid)) == 2
-    assert "attempt 2/2: **FAIL**" in router.sent[-1][2]
+    # DP-525: the line says why (the check's own verdict) and where the project stands.
+    assert "attempt 2/2: **FAIL** (0 min): FAIL: csvstats.py missing\n" in router.sent[-1][2]
+    assert router.sent[-1][2].endswith(": 0 passed · 1 failed · 0 queued")
+
+
+@pytest.mark.parametrize("tail, verdict", [
+    ("ok a\nFAIL: claim b\nRan 3 tests\nFAILED (failures=1)\n", "FAIL: claim b"),
+    ("FAIL: claim b\nfixture changed: x.py\n\n", "FAIL: claim b"),
+    ("fixture changed: x.py\n\n", "fixture changed: x.py"),
+    ("", ""),
+    ("FAIL " + "x" * 300, "FAIL " + "x" * 194 + "…"),
+])
+def test_check_verdict_is_the_last_fail_line_else_the_last_line(tail, verdict):
+    assert check_verdict(tail) == verdict
 
 
 async def test_a_loop_is_nudged_once_then_aborted(fake, tmp_path):

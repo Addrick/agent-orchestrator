@@ -803,8 +803,7 @@ turn (opencode summarizing the history when it fills up, then telling codr to go
 does not end it (DP-517): the check waits for codr's own final reply.
 
 - **pass**: DERPR merges the ticket's branch into the project's main (below), and a
-  one-line result (ticket, attempt, PASS/FAIL, run time, where it merged) is posted
-  to codr's channel;
+  one-line result is posted to codr's channel (see **The result line** below);
 - **fail**: DERPR retries only when the check ran and failed (`fail`, including merge
   conflict) and attempts remain: the next tick starts a new attempt with the check's
   output (its last 2,500 characters). An overrun (`timed_out`) or a loop or stall
@@ -813,6 +812,22 @@ does not end it (DP-517): the check waits for codr's own final reply.
   budget would repeat it); if attempts run out or the attempt was not retryable,
   the ticket is marked failed and the result is posted. To go on after timed_out
   or stuck, requeue or rename as a new ticket.
+
+**The result line (DP-525).** Every recorded attempt posts one line that can be read
+without opening anything:
+
+```
+codr task `CD-048` (Repeat switch) attempt 2/2: **FAIL** (43 min): FAIL: repeat claim c: row 3 did not replay
+`saver2`: 37 passed · 1 failed · 2 queued
+```
+
+- the ticket, its title, the attempt, the outcome and the run time; where it merged on a pass;
+- on a failure, **why**: the reason DERPR recorded (a merge conflict, a timeout, a loop),
+  or else the check's own verdict, which is the last line of its output with the word `FAIL` in it
+  (`FAIL: …`, not a `FAILED (failures=1)` summary; the last non-empty line if none has it), cut at 200 characters. The full output stays in
+  the ticket's channel;
+- a second line with where that ticket's project stands: tickets passed, failed for good
+  (or blocked), and still queued (open or waiting on another ticket).
 - **the model server was down** (DP-518): when codr's turn ends because the model
   server could not be reached or refused for being unavailable (opencode's own
   retries, about five over a minute, ran out), that is not codr's work failing, so
@@ -1099,6 +1114,15 @@ only thing that talks to both:
   with it directly. Its `stagr_shell` runs bash on the setup box **without
   approval**: the box is built so that nothing it reaches matters, which is what
   saves you from reading each command. `list_web_access` shows the allowlist.
+  Its prompt (DP-525) caps every report to you at five short lines (outcome, why if
+  it failed, what is next) with detail in a named file, sizes a ticket as one
+  roadmap feature built end to end, and keeps checks to the ticket's own claims,
+  with the full test suite run once per sprint. It also keeps each turn to what you
+  asked: a question gets an answer, not an audit; a pass is not re-verified (DERPR
+  already checked and merged it); a failed check is a quick fix-the-check-or-requeue,
+  investigated only when the same failure comes back. **The live prompt is the copy in
+  the instance's `data/personas.json`**: a change to the shipped file reaches a
+  running instance only when it is copied there too.
 - **A shell in codr's box, between tasks**: `codr_shell` runs bash in codr's
   workspace on `codr-vm`, **without approval**, so the setup agent can install
   what a task needs, check the environment, or debug a test that fails offline,
