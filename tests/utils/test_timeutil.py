@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from config import global_config
-from src.utils.timeutil import local_now, prompt_stamp, to_local, to_utc
+from src.utils.timeutil import iso_utc, local_now, prompt_stamp, to_local, to_utc
 
 
 @pytest.fixture(autouse=True)
@@ -44,3 +44,16 @@ def test_prompt_stamp_is_local_tz_not_host_clock(monkeypatch):
     assert prompt_stamp(stored) == "[Thu 2026-10-01 21:45]"
     monkeypatch.setattr(global_config, "LOCAL_TZ", "Asia/Tokyo")
     assert prompt_stamp(stored) == "[Fri 2026-10-02 10:45]"
+
+
+@pytest.mark.parametrize("stored, want", [
+    ("2026-11-18 14:05:00", "2026-11-18T14:05:00+00:00"),         # naive text = UTC
+    (b"2026-11-18 14:05:00", "2026-11-18T14:05:00+00:00"),
+    ("2026-11-18T09:05:00-05:00", "2026-11-18T14:05:00+00:00"),   # aware text
+    (datetime(2026, 11, 18, 14, 5), "2026-11-18T14:05:00+00:00"),
+    (None, None),
+    ("not a time", None),                                         # never raises
+])
+def test_iso_utc_normalizes_every_stored_shape(stored, want):
+    """DP-526: the portal's message/channel times, rendered client-side."""
+    assert iso_utc(stored) == want

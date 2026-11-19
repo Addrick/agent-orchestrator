@@ -14,6 +14,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Set
 
+from src.utils.timeutil import iso_utc
+
 logger = logging.getLogger(__name__)
 
 
@@ -177,6 +179,8 @@ def build_transcript(
           "tool_context": [...]|null,    # each card: its step's `reasoning`,
                                          # and `prose` on a step's first card
           "has_versions": <bool>,         # regen/edit archives exist
+          "ts": "<ISO UTC|null>",         # when the row was saved (DP-526);
+                                         # display only, null on ephemeral
         }
 
     **Invariant C1:** every chunk has exactly one `interaction_id` OR
@@ -215,6 +219,7 @@ def build_transcript(
             "reasoning": _place_reasoning(reasoning or None, tools),
             "tool_context": tools,
             "has_versions": iid in versions if iid is not None else False,
+            "ts": iso_utc(msg.get("timestamp")),
         })
 
     for park in (pending or []):
@@ -227,6 +232,7 @@ def build_transcript(
             "reasoning": None,
             "tool_context": park.get("tool_context"),
             "has_versions": False,
+            "ts": None,
         })
 
     return {"chunks": chunks}

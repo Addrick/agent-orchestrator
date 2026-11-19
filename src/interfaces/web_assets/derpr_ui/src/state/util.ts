@@ -41,6 +41,31 @@ export function reuseChunks<T extends { interaction_id: number | null; ephemeral
   return same ? prev : out
 }
 
+/** DP-526: a saved time, compact — `14:05` today, `Mon 14:05` within the
+ *  week, `Nov 3` this year, `2025-11-03` before. Browser time zone. '' when
+ *  absent or unparseable. */
+export function fmtWhen(iso: string | null | undefined, now: Date = new Date()): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  if (d >= startOfToday) return hm
+  if (now.getTime() - d.getTime() < 6 * 86400000)
+    return `${d.toLocaleDateString([], { weekday: 'short' })} ${hm}`
+  if (d.getFullYear() === now.getFullYear())
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
+/** DP-526: the full saved time, for a hover title. */
+export function fmtWhenFull(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? '' : d.toLocaleString([], { dateStyle: 'full', timeStyle: 'medium' })
+}
+
 /** Cheap client-side estimate — DEMO/budget-only. Production token counts must
  *  come from POST /api/extra/tokencount or the /assemble payload (S4/S5). */
 export function estimateTokens(s: string): number {

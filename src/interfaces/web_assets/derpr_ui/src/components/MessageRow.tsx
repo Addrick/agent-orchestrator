@@ -1,6 +1,6 @@
 import { Fragment, memo, useState } from 'react'
 import type { Chunk, ToolDef } from '../types/contracts'
-import { joinRawTurn, rawThinkState } from '../state/util'
+import { fmtWhen, fmtWhenFull, joinRawTurn, rawThinkState } from '../state/util'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
@@ -81,7 +81,11 @@ export const MessageRow = memo(function MessageRow({
       <div className="bd">
         <div className="meta">
           <span className={'who ' + c.role}>{who}</span>
-          <span className="ts" />
+          {c.ts && (
+            <span className="ts" title={'sent ' + fmtWhenFull(c.ts)}>
+              {fmtWhen(c.ts)}
+            </span>
+          )}
           {idTag}
           {c.has_versions && c.interaction_id != null && (
             <VersionChevrons interactionId={c.interaction_id} onResync={onResync} />
