@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy prod Zammad backups to the r9700 HDD (DP-527)
+After=network-online.target pve-guests.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zammad-backup-sync
+Nice=10
+IOSchedulingClass=idle

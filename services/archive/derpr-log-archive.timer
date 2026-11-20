@@ -1,0 +1,10 @@
+[Unit]
+Description=Archive CT100 docker logs to the r9700 HDD (DP-527)
+
+[Timer]
+OnCalendar=*-*-* 00/6:05:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

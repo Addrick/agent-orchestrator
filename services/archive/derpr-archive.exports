@@ -1,0 +1,4 @@
+# r9700 /etc/exports.d/derpr-archive.exports (DP-527). Long-term copies from host derpr:
+# CT100 docker logs, Hindsight and Zammad dumps. Separate from the vzdump export
+# (/srv/archive/pve-backups/derpr, fsid=74) so nothing here sits in a PVE storage dir.
+/srv/archive/derpr-archive 10.0.0.74(rw,sync,no_subtree_check,no_root_squash,fsid=75)
