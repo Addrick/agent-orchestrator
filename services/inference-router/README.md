@@ -102,11 +102,12 @@ The `Host` header passes through untouched, so every Strata needs the callers' h
 
 Survives derpr deploys on purpose: it is not in the compose file, like the nginx proxies before it.
 Replacing the proxy that holds `:5001` cuts generations in flight. Check `/metrics` `live.state` first.
+Recreating either container deletes its log: run `systemctl start derpr-log-archive` on host derpr first (`services/archive/`).
 
 ```bash
 docker rm -f r9700-proxy
 docker run -d --name r9700-proxy --restart unless-stopped -p 127.0.0.1:5006:5001 \
-  -v /opt/configs/derpr/r9700-lb.conf:/etc/nginx/nginx.conf:ro nginx:1.27-alpine
+  -v /opt/configs/derpr/r9700-lb.conf:/etc/nginx/nginx.conf:ro \n  nginx@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3  # 1.30.7 (nginx2root fix)
 docker run -d --name inference-router --restart unless-stopped --network host \
   -e ROUTER_BACKGROUND_PORT=5007 \
   -v /opt/configs/derpr/inference_router.py:/app/inference_router.py:ro \
