@@ -30,6 +30,9 @@ export interface Chunk {
   tool_context: ToolContext[] | null
   has_versions: boolean
   ephemeral_chunk_id?: string // present ONLY on the parked ephemeral chunk
+  // DP-528: the parked write's own channel (parks list persona-wide, so it can
+  // differ from the one being viewed). Older engines omit it.
+  channel?: string | null
   // DP-526: when the row was saved, ISO UTC; null on ephemeral. Display only.
   // Optional: older engines omit it.
   ts?: string | null
@@ -234,6 +237,20 @@ export interface ToolStartFrame {
   arguments: Record<string, unknown>
   call_id: string
   group_id: string | null
+}
+/** `event: derpr-confirm` — a write the model just proposed, awaiting the
+ *  operator (DP-528: rendered live, not only after the turn's re-sync).
+ *  Display only: answering it POSTs `token` back, never the arguments. */
+export interface ConfirmFrame {
+  text: string
+  persona: string
+  token: string
+  calls: { name: string; arguments: Record<string, unknown>; id: string | null }[]
+}
+/** One operator answer to a proposed write, as `/confirm` takes it. */
+export interface ConfirmDecision {
+  token: string
+  approved: boolean
 }
 export interface ToolResultFrame {
   call_id: string

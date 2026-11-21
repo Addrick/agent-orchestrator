@@ -85,7 +85,9 @@ class _ContinuationState:
     batch: List[Decision]
 
 
-def _render_resolution_nudge(batch: List[Decision]) -> str:
+def _render_resolution_nudge(
+        batch: List[Decision], unapplied: Sequence[str] = (),
+) -> str:
     """The synthetic user turn that opens a continuation.
 
     Exists for a wire-level reason, not a prompt-engineering one: without it the
@@ -146,6 +148,11 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
         lines.append("(an earlier reply about this was cut off before it finished; "
                      "anything it already did is in the history above, so do not do "
                      "it again)")
+    for reason in unapplied:
+        # DP-528: a click in the same batch that could not be applied (it
+        # expired while the reply streamed). Without this line the reply covers
+        # only the rest, and the operator reads the silence as "done".
+        lines.append(f"- NOT applied: {reason}")
     return (
         header + "\n"
         + "\n".join(lines)
@@ -1179,25 +1186,76 @@ class ChatSystem:
         3. Execute + patch history for each decision, in approval order.
         4. Run ONE continuation turn on the freshly-rebuilt history.
         """
-        key = (user_identifier, persona_name)
-        parked = self.confirmations.take(token)
+        async with aclosing(self.stream_resolve_parks(
+                user_identifier, persona_name, [(token, approved)], note=note,
+        )) as agen:
+            async for ev in agen:
+                yield ev
 
-        if parked is None:
+    async def stream_resolve_parks(
+            self, user_identifier: str, persona_name: str,
+            decisions: Sequence[Tuple[str, bool]], *, note: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Approve or deny SEVERAL gated writes of one conversation as one batch,
+        with one continuation reporting them all (DP-528).
+
+        The portal queues the operator's clicks while a reply streams and sends
+        them together when it ends. Sent one by one, each would be refused as
+        busy behind the previous one's continuation, and each would run its own
+        summary turn over the same history. This is `stream_resolve_deferrals`'
+        batch (DP-517) for the approval kind: every token is claimed and checked
+        exactly as a single resolve checks it (`_claim_approval`), then
+        `_stream_settle_batch` queues all but the last before the drain that
+        settles the last takes them all.
+
+        A token that cannot be claimed (already answered, expired, another
+        conversation's) is skipped; the rest still settle. Only when none can
+        is its refusal the reply.
+        """
+        key = (user_identifier, persona_name)
+        claimed: List[Decision] = []
+        refusals: List[str] = []
+        seen: Set[str] = set()
+        for token, approved in decisions:
+            if token in seen:
+                continue
+            seen.add(token)
+            parked, refusal = self._claim_approval(token, key)
+            if parked is None:
+                refusals.append(refusal)
+                continue
+            claimed.append(Decision(park=parked, approved=approved, note=note))
+
+        if not claimed:
             yield DoneEvent(
-                text="No such pending action — it was already resolved or it expired.",
+                text=" ".join(dict.fromkeys(refusals)) or "No such pending action.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
+
+        # Some refused, some claimed: the continuation reports the refusals
+        # alongside the outcomes, so a click that was dropped is said out loud.
+        async with aclosing(self._stream_settle_batch(
+                claimed, lambda d: self.confirmations.restore(d.park),
+                unapplied=list(dict.fromkeys(refusals)))) as agen:
+            async for ev in agen:
+                yield ev
+
+    def _claim_approval(
+            self, token: str, key: ConversationKey,
+    ) -> Tuple[Optional[ParkedWrite], str]:
+        """Take the approval park `token` names for conversation `key`, or
+        return None and the reason it may not be answered from here."""
+        parked = self.confirmations.take(token)
+
+        if parked is None:
+            return None, "No such pending action — it was already resolved or it expired."
 
         if parked.key != key:
             # A token belonging to another conversation must not be resolvable
             # from this one even if the caller somehow knows the hex.
             self.confirmations.restore(parked)
-            yield DoneEvent(
-                text="No such pending action.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "No such pending action."
 
         if parked.kind != DEFERRAL_KIND_APPROVAL:
             # An approve/deny click can only answer a deferral that asked a
@@ -1213,22 +1271,16 @@ class ChatSystem:
                 "is resolved by its own authority, not by an operator click",
                 token, parked.kind,
             )
-            yield DoneEvent(
-                text="No such pending action.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "No such pending action."
 
         if self.confirmations.is_expired(parked):
             self.confirmations.expire(
                 parked, PARK_STATUS_EXPIRED,
                 "Operator answered after the TTL had passed",
             )
-            yield DoneEvent(
-                text="That action expired before it was reviewed.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            name = parked.write_call.get("name")
+            what = f"That action ({name})" if name else "That action"
+            return None, f"{what} expired before it was reviewed."
 
         if parked.persona_name not in self.personas:
             # Same restore as the wrong-conversation branch above: `take()` has
@@ -1237,17 +1289,9 @@ class ChatSystem:
             # its history entry reading `awaiting_human_approval` forever with
             # no park left for the duplicate guard to match against.
             self.confirmations.restore(parked)
-            yield DoneEvent(
-                text="Error: Persona not found.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "Error: Persona not found."
 
-        async with aclosing(self._stream_settle(
-            Decision(park=parked, approved=approved, note=note),
-        )) as agen:
-            async for ev in agen:
-                yield ev
+        return parked, ""
 
     async def stream_resolve_deferral(
             self, token: str, *, kind: str, status: str, result: Any,
@@ -1369,6 +1413,7 @@ class ChatSystem:
 
     async def _stream_settle_batch(
             self, decisions: List[Decision], put_back: Callable[[Decision], None],
+            *, unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Settle `decisions` of one conversation as ONE batch: every one but
         the last is queued before the drain that settles the last takes them
@@ -1381,9 +1426,9 @@ class ChatSystem:
         for d in decisions:
             if d.park.key != key:
                 put_back(d)
-        for d in group[:-1]:
-            self.confirmations.enqueue(d)
-        async with aclosing(self._stream_settle(group[-1])) as agen:
+        async with aclosing(self._stream_settle(
+                group[-1], siblings=group[:-1], put_back=put_back,
+                unapplied=unapplied)) as agen:
             async for ev in agen:
                 yield ev
 
@@ -1442,7 +1487,9 @@ class ChatSystem:
         return parked
 
     async def _stream_settle(
-            self, decision: Decision,
+            self, decision: Decision, *, siblings: Sequence[Decision] = (),
+            put_back: Optional[Callable[[Decision], None]] = None,
+            unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Fold, apply and continue — the half of a resolve that has no kind.
 
@@ -1461,10 +1508,13 @@ class ChatSystem:
         """
         parked = decision.park
         key = parked.key
-        self.confirmations.enqueue(decision)
+        mine = [*siblings, decision]
+        for d in mine:
+            self.confirmations.enqueue(d)
 
         applied: List[Decision] = []
-        async with self.confirmations.lock_for(key):
+        lock = await self._acquire_or_put_back(key, mine, put_back)
+        try:
             batch = self.confirmations.drain(key)
             if not batch:
                 # A continuation that held the lock before us already folded
@@ -1501,9 +1551,32 @@ class ChatSystem:
                 )
                 return
 
-            async with aclosing(self._run_continuation(parked, applied)) as agen:
+            async with aclosing(self._run_continuation(
+                    parked, applied, unapplied=unapplied)) as agen:
                 async for ev in agen:
                     yield ev
+        finally:
+            lock.release()
+
+    async def _acquire_or_put_back(
+            self, key: ConversationKey, mine: Sequence[Decision],
+            put_back: Optional[Callable[[Decision], None]],
+    ) -> asyncio.Lock:
+        """Take `key`'s settle lock for the decisions `mine` just queued.
+
+        Stopped while another settle holds it, whatever of `mine` that settle
+        has not drained would sit in the queue with its park already taken,
+        until some later settle in this conversation applied it unannounced —
+        or a restart lost it. Those are put back as they were (DP-528)."""
+        lock = self.confirmations.lock_for(key)
+        try:
+            await lock.acquire()
+        except BaseException:
+            restore = put_back or (lambda d: self.confirmations.restore(d.park))
+            for d in self.confirmations.unqueue(key, mine):
+                restore(d)
+            raise
+        return lock
 
     async def _apply_folded(self, key: ConversationKey, batch: List[Decision],
                             applied: List[Decision], failed: List[str]) -> None:
@@ -1550,6 +1623,7 @@ class ChatSystem:
 
     async def _run_continuation(
             self, parked: ParkedWrite, applied: List[Decision],
+            *, unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """The ONE continuation turn reporting `applied`, in `parked`'s
         conversation.
@@ -1575,7 +1649,7 @@ class ChatSystem:
                 persona_name=parked.persona_name,
                 user_identifier=parked.user_identifier,
                 channel=parked.channel,
-                message=_render_resolution_nudge(applied),
+                message=_render_resolution_nudge(applied, unapplied),
                 server_id=parked.server_id,
                 continuation=_ContinuationState(batch=applied),
             )) as agen:

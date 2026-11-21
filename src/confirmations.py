@@ -17,7 +17,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, AbstractSet, Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, AbstractSet, Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from config.global_config import (
     CODR_TICKET_DEFERRAL_TTL, PARK_PURGE_INTERVAL, PARK_REEXECUTION_GUARD_WINDOW,
@@ -652,6 +652,23 @@ class ConfirmationManager:
 
     def enqueue(self, decision: Decision) -> None:
         self._queued.setdefault(decision.park.key, []).append(decision)
+
+    def unqueue(self, key: ConversationKey,
+                decisions: Sequence[Decision]) -> List[Decision]:
+        """Take back those of `decisions` still queued for `key` (DP-528).
+
+        For a settle stopped before it got the conversation lock. One a lock
+        holder has already drained is being applied there and is not returned.
+        """
+        queued = self._queued.get(key, [])
+        ids = {id(d) for d in decisions}
+        mine = [d for d in queued if id(d) in ids]
+        rest = [d for d in queued if id(d) not in ids]
+        if rest:
+            self._queued[key] = rest
+        else:
+            self._queued.pop(key, None)
+        return mine
 
     def drain(self, key: ConversationKey) -> List[Decision]:
         """Take every decision queued for this conversation.

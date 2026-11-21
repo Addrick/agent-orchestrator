@@ -1,13 +1,21 @@
 import { Fragment } from 'react'
-import type { StreamState } from '../state/store'
+import { confirmStatus } from '../state/store'
+import type { LiveConfirm, QueuedConfirm, StreamState } from '../state/store'
 import type { ToolDef } from '../types/contracts'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
+import { ConfirmBar } from './ConfirmBar'
 import { deriveTreatment } from '../state/util'
 
 interface Props {
   stream: StreamState
   tools: ToolDef[]
+  confirmQueue: Record<string, QueuedConfirm>
+  onResolveConfirm: (token: string, approved: boolean) => void
+  // Tokens the transcript already shows as an ephemeral chunk: their live bar
+  // is hidden so one proposal never shows two sets of buttons.
+  parkedTokens: Set<string>
+  heldNote?: string
   onDismiss: () => void
   onRegen: () => void
 }
@@ -15,7 +23,9 @@ interface Props {
 /** The in-flight assistant turn + terminal error/aborted treatments.
  *  This is transient UI; on a clean [DONE] the parent re-fetches the
  *  transcript and clears this, so the persisted row replaces it. */
-export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
+export function StreamRow({
+  stream: s, tools, confirmQueue, onResolveConfirm, parkedTokens, heldNote, onDismiss, onRegen,
+}: Props) {
   if (!s.active && !s.errored && !s.aborted) return null
 
   const treatment = deriveTreatment({
@@ -54,6 +64,25 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
   // show an explicit typing indicator rather than a bare cursor.
   const waiting = s.active && !s.text && !s.reasoning && s.tools.length === 0
 
+  // DP-528: a proposed write sits where it was proposed among the cards (a
+  // parked call gets no card of its own), with its step's thinking and prose.
+  const confirmsAt = (i: number) =>
+    s.confirms.filter((f) => f.at === i).map((f: LiveConfirm) => (
+      <Fragment key={f.token}>
+        {f.reasoning && <ReasoningFold reasoning={f.reasoning} />}
+        {f.prose && <div className="text">{f.prose}</div>}
+        {f.text && <div className="text">{f.text}</div>}
+        {!parkedTokens.has(f.token) && (
+          <ConfirmBar
+            token={f.token}
+            status={confirmStatus(confirmQueue[f.token])}
+            onResolve={onResolveConfirm}
+            heldNote={heldNote}
+          />
+        )}
+      </Fragment>
+    ))
+
   return (
     <div className={'msg' + (treatment === 'aborted' ? ' aborted' : '')}>
       <div className="gut">
@@ -70,13 +99,15 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
 
         {/* Prompt order (DP-437): each step's thinking, its prose (DP-440),
             then its calls; what is still streaming comes after the last card. */}
-        {s.tools.map((tc) => (
+        {s.tools.map((tc, i) => (
           <Fragment key={tc.call_id}>
+            {confirmsAt(i)}
             {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
             {tc.prose && <div className="text">{tc.prose}</div>}
             <ToolCard tc={tc} tools={tools} />
           </Fragment>
         ))}
+        {confirmsAt(s.tools.length)}
 
         {reasoning && <ReasoningFold reasoning={reasoning} />}
 

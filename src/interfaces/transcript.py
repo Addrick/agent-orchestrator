@@ -226,6 +226,7 @@ def build_transcript(
         chunks.append({
             "interaction_id": None,
             "ephemeral_chunk_id": park.get("ephemeral_chunk_id"),
+            "channel": park.get("channel"),
             "role": "assistant",
             "content": park.get("content") or "",
             "ephemeral": True,

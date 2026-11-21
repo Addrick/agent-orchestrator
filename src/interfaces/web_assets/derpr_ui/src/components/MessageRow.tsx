@@ -4,6 +4,8 @@ import { fmtWhen, fmtWhenFull, joinRawTurn, rawThinkState } from '../state/util'
 import { MessageBody } from './MessageBody'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
+import { ConfirmBar } from './ConfirmBar'
+import type { ConfirmStatus } from '../state/store'
 import { VersionChevrons } from './VersionChevrons'
 
 interface Props {
@@ -17,7 +19,9 @@ interface Props {
   onRegen: () => void
   onResync: () => void
   onResolveConfirm: (token: string, approved: boolean) => void
-  resolvingConfirm: boolean
+  // DP-528: this ephemeral chunk's queued/in-flight answer, if any.
+  confirmStatus?: ConfirmStatus
+  heldNote?: string
   isLastUser?: boolean
   isLastAssistant?: boolean
 }
@@ -33,7 +37,8 @@ export const MessageRow = memo(function MessageRow({
   onRegen,
   onResync,
   onResolveConfirm,
-  resolvingConfirm,
+  confirmStatus,
+  heldNote,
   isLastUser,
   isLastAssistant,
   onContinue,
@@ -162,36 +167,12 @@ export const MessageRow = memo(function MessageRow({
         {/* CONFIRM bar for ephemeral parked write — resolves via POST /confirm
             (DP-136 6a) with the ephemeral_chunk_id as the resume token. */}
         {c.ephemeral && (
-          <div className="confirm">
-            <span className="lbl">CONFIRM</span>
-            <button
-              className="btn approve"
-              disabled={resolvingConfirm || !c.ephemeral_chunk_id}
-              title="approve & run the parked write"
-              onClick={() =>
-                c.ephemeral_chunk_id &&
-                onResolveConfirm(c.ephemeral_chunk_id, true)
-              }
-            >
-              ✓ approve &amp; run
-            </button>
-            <button
-              className="btn deny"
-              disabled={resolvingConfirm || !c.ephemeral_chunk_id}
-              title="deny the parked write"
-              onClick={() =>
-                c.ephemeral_chunk_id &&
-                onResolveConfirm(c.ephemeral_chunk_id, false)
-              }
-            >
-              ✕ deny
-            </button>
-            <span className="note">
-              {resolvingConfirm
-                ? 'resolving…'
-                : 'resolves via /confirm · tool_policy = CONFIRM'}
-            </span>
-          </div>
+          <ConfirmBar
+            token={c.ephemeral_chunk_id}
+            status={confirmStatus}
+            heldNote={heldNote}
+            onResolve={onResolveConfirm}
+          />
         )}
       </div>
 

@@ -10,13 +10,15 @@
                                             reasoning delta (delta.reasoning_content)
      event: derpr-tool-start              → live tool card
      event: derpr-tool-result             → tool result
-     event: derpr-confirm                 → parked write (S6; surfaced as event)
+     event: derpr-confirm                 → proposed write awaiting approval (live bar, DP-528)
      event: derpr  data:{id-frame}        → hydrate ids/response_type (EVERY terminal turn)
      data: {"error":{...}}                → error frame
      data: [DONE]                         → finalize
    ============================================================ */
 import { withAuth } from './control_token'
 import type {
+  ConfirmDecision,
+  ConfirmFrame,
   DerprIdFrame,
   ToolStartFrame,
   ToolResultFrame,
@@ -28,6 +30,8 @@ export interface StreamHandlers {
   onReasoning: (delta: string) => void
   onToolStart: (f: ToolStartFrame) => void
   onToolResult: (f: ToolResultFrame) => void
+  // DP-528: a write proposed mid-turn — its approve/deny bar shows at once.
+  onConfirm?: (f: ConfirmFrame) => void
   onIdFrame: (f: DerprIdFrame) => void
   onError: (message: string) => void
   onDone: () => void
@@ -122,8 +126,9 @@ function dispatchBlock(
       h.onToolResult(obj as unknown as ToolResultFrame)
       return
     case 'derpr-confirm':
-      // Deliberately ignored: parked writes are surfaced by the /transcript
-      // re-sync after [DONE], not consumed off the wire.
+      // DP-528: shown live on the streaming row. The /transcript re-sync after
+      // [DONE] still owns the persisted view (one ephemeral chunk per park).
+      h.onConfirm?.(obj as unknown as ConfirmFrame)
       return
     case 'derpr':
       h.onIdFrame(obj as unknown as DerprIdFrame)
@@ -293,11 +298,11 @@ export function attachTurn(runId: string, from: number, h: StreamHandlers): { ab
   return { abort: () => ctrl.abort() }
 }
 
-/** Resolve a parked CONFIRM write (S6 reuse). Same wire protocol. */
+/** Answer one or more parked CONFIRM writes (S6 reuse). Same wire protocol.
+ *  DP-528: several go as one batch, settled with one continuation. */
 export function streamConfirm(
   persona: string,
-  approved: boolean,
-  token: string,
+  decisions: ConfirmDecision[],
   h: StreamHandlers,
   channel?: string,
   runId?: string,
@@ -305,7 +310,7 @@ export function streamConfirm(
   return openSse(
     `/api/v1/persona/${encodeURIComponent(persona)}/confirm`,
     // channel files the continuation's run where /active_turn looks (DP-487)
-    { approved, token, channel, derpr_run_id: runId },
+    { decisions, channel, derpr_run_id: runId },
     'confirm',
     h,
   )
