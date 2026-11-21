@@ -411,6 +411,8 @@ body.resizing.rows { cursor: row-resize; }
 .btn.deny { color: var(--danger); border-color: rgba(229,114,114,0.4); }
 .btn.deny:hover { background: var(--danger-bg); }
 .confirm .note { margin-left: auto; font-size: 9.5px; color: var(--ink-faint); }
+/* DP-528: an answer clicked while a reply streams, waiting to be sent */
+.btn.queued { border-style: dashed; box-shadow: inset 0 0 0 1px currentColor; }
 
 /* context view rows */
 .ctxrow { padding: 11px 18px; border-bottom: 1px solid var(--line); }

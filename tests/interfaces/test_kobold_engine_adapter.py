@@ -614,6 +614,71 @@ def test_confirm_route_approves_and_streams_continuation():
     mm.close()
 
 
+def test_confirm_route_settles_a_batch_with_one_continuation():
+    """DP-528: the portal queues approve/deny clicks made while a reply streams
+    and sends them as one `decisions` list. Every write in it is answered and
+    ONE continuation reports them — sent one by one, the second would be
+    refused as busy behind the first's continuation."""
+    calls = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        calls["n"] += 1
+        yield {"type": "api_payload", "payload": {}}
+        if calls["n"] == 1:
+            yield {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "a", "body": "b"}},
+                {"id": "w2", "name": "create_ticket", "arguments": {"title": "c", "body": "d"}},
+            ]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            yield {"type": "text_delta", "text": "One opened, one refused."}
+            yield {"type": "done", "full_text": "One opened, one refused."}
+
+    adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    enable_all_tools(persona)
+    executed = []
+
+    async def fake_execute(name, _offered, **kwargs):
+        executed.append(kwargs.get("arguments") or _offered)
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]
+
+    body = _chat_body("open two tickets", stream=True)
+    body["derpr_user_text"] = "open two tickets"
+    with TestClient(adapter.app) as client:
+        with client.stream("POST", "/chat/completions", json=body) as r:
+            park_text = b"".join(chunk for chunk in r.iter_raw()).decode("utf-8")
+        tokens = [json.loads(m)["token"] for m in
+                  re.findall(r"event: derpr-confirm\ndata: (\{.*?\})\n\n", park_text)]
+        assert len(tokens) == 2, park_text
+        before = calls["n"]
+        with client.stream(
+            "POST", "/api/v1/persona/test_persona/confirm",
+            json={"decisions": [{"token": tokens[0], "approved": True},
+                                {"token": tokens[1], "approved": False}]},
+        ) as r2:
+            resume_text = b"".join(chunk for chunk in r2.iter_raw()).decode("utf-8")
+
+    assert len(executed) == 1, "only the approved write may run"
+    assert calls["n"] - before == 1, "the batch must run exactly one continuation"
+    assert "One opened, one refused." in resume_text
+    assert chat_system.confirmations.list_for("portal", "test_persona") == []
+    mm.close()
+
+
+def test_confirm_route_rejects_a_decision_without_a_token():
+    adapter, mm, _, _ = _make_real_adapter()
+    with TestClient(adapter.app) as client:
+        r = client.post("/api/v1/persona/test_persona/confirm",
+                        json={"decisions": [{"token": "t1", "approved": True},
+                                            {"approved": True}]})
+        empty = client.post("/api/v1/persona/test_persona/confirm", json={"decisions": []})
+    assert r.status_code == 400
+    assert empty.status_code == 400
+    mm.close()
+
+
 def test_confirm_route_unknown_persona_returns_404():
     adapter, mm, _, _ = _make_real_adapter()
     with TestClient(adapter.app) as client:
@@ -2280,7 +2345,7 @@ def test_adapter_engine_surface_is_enumerated():
         "memory_persona_names": "_memory_persona_names",
         "rebuild_persona_memory": "_rebuild_persona_memory",
         "stream_response": "_stream_response",
-        "stream_resolve_park": "_stream_resolve_park",
+        "stream_resolve_parks": "_stream_resolve_parks",
         "assemble_request": "_assemble_request",
         "get_view_history": "_get_view_history",
         "get_session_memory_block": "_get_session_memory_block",
@@ -2821,7 +2886,7 @@ def test_confirm_relay_closes_the_generator_on_disconnect():
             # Runs on aclose(); without one it waits for the finalizer.
             closed.append(True)
 
-    adapter.chat_system.stream_resolve_park = fake_resolve  # type: ignore[method-assign]
+    adapter.chat_system.stream_resolve_parks = fake_resolve  # type: ignore[method-assign]
 
     async def always_disconnected(self):
         return True

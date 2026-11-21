@@ -22,6 +22,7 @@ import type {
   DevCommandResponse,
   AssembledRequest,
   TurnRunInfo,
+  ConfirmFrame,
 } from '../types/contracts'
 
 export type ViewMode = 'rendered' | 'context'
@@ -85,6 +86,28 @@ export interface StreamState {
   // row's text and the row itself is hidden, so the reply grows in place
   // instead of a second assistant row appearing under it.
   continuingId: number | null
+  // DP-528: writes this stream proposed, in arrival order — their approve/deny
+  // bars render on the live row before the turn ends.
+  confirms: ConfirmFrame[]
+}
+
+// DP-528: an operator answer to a proposed write that has not been sent yet
+// (`resolving: false` — clicked while a reply streams), or one in flight.
+export interface QueuedConfirm {
+  approved: boolean
+  resolving: boolean
+  persona: string
+}
+export type ConfirmStatus = 'approve' | 'deny' | 'resolving'
+export function confirmStatus(e: QueuedConfirm | undefined): ConfirmStatus | undefined {
+  if (!e) return undefined
+  return e.resolving ? 'resolving' : e.approved ? 'approve' : 'deny'
+}
+// The queue after a /confirm stream ended, however it ended: what it carried
+// is settled (or the re-sync will say otherwise); what was clicked since stays.
+function dropResolving(q: Record<string, QueuedConfirm>): Record<string, QueuedConfirm> {
+  if (!Object.values(q).some((e) => e.resolving)) return q
+  return Object.fromEntries(Object.entries(q).filter(([, e]) => !e.resolving))
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -98,6 +121,7 @@ const EMPTY_STREAM: StreamState = {
   responseType: null,
   userText: null,
   continuingId: null,
+  confirms: [],
 }
 
 // The interaction_id the screen ends on — what the stale-view guard compares
@@ -226,9 +250,14 @@ export function usePortalStore() {
   // instead — without it a regen/confirm racing an active stream interleaves
   // tokens into the shared stream state and leaks the prior abort handle.
   const streamingRef = useRef(false)
-  // True while a CONFIRM-mode write is parked awaiting approval — drives the
-  // approve/deny bar's busy state on the ephemeral chunk.
-  const [resolvingConfirm, setResolvingConfirm] = useState<boolean>(false)
+  // DP-528: approve/deny answers by park token — queued while a reply streams
+  // (only one stream runs per conversation, and a park is not answerable until
+  // the turn that proposed it is saved), then sent together as one batch.
+  const [confirmQueue, setConfirmQueue] = useState<Record<string, QueuedConfirm>>({})
+  const confirmQueueRef = useRef(confirmQueue)
+  useEffect(() => {
+    confirmQueueRef.current = confirmQueue
+  }, [confirmQueue])
   // Mirror of `chunks` for the action callbacks: the stale-view guard must
   // send the id the screen ends on *now*, not when the callback was built.
   // `refreshTranscript` also writes it directly, so an action awaiting a
@@ -857,6 +886,12 @@ export function usePortalStore() {
           ],
         }))
       },
+      onConfirm: (f: ConfirmFrame) =>
+        setStream((s) =>
+          s.confirms.some((c) => c.token === f.token)
+            ? s // a re-attach replays from frame 0
+            : { ...s, confirms: [...s.confirms, f] },
+        ),
       onToolResult: (f: ToolResultFrame) =>
         setStream((s) => ({
           ...s,
@@ -886,7 +921,7 @@ export function usePortalStore() {
         abortRef.current = null
         resetTokenBuf()
         setStream({ ...EMPTY_STREAM })
-        setResolvingConfirm(false)
+        setConfirmQueue(dropResolving)
         setBanner(REPLAY_GONE)
         void refreshTranscript(personaName, channel)
       },
@@ -900,9 +935,9 @@ export function usePortalStore() {
         runIdRef.current = null
         abortRef.current = null
         // A failed CONFIRM resume must re-arm the approve/deny bar — onDone
-        // never fires on this path, and leaving resolvingConfirm set keeps the
-        // bar permanently disabled ("resolving…") until a page reload.
-        setResolvingConfirm(false)
+        // never fires on this path, and leaving its decisions marked resolving
+        // keeps the bars permanently disabled ("resolving…") until a reload.
+        setConfirmQueue(dropResolving)
         setStream((s) => ({ ...s, active: false, errored: true, errorMsg: msg }))
         resyncBeforeSendRef.current = true
       },
@@ -946,7 +981,7 @@ export function usePortalStore() {
           if (s.aborted) return { ...s, active: false, userText: null }
           return { ...EMPTY_STREAM }
         })
-        setResolvingConfirm(false)
+        setConfirmQueue(dropResolving)
         abortRef.current = null
         // DP-523: a memory-mode change made while this turn streamed.
         pinMergedChannel(personaRef.current)
@@ -959,7 +994,7 @@ export function usePortalStore() {
         abortRef.current = null
         resetTokenBuf()
         setStream({ ...EMPTY_STREAM })
-        setResolvingConfirm(false)
+        setConfirmQueue(dropResolving)
         setBanner(STALE_BANNER)
         if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
         void refreshTranscript(personaName, channel, () =>
@@ -1002,7 +1037,7 @@ export function usePortalStore() {
           runIdRef.current = null
           resetTokenBuf()
           setStream({ ...EMPTY_STREAM })
-          setResolvingConfirm(false)
+          setConfirmQueue(dropResolving)
         }
         return
       }
@@ -1016,7 +1051,7 @@ export function usePortalStore() {
         resetTokenBuf()
         await refreshTranscript(p, ch)
         setStream({ ...EMPTY_STREAM })
-        setResolvingConfirm(false)
+        setConfirmQueue(dropResolving)
         return
       }
       abortRef.current?.abort() // the dead connection, if any
@@ -1036,7 +1071,7 @@ export function usePortalStore() {
         runIdRef.current = null
         resetTokenBuf()
         setStream({ ...EMPTY_STREAM })
-        setResolvingConfirm(false)
+        setConfirmQueue(dropResolving)
         return
       }
       // A continue grows its row in place: seed with what the row holds, as
@@ -1050,7 +1085,6 @@ export function usePortalStore() {
         reasoning: row?.reasoning ?? null,
         continuingId: row ? run.continue_id : null,
       })
-      if (run.kind === 'confirm') setResolvingConfirm(true)
       abortRef.current = attachTurn(run.run_id, 0, buildHandlers(p, ch))
     },
     [buildHandlers, refreshTranscript, resetTokenBuf],
@@ -1165,40 +1199,69 @@ export function usePortalStore() {
     [sendTurn],
   )
 
-  // ---- resolve a parked CONFIRM write (6a) --------------------------
-  // Approve/deny a parked write via the dedicated POST /confirm endpoint
-  // (NOT a free-text chat turn). `token` is the ephemeral chunk's
-  // ephemeral_chunk_id (== the engine's resume token). The continuation
-  // streams back over the same SSE protocol; on [DONE] we re-sync from
-  // /transcript so the ephemeral chunk becomes a persisted row (approve) or
-  // vanishes (deny). A chained write re-parks as a fresh ephemeral chunk.
+  // ---- resolve parked CONFIRM writes (6a, DP-528) ---------------------
+  // A click records the answer by token; clicking the same answer again takes
+  // it back. Nothing is sent while a stream runs: the conversation has one
+  // turn at a time, and the park a live bar shows is not answerable until the
+  // turn that proposed it is saved. `flushConfirms` sends every queued answer
+  // as ONE POST /confirm the moment no stream is running, which the engine
+  // settles as one batch with one continuation. On [DONE] the /transcript
+  // re-sync turns answered ephemeral chunks into persisted rows (or drops
+  // them); a chained write re-parks as a fresh ephemeral chunk.
   const resolveConfirm = useCallback(
-    async (token: string, approved: boolean) => {
+    (token: string, approved: boolean) => {
       if (!persona) return
-      // Same single-stream guard as sendTurn — approve/deny while a stream is
-      // in flight would interleave into the shared stream state.
-      if (streamingRef.current) return
-      setBanner(null)
-      idFrameRef.current = null
-      streamingRef.current = true
-      resetTokenBuf()
-      setResolvingConfirm(true)
-      setStream({ ...EMPTY_STREAM, active: true })
-      inflightTextRef.current = null
-      const runId = newRunId()
-      runIdRef.current = runId
-      const handle = streamConfirm(
-        persona.name,
-        approved,
-        token,
-        buildHandlers(persona.name, activeChannelRef.current),
-        activeChannelRef.current,
-        runId,
-      )
-      abortRef.current = handle
+      const name = persona.name
+      setConfirmQueue((q) => {
+        const cur = q[token]
+        if (cur?.resolving) return q
+        const next = { ...q }
+        if (cur && cur.approved === approved) delete next[token]
+        else next[token] = { approved, resolving: false, persona: name }
+        return next
+      })
     },
-    [persona, buildHandlers, resetTokenBuf],
+    [persona],
   )
+
+  const flushConfirms = useCallback(() => {
+    if (!persona || streamingRef.current) return
+    const queued = Object.entries(confirmQueueRef.current).filter(([, e]) => !e.resolving)
+    if (!queued.length) return
+    // A switch of persona leaves the old one's answers unsendable from here
+    // (its tokens are another conversation's): drop them, as a reload would.
+    const mine = queued.filter(([, e]) => e.persona === persona.name)
+    setConfirmQueue((q) => {
+      const next: Record<string, QueuedConfirm> = {}
+      for (const [t, e] of Object.entries(q)) {
+        if (e.persona !== persona.name) continue
+        next[t] = { ...e, resolving: true }
+      }
+      return next
+    })
+    if (!mine.length) return
+    setBanner(null)
+    idFrameRef.current = null
+    streamingRef.current = true
+    resetTokenBuf()
+    setStream({ ...EMPTY_STREAM, active: true })
+    inflightTextRef.current = null
+    const runId = newRunId()
+    runIdRef.current = runId
+    abortRef.current = streamConfirm(
+      persona.name,
+      mine.map(([token, e]) => ({ token, approved: e.approved })),
+      buildHandlers(persona.name, activeChannelRef.current),
+      activeChannelRef.current,
+      runId,
+    )
+  }, [persona, buildHandlers, resetTokenBuf])
+
+  // Send queued answers whenever no stream is running: straight away for a
+  // click on an idle page, else as soon as the running reply ends.
+  useEffect(() => {
+    if (!stream.active) flushConfirms()
+  }, [confirmQueue, stream.active, flushConfirms])
 
   const abortTurn = useCallback(async () => {
     // DP-487: a turn outlives its connection, so dropping the SSE no longer
@@ -1220,7 +1283,7 @@ export function usePortalStore() {
     // the "■ stop" button and the StreamRow cursor blinking forever.
     setStream((s) => ({ ...s, active: false, aborted: true, userText: null }))
     // An aborted CONFIRM resume never reaches onDone — re-arm the bar.
-    setResolvingConfirm(false)
+    setConfirmQueue(dropResolving)
     // The stopped turn's rows are in the DB but not on screen until a
     // re-sync — make sure the next send does one first.
     resyncBeforeSendRef.current = true
@@ -1283,7 +1346,7 @@ export function usePortalStore() {
   // turn (persisted before generation) is only in the DB — surface it.
   const dismissStream = useCallback(() => {
     streamingRef.current = false
-    setResolvingConfirm(false)
+    setConfirmQueue(dropResolving)
     resetTokenBuf()
     setStream(EMPTY_STREAM)
     if (persona) void refreshTranscript(persona.name, activeChannelRef.current)
@@ -1417,7 +1480,7 @@ export function usePortalStore() {
     offline,
     loading,
     stream,
-    resolvingConfirm,
+    confirmQueue,
     devRow,
     banner,
     alarms,

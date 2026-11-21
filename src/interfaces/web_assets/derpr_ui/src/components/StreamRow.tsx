@@ -1,13 +1,17 @@
 import { Fragment } from 'react'
-import type { StreamState } from '../state/store'
+import { confirmStatus } from '../state/store'
+import type { QueuedConfirm, StreamState } from '../state/store'
 import type { ToolDef } from '../types/contracts'
 import { ReasoningFold } from './ReasoningFold'
 import { ToolCard } from './ToolCard'
+import { ConfirmBar } from './ConfirmBar'
 import { deriveTreatment } from '../state/util'
 
 interface Props {
   stream: StreamState
   tools: ToolDef[]
+  confirmQueue: Record<string, QueuedConfirm>
+  onResolveConfirm: (token: string, approved: boolean) => void
   onDismiss: () => void
   onRegen: () => void
 }
@@ -15,7 +19,7 @@ interface Props {
 /** The in-flight assistant turn + terminal error/aborted treatments.
  *  This is transient UI; on a clean [DONE] the parent re-fetches the
  *  transcript and clears this, so the persisted row replaces it. */
-export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
+export function StreamRow({ stream: s, tools, confirmQueue, onResolveConfirm, onDismiss, onRegen }: Props) {
   if (!s.active && !s.errored && !s.aborted) return null
 
   const treatment = deriveTreatment({
@@ -54,6 +58,21 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
   // show an explicit typing indicator rather than a bare cursor.
   const waiting = s.active && !s.text && !s.reasoning && s.tools.length === 0
 
+  // DP-528: a proposed write's bar sits under its own tool card; one whose
+  // call has no card on this row (none was streamed) goes after the cards.
+  const cardIds = new Set(s.tools.map((t) => t.call_id))
+  const bar = (f: (typeof s.confirms)[number]) => (
+    <ConfirmBar
+      key={f.token}
+      token={f.token}
+      status={confirmStatus(confirmQueue[f.token])}
+      onResolve={onResolveConfirm}
+    />
+  )
+  const barsFor = (callId: string) =>
+    s.confirms.filter((f) => f.calls.some((c) => c.id === callId)).map(bar)
+  const loose = s.confirms.filter((f) => !f.calls.some((c) => c.id != null && cardIds.has(c.id)))
+
   return (
     <div className={'msg' + (treatment === 'aborted' ? ' aborted' : '')}>
       <div className="gut">
@@ -75,6 +94,13 @@ export function StreamRow({ stream: s, tools, onDismiss, onRegen }: Props) {
             {tc.reasoning && <ReasoningFold reasoning={tc.reasoning} />}
             {tc.prose && <div className="text">{tc.prose}</div>}
             <ToolCard tc={tc} tools={tools} />
+            {barsFor(tc.call_id)}
+          </Fragment>
+        ))}
+        {loose.map((f) => (
+          <Fragment key={f.token}>
+            {f.text && <div className="text">{f.text}</div>}
+            {bar(f)}
           </Fragment>
         ))}
 

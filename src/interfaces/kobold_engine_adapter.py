@@ -692,11 +692,11 @@ class KoboldEngineAdapter:
         return self.chat_system.stream_response
 
     @property
-    def _stream_resolve_park(
+    def _stream_resolve_parks(
         self,
     ) -> Callable[..., AsyncGenerator[GenerationEvent, None]]:
-        """Approve/deny continuation stream for one gated write."""
-        return self.chat_system.stream_resolve_park
+        """Approve/deny continuation stream for a batch of gated writes."""
+        return self.chat_system.stream_resolve_parks
 
     @property
     def _assemble_request(self) -> Callable[..., Awaitable[Optional[AssembledRequest]]]:
@@ -1196,19 +1196,34 @@ class KoboldEngineAdapter:
             persona) identified it; now several can be pending at once and the
             token is the only thing that says which one the operator answered.
             The portal user is always "portal".
+
+            DP-528: `{"decisions": [{"token": ..., "approved": bool}, ...]}`
+            answers several at once — what the portal sends when the operator
+            clicked more than one while a reply was streaming. They settle as one
+            batch with one continuation (`ChatSystem.stream_resolve_parks`).
             """
             if name not in self._personas:
                 return JSONResponse(status_code=404,
                                     content={"error": f"Persona '{name}' not found"})
             body = await request.json()
-            approved = bool(body.get("approved"))
-            token = body.get("token") or None
-            if not token:
+            raw = body.get("decisions")
+            if raw is None:
+                raw = [{"token": body.get("token"), "approved": body.get("approved")}]
+            if not isinstance(raw, list) or not raw:
                 return JSONResponse(
                     status_code=400,
-                    content={"error": "token is required — it identifies which "
-                                      "pending action is being resolved"},
+                    content={"error": "decisions must be a non-empty list"},
                 )
+            decisions: List[Tuple[str, bool]] = []
+            for d in raw:
+                token = d.get("token") if isinstance(d, dict) else None
+                if not isinstance(token, str) or not token:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "token is required — it identifies which "
+                                          "pending action is being resolved"},
+                    )
+                decisions.append((token, bool(d.get("approved"))))
 
             # DP-487: the continuation runs as a turn like any other, so it
             # outlives the connection too. The park is keyed (user, persona);
@@ -1228,11 +1243,10 @@ class KoboldEngineAdapter:
                 # stop releases the lock at once rather than whenever the
                 # asyncgen finalizer runs (a concurrent approve/deny, Discord's
                 # reaction handler included, would block until then).
-                return self._stream_resolve_park(
+                return self._stream_resolve_parks(
                     user_identifier="portal",
                     persona_name=name,
-                    token=token,
-                    approved=approved,
+                    decisions=decisions,
                 )
 
             def to_frames(ev: GenerationEvent) -> List[bytes]:

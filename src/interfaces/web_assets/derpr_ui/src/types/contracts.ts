@@ -235,6 +235,20 @@ export interface ToolStartFrame {
   call_id: string
   group_id: string | null
 }
+/** `event: derpr-confirm` — a write the model just proposed, awaiting the
+ *  operator (DP-528: rendered live, not only after the turn's re-sync).
+ *  Display only: answering it POSTs `token` back, never the arguments. */
+export interface ConfirmFrame {
+  text: string
+  persona: string
+  token: string
+  calls: { name: string; arguments: Record<string, unknown>; id: string | null }[]
+}
+/** One operator answer to a proposed write, as `/confirm` takes it. */
+export interface ConfirmDecision {
+  token: string
+  approved: boolean
+}
 export interface ToolResultFrame {
   call_id: string
   tool_name: string

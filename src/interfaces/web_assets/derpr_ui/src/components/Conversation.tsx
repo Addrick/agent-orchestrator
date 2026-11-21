@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { confirmStatus } from '../state/store'
 import type { PortalStore } from '../state/store'
 import { estimateTokens, policyLabel } from '../state/util'
 import { MessageRow } from './MessageRow'
@@ -32,7 +33,7 @@ export function Conversation({ store }: { store: PortalStore }) {
     editRow,
     deleteRow,
     resolveConfirm,
-    resolvingConfirm,
+    confirmQueue,
     refreshTranscript,
     alarms,
     dismissAlarm,
@@ -226,7 +227,11 @@ export function Conversation({ store }: { store: PortalStore }) {
                     onContinue={canContinue && i === chunks.length - 1 ? continueTurn : undefined}
                     onResync={onResync}
                     onResolveConfirm={resolveConfirm}
-                    resolvingConfirm={resolvingConfirm}
+                    confirmStatus={
+                      c.ephemeral_chunk_id
+                        ? confirmStatus(confirmQueue[c.ephemeral_chunk_id])
+                        : undefined
+                    }
                   />
               ))}
 
@@ -253,6 +258,8 @@ export function Conversation({ store }: { store: PortalStore }) {
               <StreamRow
                 stream={stream}
                 tools={tools}
+                confirmQueue={confirmQueue}
+                onResolveConfirm={resolveConfirm}
                 onDismiss={dismissStream}
                 onRegen={stream.continuingId != null ? onContinue : regen}
               />

@@ -1179,25 +1179,73 @@ class ChatSystem:
         3. Execute + patch history for each decision, in approval order.
         4. Run ONE continuation turn on the freshly-rebuilt history.
         """
-        key = (user_identifier, persona_name)
-        parked = self.confirmations.take(token)
+        async with aclosing(self.stream_resolve_parks(
+                user_identifier, persona_name, [(token, approved)], note=note,
+        )) as agen:
+            async for ev in agen:
+                yield ev
 
-        if parked is None:
+    async def stream_resolve_parks(
+            self, user_identifier: str, persona_name: str,
+            decisions: Sequence[Tuple[str, bool]], *, note: Optional[str] = None,
+    ) -> AsyncGenerator[GenerationEvent, None]:
+        """Approve or deny SEVERAL gated writes of one conversation as one batch,
+        with one continuation reporting them all (DP-528).
+
+        The portal queues the operator's clicks while a reply streams and sends
+        them together when it ends. Sent one by one, each would be refused as
+        busy behind the previous one's continuation, and each would run its own
+        summary turn over the same history. This is `stream_resolve_deferrals`'
+        batch (DP-517) for the approval kind: every token is claimed and checked
+        exactly as a single resolve checks it (`_claim_approval`), then
+        `_stream_settle_batch` queues all but the last before the drain that
+        settles the last takes them all.
+
+        A token that cannot be claimed (already answered, expired, another
+        conversation's) is skipped; the rest still settle. Only when none can
+        is its refusal the reply.
+        """
+        key = (user_identifier, persona_name)
+        claimed: List[Decision] = []
+        refusals: List[str] = []
+        seen: Set[str] = set()
+        for token, approved in decisions:
+            if token in seen:
+                continue
+            seen.add(token)
+            parked, refusal = self._claim_approval(token, key)
+            if parked is None:
+                refusals.append(refusal)
+                continue
+            claimed.append(Decision(park=parked, approved=approved, note=note))
+
+        if not claimed:
             yield DoneEvent(
-                text="No such pending action — it was already resolved or it expired.",
+                text=" ".join(dict.fromkeys(refusals)) or "No such pending action.",
                 response_type=ResponseType.DEV_COMMAND,
             )
             return
+
+        async with aclosing(self._stream_settle_batch(
+                claimed, lambda d: self.confirmations.restore(d.park))) as agen:
+            async for ev in agen:
+                yield ev
+
+    def _claim_approval(
+            self, token: str, key: ConversationKey,
+    ) -> Tuple[Optional[ParkedWrite], str]:
+        """Take the approval park `token` names for conversation `key`, or
+        return None and the reason it may not be answered from here."""
+        parked = self.confirmations.take(token)
+
+        if parked is None:
+            return None, "No such pending action — it was already resolved or it expired."
 
         if parked.key != key:
             # A token belonging to another conversation must not be resolvable
             # from this one even if the caller somehow knows the hex.
             self.confirmations.restore(parked)
-            yield DoneEvent(
-                text="No such pending action.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "No such pending action."
 
         if parked.kind != DEFERRAL_KIND_APPROVAL:
             # An approve/deny click can only answer a deferral that asked a
@@ -1213,22 +1261,14 @@ class ChatSystem:
                 "is resolved by its own authority, not by an operator click",
                 token, parked.kind,
             )
-            yield DoneEvent(
-                text="No such pending action.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "No such pending action."
 
         if self.confirmations.is_expired(parked):
             self.confirmations.expire(
                 parked, PARK_STATUS_EXPIRED,
                 "Operator answered after the TTL had passed",
             )
-            yield DoneEvent(
-                text="That action expired before it was reviewed.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "That action expired before it was reviewed."
 
         if parked.persona_name not in self.personas:
             # Same restore as the wrong-conversation branch above: `take()` has
@@ -1237,17 +1277,9 @@ class ChatSystem:
             # its history entry reading `awaiting_human_approval` forever with
             # no park left for the duplicate guard to match against.
             self.confirmations.restore(parked)
-            yield DoneEvent(
-                text="Error: Persona not found.",
-                response_type=ResponseType.DEV_COMMAND,
-            )
-            return
+            return None, "Error: Persona not found."
 
-        async with aclosing(self._stream_settle(
-            Decision(park=parked, approved=approved, note=note),
-        )) as agen:
-            async for ev in agen:
-                yield ev
+        return parked, ""
 
     async def stream_resolve_deferral(
             self, token: str, *, kind: str, status: str, result: Any,
