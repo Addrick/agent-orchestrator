@@ -667,6 +667,134 @@ def test_confirm_route_settles_a_batch_with_one_continuation():
     mm.close()
 
 
+def _park_two_writes(stream_messages):
+    """A real adapter whose first turn proposes two writes; returns its parts
+    and the two park tokens. The client stays open for the caller."""
+    adapter, mm, persona, chat_system = _make_real_adapter(stream_messages=stream_messages)
+    persona.set_execution_mode(ExecutionMode.CONFIRM)
+    enable_all_tools(persona)
+
+    async def fake_execute(name, _offered, **kwargs):
+        return {"ok": True}
+    chat_system.tool_manager.execute_tool = fake_execute  # type: ignore[method-assign]
+    client = TestClient(adapter.app)
+    client.__enter__()
+    body = _chat_body("open two tickets", stream=True)
+    body["derpr_user_text"] = "open two tickets"
+    with client.stream("POST", "/chat/completions", json=body) as r:
+        park_text = b"".join(chunk for chunk in r.iter_raw()).decode("utf-8")
+    tokens = [json.loads(m)["token"] for m in
+              re.findall(r"event: derpr-confirm\ndata: (\{.*?\})\n\n", park_text)]
+    assert len(tokens) == 2, park_text
+    return adapter, mm, chat_system, client, tokens
+
+
+def _two_writes_then(reply: str, seen: list):
+    calls = {"n": 0}
+
+    async def stream_messages(*args, **kwargs):
+        calls["n"] += 1
+        yield {"type": "api_payload", "payload": {}}
+        if calls["n"] == 1:
+            yield {"type": "tool_calls", "calls": [
+                {"id": "w1", "name": "create_ticket", "arguments": {"title": "a", "body": "b"}},
+                {"id": "w2", "name": "create_ticket", "arguments": {"title": "c", "body": "d"}},
+            ]}
+            yield {"type": "done", "full_text": ""}
+        else:
+            seen.append(repr(args) + repr(kwargs))
+            yield {"type": "text_delta", "text": reply}
+            yield {"type": "done", "full_text": reply}
+    return stream_messages
+
+
+def test_confirm_batch_reports_a_click_it_could_not_apply():
+    """DP-528 review: a batch where one click can no longer be applied (it
+    expired while the reply streamed) used to drop that click silently — the
+    reply covered only the rest, and the operator read silence as "done". The
+    continuation is told, so the reply can say so."""
+    seen: list = []
+    adapter, mm, chat_system, client, tokens = _park_two_writes(_two_writes_then("ok", seen))
+    seen.clear()  # the proposing turn's own follow-up step
+    try:
+        chat_system.confirmations.pending[tokens[1]].created_at = 0  # long expired
+        with client.stream(
+            "POST", "/api/v1/persona/test_persona/confirm",
+            json={"decisions": [{"token": tokens[0], "approved": True},
+                                {"token": tokens[1], "approved": True}]},
+        ) as r:
+            b"".join(r.iter_raw())
+    finally:
+        client.__exit__(None, None, None)
+    assert len(seen) == 1, "one continuation for the claimed decision"
+    assert "NOT applied: That action (create_ticket) expired" in seen[0]
+    mm.close()
+
+
+def test_confirm_run_is_filed_under_the_parks_channel():
+    """DP-528 review: parks list persona-wide, so the bar clicked can be another
+    channel's. The continuation answers in the park's channel; its run must be
+    filed there too, or /active_turn in that channel cannot find it."""
+    seen: list = []
+    adapter, mm, chat_system, client, tokens = _park_two_writes(_two_writes_then("ok", seen))
+    park_channel = chat_system.confirmations.pending[tokens[0]].channel
+    filed = []
+    real_start = adapter._turn_runs.start
+
+    def spy(key, *a, **kw):
+        filed.append(key[2])
+        return real_start(key, *a, **kw)
+    adapter._turn_runs.start = spy  # type: ignore[method-assign]
+    try:
+        transcript = client.get("/api/v1/session/test_persona/transcript").json()
+        with client.stream(
+            "POST", "/api/v1/persona/test_persona/confirm",
+            json={"decisions": [{"token": tokens[0], "approved": True}],
+                  "channel": "somewhere_else"},
+        ) as r:
+            b"".join(r.iter_raw())
+    finally:
+        client.__exit__(None, None, None)
+    assert park_channel and park_channel != "somewhere_else"
+    assert filed == [park_channel]
+    eph = [c for c in transcript["chunks"] if c.get("ephemeral")]
+    assert {c["channel"] for c in eph} == {park_channel}
+    mm.close()
+
+
+def test_settle_stopped_while_waiting_for_the_lock_puts_its_decisions_back():
+    """DP-528 review: a confirm run stopped while another settle held the
+    conversation lock left its taken parks in the queue — applied unannounced
+    by whatever settled next, or lost on restart. They go back to pending."""
+    seen: list = []
+    adapter, mm, chat_system, client, tokens = _park_two_writes(_two_writes_then("ok", seen))
+    client.__exit__(None, None, None)
+    seen.clear()  # the proposing turn's own follow-up step
+    store = chat_system.confirmations
+    key = store.pending[tokens[0]].key
+
+    async def scenario():
+        store._locks.pop(key, None)
+        lock = store.lock_for(key)
+        await lock.acquire()
+        agen = chat_system.stream_resolve_parks(
+            "portal", "test_persona", [(t, True) for t in tokens])
+        step = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.05)
+        assert not step.done(), "must be waiting on the lock"
+        step.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await step
+        lock.release()
+        await agen.aclose()
+
+    asyncio.run(scenario())
+    assert sorted(p.token for p in store.list_for("portal", "test_persona")) == sorted(tokens)
+    assert not store._queued.get(key)
+    assert seen == [], "nothing may have run"
+    mm.close()
+
+
 def test_confirm_route_rejects_a_decision_without_a_token():
     adapter, mm, _, _ = _make_real_adapter()
     with TestClient(adapter.app) as client:

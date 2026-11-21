@@ -135,6 +135,13 @@ export function Conversation({ store }: { store: PortalStore }) {
   const onContinue = useCallback(() => void continueTurn(), [continueTurn])
   // The row being continued is drawn by the stream row while it grows.
   const hiddenId = stream.active || stream.aborted ? stream.continuingId : null
+  // DP-528: queued answers are not sent over a failed or stopped reply.
+  const heldNote =
+    stream.errored || stream.aborted ? 'sent when you dismiss the reply below' : undefined
+  const parkedTokens = useMemo(
+    () => new Set(chunks.flatMap((c) => (c.ephemeral_chunk_id ? [c.ephemeral_chunk_id] : []))),
+    [chunks],
+  )
 
   return (
     <div className="col convo">
@@ -232,6 +239,7 @@ export function Conversation({ store }: { store: PortalStore }) {
                         ? confirmStatus(confirmQueue[c.ephemeral_chunk_id])
                         : undefined
                     }
+                    heldNote={c.ephemeral ? heldNote : undefined}
                   />
               ))}
 
@@ -260,6 +268,8 @@ export function Conversation({ store }: { store: PortalStore }) {
                 tools={tools}
                 confirmQueue={confirmQueue}
                 onResolveConfirm={resolveConfirm}
+                parkedTokens={parkedTokens}
+                heldNote={heldNote && 'sent when you dismiss this reply'}
                 onDismiss={dismissStream}
                 onRegen={stream.continuingId != null ? onContinue : regen}
               />

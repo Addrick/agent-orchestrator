@@ -21,6 +21,7 @@ interface Props {
   onResolveConfirm: (token: string, approved: boolean) => void
   // DP-528: this ephemeral chunk's queued/in-flight answer, if any.
   confirmStatus?: ConfirmStatus
+  heldNote?: string
   isLastUser?: boolean
   isLastAssistant?: boolean
 }
@@ -37,6 +38,7 @@ export const MessageRow = memo(function MessageRow({
   onResync,
   onResolveConfirm,
   confirmStatus,
+  heldNote,
   isLastUser,
   isLastAssistant,
   onContinue,
@@ -168,6 +170,7 @@ export const MessageRow = memo(function MessageRow({
           <ConfirmBar
             token={c.ephemeral_chunk_id}
             status={confirmStatus}
+            heldNote={heldNote}
             onResolve={onResolveConfirm}
           />
         )}

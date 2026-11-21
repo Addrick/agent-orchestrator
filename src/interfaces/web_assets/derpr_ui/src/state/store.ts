@@ -88,7 +88,16 @@ export interface StreamState {
   continuingId: number | null
   // DP-528: writes this stream proposed, in arrival order — their approve/deny
   // bars render on the live row before the turn ends.
-  confirms: ConfirmFrame[]
+  confirms: LiveConfirm[]
+}
+
+// DP-528: a proposed write on the live row, with where it falls among the
+// tool cards (`at` = cards streamed before it) and the step's own thinking and
+// prose — a parked call never gets a card of its own to carry them.
+export interface LiveConfirm extends ConfirmFrame {
+  at: number
+  reasoning: string | null
+  prose: string | null
 }
 
 // DP-528: an operator answer to a proposed write that has not been sent yet
@@ -97,6 +106,8 @@ export interface QueuedConfirm {
   approved: boolean
   resolving: boolean
   persona: string
+  // The park's own channel: the batch is sent, and its run filed, there.
+  channel: string
 }
 export type ConfirmStatus = 'approve' | 'deny' | 'resolving'
 export function confirmStatus(e: QueuedConfirm | undefined): ConfirmStatus | undefined {
@@ -108,6 +119,17 @@ export function confirmStatus(e: QueuedConfirm | undefined): ConfirmStatus | und
 function dropResolving(q: Record<string, QueuedConfirm>): Record<string, QueuedConfirm> {
   if (!Object.values(q).some((e) => e.resolving)) return q
   return Object.fromEntries(Object.entries(q).filter(([, e]) => !e.resolving))
+}
+// A batch the engine refused before touching (409 busy, stale): nothing was
+// sent, so its answers go back to queued and are sent again when the
+// conversation is free — not dropped as if they had been settled.
+function rearm(tokens: string[]) {
+  return (q: Record<string, QueuedConfirm>): Record<string, QueuedConfirm> => {
+    if (!tokens.some((t) => q[t]?.resolving)) return q
+    const next = { ...q }
+    for (const t of tokens) if (next[t]) next[t] = { ...next[t], resolving: false }
+    return next
+  }
 }
 
 const EMPTY_STREAM: StreamState = {
@@ -255,6 +277,11 @@ export function usePortalStore() {
   // the turn that proposed it is saved), then sent together as one batch.
   const [confirmQueue, setConfirmQueue] = useState<Record<string, QueuedConfirm>>({})
   const confirmQueueRef = useRef(confirmQueue)
+  // True from a Stop until its cancel and re-syncs finish: a flush in that
+  // window would race the dying run (409, then its [DONE] settling nothing)
+  // and cut short the stop's own duplicate-row check and draft restore.
+  const [cancelling, setCancelling] = useState(false)
+  const cancellingRef = useRef(false)
   useEffect(() => {
     confirmQueueRef.current = confirmQueue
   }, [confirmQueue])
@@ -845,14 +872,14 @@ export function usePortalStore() {
   )
 
   // Shared SSE handler set for any turn-producing stream (`/v1/chat/completions`
-  // and the `/confirm` resume — same wire protocol). The wire's `derpr-confirm`
-  // frame is ignored (in stream.ts): a parked write surfaces as the trailing
-  // ephemeral chunk after the authoritative `/transcript` re-sync (which the
-  // engine also re-emits), so we let the re-sync show it.
-  // This means a CHAINED confirm (approve → another parked write) re-appears as
-  // a new ephemeral chunk with a fresh token, and the approve/deny bar re-arms.
+  // and the `/confirm` resume — same wire protocol). A `derpr-confirm` frame
+  // puts the proposed write's approve/deny bar on the live row at once
+  // (DP-528); after [DONE] the `/transcript` re-sync owns it as a trailing
+  // ephemeral chunk, and the live bar is hidden once that chunk is on screen.
+  // A CHAINED confirm (approve → another parked write) arrives the same way
+  // with a fresh token. `confirmBatch` is the tokens a `/confirm` stream sent.
   const buildHandlers = useCallback(
-    (personaName: string, channel: string, sentText?: string) => ({
+    (personaName: string, channel: string, sentText?: string, confirmBatch?: string[]) => ({
       onToken: (delta: string) => {
         tokenBufRef.current += delta
         scheduleFlush()
@@ -886,12 +913,24 @@ export function usePortalStore() {
           ],
         }))
       },
-      onConfirm: (f: ConfirmFrame) =>
+      onConfirm: (f: ConfirmFrame) => {
+        // The step's thinking and prose belong to this proposal, as they do to
+        // a tool card (onToolStart) — left in place, the next card claims them.
+        flushTokens()
         setStream((s) =>
           s.confirms.some((c) => c.token === f.token)
             ? s // a re-attach replays from frame 0
-            : { ...s, confirms: [...s.confirms, f] },
-        ),
+            : {
+                ...s,
+                reasoning: null,
+                text: '',
+                confirms: [
+                  ...s.confirms,
+                  { ...f, at: s.tools.length, reasoning: s.reasoning, prose: s.text.trim() || null },
+                ],
+              },
+        )
+      },
       onToolResult: (f: ToolResultFrame) =>
         setStream((s) => ({
           ...s,
@@ -913,6 +952,7 @@ export function usePortalStore() {
       // text back and show the running turn instead.
       onBusy: () => {
         if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
+        if (confirmBatch) setConfirmQueue(rearm(confirmBatch))
         void resumeRef.current(personaName, channel, 'busy')
       },
       onReplayGone: () => {
@@ -955,7 +995,13 @@ export function usePortalStore() {
         const stale =
           personaName !== activePersonaRef.current ||
           channel !== activeChannelRef.current
-        if (!stale) {
+        if (stale) {
+          // DP-528: a batch answered from this view for another channel's
+          // parks — re-sync what is on screen so its answered bars go away.
+          if (confirmBatch && personaName === activePersonaRef.current)
+            void refreshTranscript(personaName, activeChannelRef.current, () =>
+              personaName === activePersonaRef.current)
+        } else {
           // A first turn on a brand-new channel materializes it in the DB;
           // reload the channel list so it appears in the rail. Skipped when the
           // channel is already in the rail — the list only changes when a new
@@ -994,7 +1040,7 @@ export function usePortalStore() {
         abortRef.current = null
         resetTokenBuf()
         setStream({ ...EMPTY_STREAM })
-        setConfirmQueue(dropResolving)
+        setConfirmQueue(confirmBatch ? rearm(confirmBatch) : dropResolving)
         setBanner(STALE_BANNER)
         if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
         void refreshTranscript(personaName, channel, () =>
@@ -1212,12 +1258,17 @@ export function usePortalStore() {
     (token: string, approved: boolean) => {
       if (!persona) return
       const name = persona.name
+      // A transcript bar may be another channel's park; a live bar is always
+      // the viewed channel's (one stream, in this view).
+      const channel =
+        chunksRef.current.find((c) => c.ephemeral_chunk_id === token)?.channel ||
+        activeChannelRef.current
       setConfirmQueue((q) => {
         const cur = q[token]
         if (cur?.resolving) return q
         const next = { ...q }
         if (cur && cur.approved === approved) delete next[token]
-        else next[token] = { approved, resolving: false, persona: name }
+        else next[token] = { approved, resolving: false, persona: name, channel }
         return next
       })
     },
@@ -1225,21 +1276,24 @@ export function usePortalStore() {
   )
 
   const flushConfirms = useCallback(() => {
-    if (!persona || streamingRef.current) return
-    const queued = Object.entries(confirmQueueRef.current).filter(([, e]) => !e.resolving)
+    if (!persona || streamingRef.current || cancellingRef.current) return
+    // Another persona's answers wait, kept, until that persona is viewed again
+    // — its tokens are another conversation's and cannot be sent from here.
+    const queued = Object.entries(confirmQueueRef.current).filter(
+      ([, e]) => !e.resolving && e.persona === persona.name,
+    )
     if (!queued.length) return
-    // A switch of persona leaves the old one's answers unsendable from here
-    // (its tokens are another conversation's): drop them, as a reload would.
-    const mine = queued.filter(([, e]) => e.persona === persona.name)
+    // One batch per channel: the continuation answers in the parks' channel,
+    // so that is where the run is filed and re-synced. The viewed one first.
+    const viewed = activeChannelRef.current
+    const channel = queued.some(([, e]) => e.channel === viewed) ? viewed : queued[0][1].channel
+    const mine = queued.filter(([, e]) => e.channel === channel)
+    const tokens = mine.map(([t]) => t)
     setConfirmQueue((q) => {
-      const next: Record<string, QueuedConfirm> = {}
-      for (const [t, e] of Object.entries(q)) {
-        if (e.persona !== persona.name) continue
-        next[t] = { ...e, resolving: true }
-      }
+      const next = { ...q }
+      for (const t of tokens) if (next[t]) next[t] = { ...next[t], resolving: true }
       return next
     })
-    if (!mine.length) return
     setBanner(null)
     idFrameRef.current = null
     streamingRef.current = true
@@ -1251,19 +1305,22 @@ export function usePortalStore() {
     abortRef.current = streamConfirm(
       persona.name,
       mine.map(([token, e]) => ({ token, approved: e.approved })),
-      buildHandlers(persona.name, activeChannelRef.current),
-      activeChannelRef.current,
+      buildHandlers(persona.name, channel, undefined, tokens),
+      channel,
       runId,
     )
   }, [persona, buildHandlers, resetTokenBuf])
 
-  // Send queued answers whenever no stream is running: straight away for a
-  // click on an idle page, else as soon as the running reply ends.
+  // Send queued answers whenever the conversation is free: straight away for
+  // a click on an idle page, else as soon as the running reply ends. Not over
+  // a failed or stopped reply — the flush would replace that row before the
+  // operator read it; they go once it is dismissed or the next reply ends.
+  const held = stream.errored || stream.aborted
   useEffect(() => {
-    if (!stream.active) flushConfirms()
-  }, [confirmQueue, stream.active, flushConfirms])
+    if (!stream.active && !held && !cancelling) flushConfirms()
+  }, [confirmQueue, stream.active, held, cancelling, flushConfirms])
 
-  const abortTurn = useCallback(async () => {
+  const stopTurn = useCallback(async () => {
     // DP-487: a turn outlives its connection, so dropping the SSE no longer
     // stops it — POST /v1/chat/cancel does, below. The SSE is still closed
     // here so no more frames land on the stopped row.
@@ -1341,6 +1398,16 @@ export function usePortalStore() {
     // (or the engine is unreachable). Hand the text back rather than lose it.
     if (sentText) setRestoredDraft((d) => ({ text: sentText, seq: (d?.seq ?? 0) + 1 }))
   }, [persona, flushTokens, resetTokenBuf, refreshTranscript])
+  const abortTurn = useCallback(async () => {
+    cancellingRef.current = true
+    setCancelling(true)
+    try {
+      await stopTurn()
+    } finally {
+      cancellingRef.current = false
+      setCancelling(false)
+    }
+  }, [stopTurn])
 
   // Dismiss re-syncs: an errored turn skips the onDone re-fetch, so the user
   // turn (persisted before generation) is only in the DB — surface it.

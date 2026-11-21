@@ -1229,6 +1229,15 @@ class KoboldEngineAdapter:
             # outlives the connection too. The park is keyed (user, persona);
             # `channel` only files the run where the portal will look for it.
             channel = body.get("channel") or "web_ui"
+            # DP-528: parks are listed persona-wide, so the bar clicked may be
+            # another channel's. The continuation answers in the park's own
+            # channel (the last one claimed); file the run there too, or
+            # /active_turn in that channel cannot find it.
+            for token, _ in reversed(decisions):
+                park = self._confirmations.pending.get(token)
+                if park is not None and park.channel:
+                    channel = park.channel
+                    break
             turn_key = (name, "portal", channel, None)
             running = self._turn_runs.active(turn_key)
             if running is not None:
@@ -1365,6 +1374,9 @@ class KoboldEngineAdapter:
                 {
                     "ephemeral_chunk_id": park.token,
                     "content": park.confirmation_text,
+                    # DP-528: where its answer is filed, which can differ
+                    # from the channel being viewed.
+                    "channel": park.channel,
                     "tool_context": None,
                 }
                 for park in self._confirmations.list_for(user_identifier, persona)

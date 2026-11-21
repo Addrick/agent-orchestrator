@@ -85,7 +85,9 @@ class _ContinuationState:
     batch: List[Decision]
 
 
-def _render_resolution_nudge(batch: List[Decision]) -> str:
+def _render_resolution_nudge(
+        batch: List[Decision], unapplied: Sequence[str] = (),
+) -> str:
     """The synthetic user turn that opens a continuation.
 
     Exists for a wire-level reason, not a prompt-engineering one: without it the
@@ -146,6 +148,11 @@ def _render_resolution_nudge(batch: List[Decision]) -> str:
         lines.append("(an earlier reply about this was cut off before it finished; "
                      "anything it already did is in the history above, so do not do "
                      "it again)")
+    for reason in unapplied:
+        # DP-528: a click in the same batch that could not be applied (it
+        # expired while the reply streamed). Without this line the reply covers
+        # only the rest, and the operator reads the silence as "done".
+        lines.append(f"- NOT applied: {reason}")
     return (
         header + "\n"
         + "\n".join(lines)
@@ -1226,8 +1233,11 @@ class ChatSystem:
             )
             return
 
+        # Some refused, some claimed: the continuation reports the refusals
+        # alongside the outcomes, so a click that was dropped is said out loud.
         async with aclosing(self._stream_settle_batch(
-                claimed, lambda d: self.confirmations.restore(d.park))) as agen:
+                claimed, lambda d: self.confirmations.restore(d.park),
+                unapplied=list(dict.fromkeys(refusals)))) as agen:
             async for ev in agen:
                 yield ev
 
@@ -1268,7 +1278,9 @@ class ChatSystem:
                 parked, PARK_STATUS_EXPIRED,
                 "Operator answered after the TTL had passed",
             )
-            return None, "That action expired before it was reviewed."
+            name = parked.write_call.get("name")
+            what = f"That action ({name})" if name else "That action"
+            return None, f"{what} expired before it was reviewed."
 
         if parked.persona_name not in self.personas:
             # Same restore as the wrong-conversation branch above: `take()` has
@@ -1401,6 +1413,7 @@ class ChatSystem:
 
     async def _stream_settle_batch(
             self, decisions: List[Decision], put_back: Callable[[Decision], None],
+            *, unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Settle `decisions` of one conversation as ONE batch: every one but
         the last is queued before the drain that settles the last takes them
@@ -1413,9 +1426,9 @@ class ChatSystem:
         for d in decisions:
             if d.park.key != key:
                 put_back(d)
-        for d in group[:-1]:
-            self.confirmations.enqueue(d)
-        async with aclosing(self._stream_settle(group[-1])) as agen:
+        async with aclosing(self._stream_settle(
+                group[-1], siblings=group[:-1], put_back=put_back,
+                unapplied=unapplied)) as agen:
             async for ev in agen:
                 yield ev
 
@@ -1474,7 +1487,9 @@ class ChatSystem:
         return parked
 
     async def _stream_settle(
-            self, decision: Decision,
+            self, decision: Decision, *, siblings: Sequence[Decision] = (),
+            put_back: Optional[Callable[[Decision], None]] = None,
+            unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """Fold, apply and continue — the half of a resolve that has no kind.
 
@@ -1493,10 +1508,13 @@ class ChatSystem:
         """
         parked = decision.park
         key = parked.key
-        self.confirmations.enqueue(decision)
+        mine = [*siblings, decision]
+        for d in mine:
+            self.confirmations.enqueue(d)
 
         applied: List[Decision] = []
-        async with self.confirmations.lock_for(key):
+        lock = await self._acquire_or_put_back(key, mine, put_back)
+        try:
             batch = self.confirmations.drain(key)
             if not batch:
                 # A continuation that held the lock before us already folded
@@ -1533,9 +1551,32 @@ class ChatSystem:
                 )
                 return
 
-            async with aclosing(self._run_continuation(parked, applied)) as agen:
+            async with aclosing(self._run_continuation(
+                    parked, applied, unapplied=unapplied)) as agen:
                 async for ev in agen:
                     yield ev
+        finally:
+            lock.release()
+
+    async def _acquire_or_put_back(
+            self, key: ConversationKey, mine: Sequence[Decision],
+            put_back: Optional[Callable[[Decision], None]],
+    ) -> asyncio.Lock:
+        """Take `key`'s settle lock for the decisions `mine` just queued.
+
+        Stopped while another settle holds it, whatever of `mine` that settle
+        has not drained would sit in the queue with its park already taken,
+        until some later settle in this conversation applied it unannounced —
+        or a restart lost it. Those are put back as they were (DP-528)."""
+        lock = self.confirmations.lock_for(key)
+        try:
+            await lock.acquire()
+        except BaseException:
+            restore = put_back or (lambda d: self.confirmations.restore(d.park))
+            for d in self.confirmations.unqueue(key, mine):
+                restore(d)
+            raise
+        return lock
 
     async def _apply_folded(self, key: ConversationKey, batch: List[Decision],
                             applied: List[Decision], failed: List[str]) -> None:
@@ -1582,6 +1623,7 @@ class ChatSystem:
 
     async def _run_continuation(
             self, parked: ParkedWrite, applied: List[Decision],
+            *, unapplied: Sequence[str] = (),
     ) -> AsyncGenerator[GenerationEvent, None]:
         """The ONE continuation turn reporting `applied`, in `parked`'s
         conversation.
@@ -1607,7 +1649,7 @@ class ChatSystem:
                 persona_name=parked.persona_name,
                 user_identifier=parked.user_identifier,
                 channel=parked.channel,
-                message=_render_resolution_nudge(applied),
+                message=_render_resolution_nudge(applied, unapplied),
                 server_id=parked.server_id,
                 continuation=_ContinuationState(batch=applied),
             )) as agen:
