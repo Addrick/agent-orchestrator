@@ -1,0 +1,22 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": ["src", "services", "tests", "scripts"],
+  "exclude": ["**/__pycache__", ".venv", "worktrees", "memory", "0"],
+  "typeCheckingMode": "basic",
+  "reportMissingModuleSource": "none",
+  "executionEnvironments": [
+    {
+      "root": "tests",
+      "extraPaths": ["."],
+      "reportArgumentType": "none",
+      "reportAttributeAccessIssue": "none",
+      "reportOptionalSubscript": "none",
+      "reportOptionalMemberAccess": "none",
+      "reportOperatorIssue": "none",
+      "reportCallIssue": "none",
+      "reportAbstractUsage": "none"
+    },
+    { "root": "." }
+  ]
+}
