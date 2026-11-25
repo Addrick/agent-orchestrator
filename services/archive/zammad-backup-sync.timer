@@ -1,0 +1,10 @@
+[Unit]
+Description=Copy prod Zammad backups to the r9700 HDD (DP-527)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

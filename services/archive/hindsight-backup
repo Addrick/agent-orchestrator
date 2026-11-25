@@ -1,0 +1,106 @@
+#!/bin/bash
+# Daily verified pg_dump of hindsight's embedded postgres onto the archive HDD.
+#
+# DP-527: runs on host derpr, which holds CT100 since 2026-10-21. Until then it ran
+# on r9700, where `pct exec 100` now reaches only the stopped rollback copy, so
+# every run after the move failed and the last good dump was 2026-10-18.
+#
+# Ported from the Windows-era backup.ps1 that ran until 2026-06-14 and died
+# silently at the 2026-06-23 Proxmox cutover -- it was PowerShell on a host that
+# no longer boots, so the job did not fail, it just ceased to exist. 68 days
+# passed before anyone noticed.
+#
+# The two-tier verification is the part worth keeping. pg_dump exiting 0 does
+# not mean the dump restores, so every dump is proved readable (TOC scan) and
+# parseable (schema-only restore) before it is allowed to count as a backup.
+#
+# INVARIANT: a failed or unverified run NEVER prunes. A prune that runs on
+# failure turns a run of bad nights into silent data loss while every log line
+# still says the job completed.
+
+set -uo pipefail
+. /usr/local/lib/derpr-archive/archive-lib.sh
+
+DIR="${DIR:-$ARCHIVE/hindsight-backups}"
+CT="${CT:-100}"
+CONTAINER="${CONTAINER:-hindsight-memory}"
+PGBIN="${PGBIN:-/home/hindsight/.pg0/installation/18.1.0/bin}"
+PGDB="${PGDB:-hindsight}"
+PGROLE="${PGROLE:-hindsight}"
+PGPASS="${PGPASS:-hindsight}"
+KEEP="${KEEP:-14}"
+INSIDE=/tmp/dump.tmp
+
+DATE="$(date +%Y-%m-%d_%H%M%S)"
+OUT="$DIR/hindsight-$DATE.dump"
+LOG="$DIR/backup.log"
+
+dex() { pct exec "$CT" -- docker exec "$CONTAINER" "$@"; }
+drop_temp() { dex rm -f "$INSIDE" >/dev/null 2>&1 || true; }
+
+# Mounted and has room, or exit (archive-lib.sh). sda1 behind the NFS export is a
+# real partition, so df is the truth there. (On /srv/models it is NOT: that is a
+# thin LV and df cannot see pool exhaustion -- see the 2026-08-21 incident.)
+require_archive
+mkdir -p "$DIR" || exit 1
+
+log "START $OUT"
+
+if ! dex sh -c "PGPASSWORD=$PGPASS $PGBIN/pg_dump -h 127.0.0.1 -U $PGROLE -d $PGDB -Fc -f $INSIDE"; then
+    log "FAIL: pg_dump failed"
+    drop_temp
+    exit 1
+fi
+
+# Keep a dump that fails verification: it is the only evidence of what went
+# wrong, and a suspect backup beats no backup. It is named so it can never be
+# mistaken for a good one, and it does not count toward KEEP.
+keep_unverified() {
+    local reason="$1" dest="$OUT.UNVERIFIED-$reason"
+    if pct exec "$CT" -- docker cp "$CONTAINER:$INSIDE" "/tmp/dump.$DATE" >/dev/null 2>&1 \
+       && pct pull "$CT" "/tmp/dump.$DATE" "$dest" >/dev/null 2>&1; then
+        log "FAIL: $reason (kept as $(basename "$dest"), prune skipped)"
+    else
+        log "FAIL: $reason (could not preserve the dump, prune skipped)"
+    fi
+    pct exec "$CT" -- rm -f "/tmp/dump.$DATE" >/dev/null 2>&1 || true
+    drop_temp
+    exit 1
+}
+
+# Tier 1 -- can the archive's table of contents be read at all?
+dex "$PGBIN/pg_restore" --list "$INSIDE" >/dev/null 2>&1 || keep_unverified tocfail
+
+# Tier 2 -- does the schema actually parse and replay?
+dex sh -c "$PGBIN/pg_restore --schema-only -f /dev/null $INSIDE" >/dev/null 2>&1 || keep_unverified schemafail
+
+# Copy out. docker cp lands it in CT100, pct pull brings it to the node.
+if ! pct exec "$CT" -- docker cp "$CONTAINER:$INSIDE" "/tmp/dump.$DATE" >/dev/null 2>&1; then
+    log "FAIL: docker cp out of container failed"
+    drop_temp
+    exit 1
+fi
+if ! pct pull "$CT" "/tmp/dump.$DATE" "$OUT" >/dev/null 2>&1; then
+    log "FAIL: pct pull from CT$CT failed"
+    pct exec "$CT" -- rm -f "/tmp/dump.$DATE" >/dev/null 2>&1 || true
+    rm -f "$OUT"
+    drop_temp
+    exit 1
+fi
+pct exec "$CT" -- rm -f "/tmp/dump.$DATE" >/dev/null 2>&1 || true
+drop_temp
+
+size=$(stat -c %s "$OUT" 2>/dev/null || echo 0)
+if [ "$size" -lt 1048576 ]; then
+    log "FAIL: $OUT is only ${size} bytes -- refusing to treat as a backup, prune skipped"
+    mv -f "$OUT" "$OUT.UNVERIFIED-truncated" 2>/dev/null
+    exit 1
+fi
+log "OK $OUT size=$size (tier1+2 verified)"
+
+# Only now, having produced one proven-good dump, is it safe to remove old ones.
+ls -t "$DIR"/hindsight-*.dump 2>/dev/null | tail -n +$((KEEP + 1)) | while read -r old; do
+    rm -f -- "$old" && log "PRUNED $(basename "$old")"
+done
+
+exit 0

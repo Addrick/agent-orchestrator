@@ -1,0 +1,67 @@
+#!/bin/bash
+# DP-527: copy CT100's docker logs to the archive HDD, every 6 h.
+#
+# CT100's dockerd rotates each container at 4 x 25 MB (daemon.json), so this is
+# the long-term copy. Each run takes the window [last good run, now) from every
+# container, running or exited, one zstd file per container per run:
+#   $ARCHIVE/docker-logs/ct100/YYYY/MM/DD/<container>-<HHMM>Z.log.zst
+#
+# INVARIANT: the window only advances, and old files are only pruned, after a run
+# in which every container succeeded. A failed run is retried from the same start
+# next time, so a failure can duplicate lines but never leave a gap.
+#
+# Lost by design: lines a container writes after the last run and before it is
+# removed (a compose recreate). Rotation alone loses nothing a run could reach:
+# 100 MB per container is days of output for the noisiest one here.
+
+set -uo pipefail
+. /usr/local/lib/derpr-archive/archive-lib.sh
+
+CT="${CT:-100}"
+DIR="$ARCHIVE/docker-logs/ct$CT"
+STATE="${STATE:-/var/lib/derpr-archive/docker-logs-ct$CT.until}"
+KEEP_DAYS="${KEEP_DAYS:-365}"
+LOG="$DIR/archive.log"
+
+require_archive
+mkdir -p "$DIR" "$(dirname "$STATE")" || exit 1
+
+until_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+since_ts=$(cat "$STATE" 2>/dev/null || date -u -d '-6 hours' +%Y-%m-%dT%H:%M:%SZ)
+out="$DIR/$(date -u -d "$until_ts" +%Y/%m/%d)"
+stamp=$(date -u -d "$until_ts" +%H%MZ)
+mkdir -p "$out" || exit 1
+
+if ! names=$(pct exec "$CT" -- docker ps -a --format '{{.Names}}'); then
+    log "FAIL: could not list containers in CT$CT"
+    exit 1
+fi
+
+failed=0 kept=0 bytes=0
+for name in $names; do
+    f="$out/$name-$stamp.log.zst"
+    # 2>&1 inside the CT: docker logs replays the container's stderr on its own stderr.
+    if ! pct exec "$CT" -- sh -c 'docker logs --timestamps --since "$1" --until "$2" "$3" 2>&1' \
+            _ "$since_ts" "$until_ts" "$name" | zstd -q -c >"$f.part"; then
+        log "FAIL: $name"
+        rm -f "$f.part"
+        failed=1
+        continue
+    fi
+    if [ "$(zstd -dc "$f.part" | head -c1 | wc -c)" -eq 0 ]; then
+        rm -f "$f.part"          # nothing logged in the window
+        continue
+    fi
+    mv -f "$f.part" "$f" && kept=$((kept + 1)) && bytes=$((bytes + $(stat -c %s "$f")))
+done
+
+if [ "$failed" -ne 0 ]; then
+    log "FAIL: window $since_ts..$until_ts incomplete; window not advanced, prune skipped"
+    exit 1
+fi
+echo "$until_ts" >"$STATE"
+log "OK $since_ts..$until_ts files=$kept bytes=$bytes"
+
+find "$DIR" -name '*.log.zst' -mtime +"$KEEP_DAYS" -print -delete | sed 's/^/PRUNED /' >>"$LOG"
+find "$DIR" -mindepth 1 -type d -empty -delete
+exit 0

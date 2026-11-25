@@ -1,0 +1,51 @@
+#!/bin/bash
+# DP-527: copy prod Zammad's own nightly backups off CT100 to the archive HDD.
+#
+# The zammad-backup container writes <stamp>_zammad_db.psql.gz and
+# <stamp>_zammad_files.tar.gz into a volume on CT100's rootfs and keeps
+# HOLD_DAYS=10 there. This copies each new file once and keeps KEEP_DAYS on the HDD.
+# vzdump also has the volume, but only as part of a 25 GB CT image.
+#
+# A file is copied as .part and renamed, so a half copy is never mistaken for a
+# backup. Prune only after a run with no failures.
+
+set -uo pipefail
+. /usr/local/lib/derpr-archive/archive-lib.sh
+
+CT="${CT:-100}"
+VOLUME="${VOLUME:-zammad-docker-compose_zammad-backup}"
+DIR="$ARCHIVE/zammad-backups/prod"
+KEEP_DAYS="${KEEP_DAYS:-60}"
+LOG="$DIR/sync.log"
+
+require_archive
+mkdir -p "$DIR" || exit 1
+
+if ! src=$(pct exec "$CT" -- docker volume inspect -f '{{.Mountpoint}}' "$VOLUME"); then
+    log "FAIL: volume $VOLUME not found in CT$CT"
+    exit 1
+fi
+if ! files=$(pct exec "$CT" -- sh -c 'cd "$1" && ls -1 -- *_zammad_* 2>/dev/null' _ "$src"); then
+    log "FAIL: no backups in $VOLUME"
+    exit 1
+fi
+
+failed=0 copied=0
+for f in $files; do
+    [ -e "$DIR/$f" ] && continue
+    if pct pull "$CT" "$src/$f" "$DIR/$f.part" && [ -s "$DIR/$f.part" ]; then
+        mv -f "$DIR/$f.part" "$DIR/$f" && copied=$((copied + 1))
+    else
+        log "FAIL: $f"
+        rm -f "$DIR/$f.part"
+        failed=1
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    log "FAIL: copied=$copied with failures; prune skipped"
+    exit 1
+fi
+log "OK copied=$copied"
+find "$DIR" -name '*_zammad_*' -mtime +"$KEEP_DAYS" -print -delete | sed 's/^/PRUNED /' >>"$LOG"
+exit 0
